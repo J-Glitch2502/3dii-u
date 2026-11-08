@@ -1,0 +1,1 @@
+../profiles/acnl-welcome-amiibo.txt
