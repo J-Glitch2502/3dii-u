@@ -1,0 +1,29 @@
+// The in-game menu (Esc, the gamepad's Home button or Select + Start, the touch controls' menu button): saves,
+// clock, graphics, speed and audio settings. It pauses the game while open and is drawn over the last frame
+// (runtime/menu.mm).
+#pragma once
+#include <SDL3/SDL.h>
+
+namespace menu {
+void init(SDL_Window *window, SDL_Renderer *renderer);
+bool is_open();
+bool keyboard_open();  // the game's software keyboard is up: the Mac's keyboard types into it (swkbd.h)
+void toggle();
+bool handle_event(const SDL_Event &ev);  // true if the menu used the event (the game does not see it)
+void update();                           // once per host frame: gamepad stick navigation
+void draw();                             // after the game screens, before SDL_RenderPresent
+void set_fps(float fps);                 // the game's frame rate, for the counter
+}  // namespace menu
+
+// frontend.cpp: what the menu changes
+void frontend_set_layout(int layout);
+int frontend_layout_count();
+const char *frontend_layout_name(int layout);
+void frontend_set_fullscreen(bool on);
+bool frontend_typing();  // the game's own keyboard is up and the host keyboard types into it (profile "keyboard")
+void frontend_set_split(bool on);  // separate windows, one per screen
+void frontend_set_scale_mode(int mode);  // 0 auto, 1-4
+int frontend_current_scale();            // the internal resolution in use (0 without Metal)
+[[noreturn]] void frontend_restart();
+[[noreturn]] void frontend_choose_game();  // back to the game list (a multi-game app)
+[[noreturn]] void frontend_quit();
