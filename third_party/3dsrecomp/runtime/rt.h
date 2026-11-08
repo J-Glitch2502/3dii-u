@@ -21,16 +21,31 @@ extern int g_verbose;
 extern u64 g_frame;  // VBlanks since boot (for logs)
 #define VLOG(...) do { if (g_verbose) rt_log(__VA_ARGS__); } while (0)
 
+#ifdef __WIIU__
+#define EXEFS_PREFIX "/exefs_"  // the title's content folder is flat
+#else
+#define EXEFS_PREFIX "/exefs/"
+#endif
+
 // ---- guest memory
+#ifdef __BIG_ENDIAN__  // guest memory and the game's files are little-endian
+inline u16 le16(u16 v) { return __builtin_bswap16(v); }
+inline u32 le32(u32 v) { return __builtin_bswap32(v); }
+inline u64 le64(u64 v) { return __builtin_bswap64(v); }
+#else
+inline u16 le16(u16 v) { return v; }
+inline u32 le32(u32 v) { return v; }
+inline u64 le64(u64 v) { return v; }
+#endif
 inline u8 *gptr(u32 a) { return g_mem + a; }
 inline u8 r8(u32 a) { return g_mem[a]; }
-inline u16 r16(u32 a) { u16 v; memcpy(&v, g_mem + a, 2); return v; }
-inline u32 r32(u32 a) { u32 v; memcpy(&v, g_mem + a, 4); return v; }
-inline u64 r64(u32 a) { u64 v; memcpy(&v, g_mem + a, 8); return v; }
+inline u16 r16(u32 a) { u16 v; memcpy(&v, g_mem + a, 2); return le16(v); }
+inline u32 r32(u32 a) { u32 v; memcpy(&v, g_mem + a, 4); return le32(v); }
+inline u64 r64(u32 a) { u64 v; memcpy(&v, g_mem + a, 8); return le64(v); }
 inline void w8(u32 a, u8 v) { g_mem[a] = v; }
-inline void w16(u32 a, u16 v) { memcpy(g_mem + a, &v, 2); }
-inline void w32(u32 a, u32 v) { memcpy(g_mem + a, &v, 4); }
-inline void w64(u32 a, u64 v) { memcpy(g_mem + a, &v, 8); }
+inline void w16(u32 a, u16 v) { v = le16(v); memcpy(g_mem + a, &v, 2); }
+inline void w32(u32 a, u32 v) { v = le32(v); memcpy(g_mem + a, &v, 4); }
+inline void w64(u32 a, u64 v) { v = le64(v); memcpy(g_mem + a, &v, 8); }
 std::string read_cstr(u32 a, size_t max = 256);
 
 // Guest virtual memory layout (old 3DS application, kernel < 2.44)

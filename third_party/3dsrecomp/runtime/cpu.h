@@ -42,7 +42,7 @@ typedef struct {
 } GuestClass;
 
 // A CRO module's fixed slot: where ldr:ro puts its code so the recompiled code finds it (tools/recomp/cro.py)
-typedef struct {
+typedef struct GuestCro {  // named: gcc refuses a weak definition of an anonymous struct's type
     const char *name;
     u32 base, size;
 } GuestCro;

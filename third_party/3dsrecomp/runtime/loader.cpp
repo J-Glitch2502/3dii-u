@@ -44,7 +44,13 @@ void update_shared_page_time() {
     time_t now = time(nullptr) + (time_t)g_settings.clock_offset;  // the menu's Clock page
     struct tm lt;
     localtime_r(&now, &lt);
+#ifdef __WIIU__
+    s64 local = (s64)now;  // newlib's clock here is already the console's local time
+#elif defined(_WIN32)
+    s64 local = (s64)_mkgmtime(&lt);  // no tm_gmtoff here: local time taken as UTC comes to the same
+#else
     s64 local = (s64)now + lt.tm_gmtoff;
+#endif
     u64 ms = (u64)(local + 2208988800ll) * 1000ull;
     u32 counter = r32(sp);
     u32 which = (counter + 1) & 1;
@@ -127,11 +133,11 @@ void load_game(const std::string &dir) {
     g_game.dir = dir;
     auto ex = read_file(dir + "/exheader.bin");
     auto code = read_file(dir + "/code.bin");
-    auto rd = [&](size_t o) { u32 v; memcpy(&v, &ex[o], 4); return v; };
+    auto rd = [&](size_t o) { u32 v; memcpy(&v, &ex[o], 4); return le32(v); };
     g_game.title = std::string((const char *)&ex[0], strnlen((const char *)&ex[0], 8));
-    g_game.name = smdh_title(dir + "/exefs/icon.bin");
+    g_game.name = smdh_title(dir + EXEFS_PREFIX "icon.bin");
     if (g_game.name.empty()) g_game.name = g_game.title;
-    g_game.region = smdh_region(dir + "/exefs/icon.bin");
+    g_game.region = smdh_region(dir + EXEFS_PREFIX "icon.bin");
     g_game.text_addr = rd(0x10);
     g_game.text_size = rd(0x18);
     g_game.ro_addr = rd(0x20);
@@ -141,6 +147,7 @@ void load_game(const std::string &dir) {
     g_game.stack_size = rd(0x1C);
     g_game.bss_size = rd(0x3C);
     memcpy(&g_game.program_id, &ex[0x200], 8);
+    g_game.program_id = le64(g_game.program_id);
     g_game.priority = ex[0x20F];
     u32 base = g_game.text_addr;
     // code.bin is the three segments at their page-aligned offsets
