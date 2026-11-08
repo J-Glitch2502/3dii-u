@@ -8,20 +8,33 @@ namespace kernel {
 namespace {
 struct DspState {
     std::shared_ptr<Event> semaphore = make_event(ONESHOT, "DSP semaphore");
-    std::shared_ptr<Event> pipe_irq[3];   // per pipe channel (interrupt type 2)
+    std::shared_ptr<Event> pipe_irq[4];   // per pipe channel (interrupt type 2)
     std::shared_ptr<Event> other_irq[2];  // interrupt types 0/1
+    bool game_waits = false;              // the game has been seen waiting on the pipe event
+    u32 held = 0;                         // calls in a row that found the game still busy
 };
 DspState dsp;
 }  // namespace
 
-void dsp_tick() {
+bool dsp_tick() {
+    {
+        // Like the real DSP, don't start a frame until the game is done with the last one. Otherwise the status table gets rewritten while
+        // the game reads it: one channel of a stereo stream misses "buffer finished", the stream reloads a buffer still queued on that
+        // channel, and the game hangs walking the voice's list, now a loop. The limit is for a game that polls for a later frame instead.
+        Lock lk(kmutex);
+        auto &ev = dsp.pipe_irq[2];
+        if (ev && ev->waiters.empty() && dsp.game_waits && ++dsp.held < 1000) return false;
+        dsp.held = 0;
+        if (ev && !ev->waiters.empty()) dsp.game_waits = true;
+    }
     bool on = audio::tick();
-    if (!on) return;
+    if (!on) return true;
     Lock lk(kmutex);
     static int n;
     if (n++ == 100) VLOG("[dsp] tick: pipe event %s\n", dsp.pipe_irq[2] ? dsp.pipe_irq[2]->name.c_str() : "none");
     if (dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
     schedule_async();
+    return true;
 }
 
 struct Dsp : Service {
@@ -52,8 +65,8 @@ struct Dsp : Service {
             u32 ch = ipc[1], size = ipc[2], src = ipc[4];
             audio::pipe_write(ch, gptr(src), size);
             ipc.ok();
-            // a state change answers on the audio pipe
-            if (ch == 2 && dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
+            // a state change answers on the audio pipe, an AAC request on its own
+            if ((ch == 2 || ch == 3) && dsp.pipe_irq[ch]) dsp.pipe_irq[ch]->signal();
             break;
         }
         case 0x000E:    // ReadPipe(channel, peer, size)
@@ -89,7 +102,7 @@ struct Dsp : Service {
             u32 irq = ipc[1], ch = ipc[2];
             auto ev = get<Event>(ipc[4]);
             VLOG("[dsp] RegisterInterruptEvents irq=%u ch=%u ev=%p\n", irq, ch, (void *)ev.get());
-            if (irq == 2 && ch < 3) dsp.pipe_irq[ch] = ev;
+            if (irq == 2 && ch < 4) dsp.pipe_irq[ch] = ev;
             else if (irq < 2) dsp.other_irq[irq] = ev;
             ipc.ok();
             break;

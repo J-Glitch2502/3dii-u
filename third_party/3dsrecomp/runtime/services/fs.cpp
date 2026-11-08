@@ -21,6 +21,54 @@ void save_written(const std::string &path);  // (runtime/stacks.h)
 
 namespace fsys = std::filesystem;
 
+#ifdef __WIIU__
+namespace wiiu {
+void note(const char *fmt, ...);  // frontend_wiiu.cpp
+void fs_begin(u32 op);
+void fs_end();
+void romfs_begin();  // the game data's reads: a lock of their own (frontend_wiiu.cpp)
+void romfs_end();
+void direct_read_open(const char *path, int fd, u64 size);  // direct_read.cpp
+bool direct_read(void *dst, u32 len, u64 off);
+long save_write(int fd, const void *data, u32 len, u64 at);  // save_storage.cpp
+void save_resize(int fd, u64 size);
+void save_dirty();
+// the game's save files held in memory, written out by the card thread (save_storage.cpp)
+struct SaveFile;
+std::shared_ptr<SaveFile> save_file_open(const std::string &path, int fd);
+void save_file_close(SaveFile &f);
+long save_file_read(SaveFile &f, void *to, u32 len, u64 at);
+long save_file_write(SaveFile &f, const void *from, u32 len, u64 at);
+u64 save_file_size(SaveFile &f);
+void save_file_resize(SaveFile &f, u64 size);
+void save_settle(const std::string &prefix, bool forget);
+}
+using wiiu::save_write;
+using wiiu::save_resize;
+#define FS_NOTE(...) wiiu::note(__VA_ARGS__)
+#define SAVE_DIRTY() wiiu::save_dirty()
+#define SAVE_SETTLE(prefix, forget) wiiu::save_settle(prefix, forget)
+// a file operation of the game's: it takes its turn with the others, and a frozen game reports which one it's stuck in. Reads of the game's RomFS (0x0802, read
+// only, from the title's content) take turns only among themselves, so a save being written out or flushed (seconds, for Tomodachi Life) never holds up loading.
+struct FsIo {
+    const bool romfs;
+    explicit FsIo(u32 op) : romfs(op == 0x0802) { romfs ? wiiu::romfs_begin() : wiiu::fs_begin(op); }
+    ~FsIo() { romfs ? wiiu::romfs_end() : wiiu::fs_end(); }
+};
+#else
+#define FS_NOTE(...)
+#define SAVE_DIRTY()
+#define SAVE_SETTLE(prefix, forget)
+struct FsIo {
+    explicit FsIo(u32) {}
+};
+static long save_write(int fd, const void *data, u32 len, u64 at) { return pwrite(fd, data, len, (off_t)at); }
+static void save_resize(int fd, u64 size) {
+    if (ftruncate(fd, (off_t)size)) {
+    }
+}
+#endif
+
 namespace kernel {
 
 static u32 fs_err(u32 desc, u32 summary, u32 level = 25) { return (level << 27) | (summary << 21) | (17 << 10) | desc; }
@@ -51,6 +99,7 @@ void save_unlock() { g_save_mx.unlock(); }
 namespace kernel {
 // A change to the game's own save (savedata/, extdata/): cloud saves upload it a little later
 static void save_changed(const std::string &path) {
+    SAVE_DIRTY();
     static const std::string root = save_root() + "/";
     if (path.compare(0, root.size(), root)) return;
     stacks::save_written(path);  // (before the cloud copy is made: the stacks file goes with the save)
@@ -92,7 +141,7 @@ struct LowPath {
     u32 word(int i) const {
         u32 v = 0;
         if ((size_t)(4 * i + 4) <= data.size()) memcpy(&v, &data[4 * i], 4);
-        return v;
+        return le32(v);
     }
 };
 
@@ -125,6 +174,7 @@ struct Archive {
     u32 id;
     std::string host;  // host folder for directory-backed archives, or the RomFS image of a system archive
     bool romfs = false;
+    bool dlc = false;  // add-on content: host is the prefix of its contents' RomFS images, dlc_<content index>.romfs (builder/dumps.py)
 };
 
 // System archives (NCCH archive 0x2345678A) come from system_archives/<title id>.romfs, next to the game files
@@ -132,6 +182,10 @@ struct Archive {
 static std::string system_archive_path(u64 tid) {
     char name[64];
     snprintf(name, sizeof name, "%016llx.romfs", (unsigned long long)tid);
+    #ifdef __WIIU__
+    if (fsys::exists(g_game.dir + "/" + name)) return g_game.dir + "/" + name;
+    return "";  // the others are relative to the working directory, which on the console is the SD card
+#endif
     for (std::string dir : {g_game.dir + "/../system_archives/", g_game.dir + "/system_archives/", std::string("system_archives/")
 #ifdef RECOMP_SOURCE_DIR
                             , std::string(RECOMP_SOURCE_DIR "/system_archives/")
@@ -151,7 +205,7 @@ std::vector<u8> system_archive_file(u64 tid, const std::string &want) {
     for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) d.insert(d.end(), buf, buf + n);
     fclose(f);
     size_t base = d.size() >= 4 && !memcmp(d.data(), "IVFC", 4) ? 0x1000 : 0;  // level 3 image
-    auto u = [&](size_t o) { u32 v = 0; if (base + o + 4 <= d.size()) memcpy(&v, &d[base + o], 4); return v; };
+    auto u = [&](size_t o) { u32 v = 0; if (base + o + 4 <= d.size()) memcpy(&v, &d[base + o], 4); return le32(v); };
     u32 dmo = u(0x0C), fmo = u(0x1C), dato = u(0x24);
     auto name = [&](size_t o, u32 len) {
         std::string s;
@@ -198,7 +252,7 @@ static std::vector<RomfsExtra> romfs_extra;
 static void build_romfs_index() {
     std::vector<u8> hdr(0x28);
     if (pread(romfs_fd, hdr.data(), 0x28, 0) != 0x28) return;
-    auto u32at = [](const std::vector<u8> &b, size_t o) { u32 v; memcpy(&v, &b[o], 4); return v; };
+    auto u32at = [](const std::vector<u8> &b, size_t o) { u32 v; memcpy(&v, &b[o], 4); return le32(v); };
     u32 dmeta_off = u32at(hdr, 0x0C), dmeta_len = u32at(hdr, 0x10);
     u32 fmeta_off = u32at(hdr, 0x1C), fmeta_len = u32at(hdr, 0x20);
     u32 data_off = u32at(hdr, 0x24);
@@ -216,6 +270,8 @@ static void build_romfs_index() {
             u64 fo, fs;
             memcpy(&fo, &fm[file + 8], 8);
             memcpy(&fs, &fm[file + 16], 8);
+            fo = le64(fo);
+            fs = le64(fs);
             romfs_index.push_back({data_off + fo, fs, path + "/" + name(fm, file + 32, u32at(fm, file + 28))});
             file = u32at(fm, file + 4);
         }
@@ -305,6 +361,12 @@ static bool open_romfs() {
     fstat(fd, &st);
     romfs_size = (u64)st.st_size;
     romfs_fd = fd;
+#ifdef __WIIU__
+    {
+        FsIo io(0x0809);
+        wiiu::direct_read_open((g_game.dir + "/romfs.bin").c_str(), fd, romfs_size);
+    }
+#endif
     build_romfs_index();
     return true;
 }
@@ -368,15 +430,34 @@ static std::string archive_dir(u32 id, const LowPath &p) {
 // ---- file and directory sessions
 struct FileSession : Service {
     int fd = -1;
-    bool romfs = false;
+    bool romfs = false, written = false;
+    bool gamedata = false;  // read-only game data in a file of its own (an update's RomFS, DLC, system archives, ExeFS files): the RomFS's lock, never behind a save write-out
     u64 base = 0, size = 0;
     std::string path;
+#ifdef __WIIU__
+    std::shared_ptr<wiiu::SaveFile> held;  // a save file of the game's, in memory: no storage behind its reads and writes
+#endif
     FileSession() : Service("fs file") {}
     ~FileSession() override {
-        if (fd >= 0 && !romfs) close(fd);
+#ifdef __WIIU__
+        if (held) {
+            wiiu::save_file_close(*held);
+            if (written) SAVE_DIRTY();
+            return;
+        }
+#endif
+        if (fd >= 0 && !romfs) {
+            FsIo io(gamedata ? 0x0802 : 0x0808);
+            close(fd);
+            if (written) SAVE_DIRTY();  // a file's last changes may only go out as it closes
+        }
     }
     u64 file_size() {
         if (romfs) return size;
+#ifdef __WIIU__
+        if (held) return wiiu::save_file_size(*held);
+#endif
+        FsIo io(gamedata ? 0x0802 : 0x0804);
         struct stat st;
         fstat(fd, &st);
         return (u64)st.st_size;
@@ -388,9 +469,16 @@ struct FileSession : Service {
             u32 len = ipc[3];
             u32 dst = ipc[5];
             s64 n;
+            // Storage can take a long time to answer, and VBlanks and timers need the kernel lock meanwhile. Only the running thread gets here, and it
+            // keeps the CPU until it next enters the kernel, so nothing else in the guest can run into this file.
+            ipc.lk->unlock();
             if (romfs) {
+                FsIo io(0x0802);
                 log_romfs_read(base + off);
                 if (off >= size) n = 0;
+#ifdef __WIIU__
+                else if (wiiu::direct_read(gptr(dst), (u32)std::min<u64>(len, size - off), base + off)) n = (s64)std::min<u64>(len, size - off);
+#endif
                 else n = pread(romfs_fd, gptr(dst), (size_t)std::min<u64>(len, size - off), (off_t)(base + off));
                 for (auto &x : romfs_extra)
                     if (base + off >= x.off && base + off < x.off + x.size)
@@ -401,8 +489,16 @@ struct FileSession : Service {
                         if (p.at + i >= base + off && p.at + i < base + off + (u64)std::max<s64>(n, 0))
                             w8(dst + (u32)(p.at + i - base - off), p.bytes[i]);
             } else {
-                n = pread(fd, gptr(dst), len, (off_t)off);
+#ifdef __WIIU__
+                if (held) n = wiiu::save_file_read(*held, gptr(dst), len, off);
+                else
+#endif
+                {
+                    FsIo io(gamedata ? 0x0802 : 0x1802);
+                    n = pread(fd, gptr(dst), len, (off_t)off);
+                }
             }
+            ipc.lk->lock();
             if (n < 0) n = 0;
             if (g_verbose >= 2) LOG("[fs] read %s off %llx len %x -> %lld\n", romfs ? "romfs" : path.c_str(), (unsigned long long)off, len, (long long)n);
             ipc.ok(2, 2);
@@ -416,12 +512,27 @@ struct FileSession : Service {
             u64 off = (u64)ipc[1] | ((u64)ipc[2] << 32);
             u32 len = ipc[3];
             u32 src = ipc[6];
+            ipc.lk->unlock();  // as for a read
+            FS_NOTE("save: writing %x bytes to %s", len, path.c_str());
             save_lock();
-            s64 n = romfs ? 0 : pwrite(fd, gptr(src), len, (off_t)off);
+            s64 n;
+#ifdef __WIIU__
+            if (held) n = wiiu::save_file_write(*held, gptr(src), len, off);
+            else
+#endif
+            {
+                FsIo io(0x0803);
+                n = romfs ? 0 : save_write(fd, gptr(src), len, off);
+            }
             save_unlock();
+            FS_NOTE("save: written, %d", (int)n);
+            ipc.lk->lock();
             if (n < 0) n = 0;
             if (g_verbose) LOG("[fs] write %s off %llx len %x\n", path.c_str(), (unsigned long long)off, len);
-            if (!romfs && n > 0) save_changed(path);
+            if (!romfs && n > 0) {
+                written = true;
+                save_changed(path);
+            }
             ipc.ok(2, 2);
             ipc.set(2, (u32)n);
             ipc.set(3, (len << 4) | 0xA);
@@ -435,9 +546,16 @@ struct FileSession : Service {
         case 0x0805:  // SetSize
             if (!romfs) {
                 save_lock();
-                if (ftruncate(fd, (off_t)((u64)ipc[1] | ((u64)ipc[2] << 32)))) {
+#ifdef __WIIU__
+                if (held) wiiu::save_file_resize(*held, (u64)ipc[1] | ((u64)ipc[2] << 32));
+                else
+#endif
+                {
+                    FsIo io(0x0805);
+                    save_resize(fd, (u64)ipc[1] | ((u64)ipc[2] << 32));
                 }
                 save_unlock();
+                written = true;
                 save_changed(path);
             }
             ipc.ok();
@@ -471,6 +589,7 @@ struct DirSession : Service {
     size_t pos = 0;
     DirSession() : Service("fs dir") {}
     void handle(IPC &ipc) override {
+        FsIo io(0x2800);
         switch (ipc.cmd()) {
         case 0x0801: {  // Read(count, mapped buffer)
             u32 count = ipc[1];
@@ -491,6 +610,7 @@ struct DirSession : Service {
                 w64(a + 0x220, dir ? 0 : (u64)e.file_size());
                 n++;
             }
+            VLOG("[fs] directory read %u into %08x (buffer %x bytes): %u%s%s\n", count, dst, ipc[2] >> 4, n, n ? ", first " : "", n ? entries[pos - n].path().filename().string().c_str() : "");
             ipc.ok(2, 2);
             ipc.set(2, n);
             ipc.set(3, ((count * 0x228) << 4) | 0xC);
@@ -510,12 +630,70 @@ struct DirSession : Service {
 // Play Coin counter, which some games read (or fail) without creating it.
 static void create_gamecoin(const std::string &dir) {
     fsys::create_directories(dir);
-    struct { u32 magic; u16 coins, coins_today; u32 steps, last_steps; u16 year; u8 month, day; } gc{0x4F00, 10, 0, 0, 0, 2014, 1, 1};
+    struct { u32 magic; u16 coins, coins_today; u32 steps, last_steps; u16 year; u8 month, day; } gc{le32(0x4F00), le16(10), 0, 0, 0, le16(2014), 1, 1};
     if (FILE *f = fopen((dir + "/gamecoin.dat").c_str(), "wb")) {
         fwrite(&gc, sizeof gc, 1, f);
         fclose(f);
     }
     LOG("[fs] created shared extdata F000000B with gamecoin.dat (10 Play Coins)\n");
+}
+
+// Mii Maker's database (CFL_DB.dat, in the same extdata), with the console's own Miis put in, once a boot: games list them as Mii Maker's
+// (Tomodachi Life's import, Mario Kart 7's drivers). Laid out as the games' own Mii library writes it when it's missing, which this
+// matches byte for byte: "CFOG", 100 Mii slots of 0x5C at 0x8, "CFHE" with 3000 empty hidden-Mii entries, a CRC-16 of all of it at 0xC81E
+// (big-endian), then "CFRA" with its own CRC at 0xE4BE. A Mii already there with the same id and console is replaced.
+static void sync_mii_db(const std::string &dir) {
+    static bool done;
+    if (done) return;
+    done = true;
+    std::vector<std::array<u8, 0x60>> miis;
+    for (const auto &h : g_host_miis) {
+        std::array<u8, 0x60> m;
+        if (mii_3ds(h, m)) miis.push_back(m);
+    }
+    if (miis.empty()) return;
+    const std::string path = dir + "/CFL_DB.dat";
+    std::vector<u8> db(0x4BD20, 0);
+    bool had = false;
+    if (FILE *f = fopen(path.c_str(), "rb")) {
+        had = fread(db.data(), 1, db.size(), f) == db.size() && !memcmp(db.data(), "CFOG", 4);
+        fclose(f);
+    }
+    auto put_crc = [&](u32 from, u32 at) {
+        const u16 c = mii_crc16(&db[from], at - from);
+        db[at] = (u8)(c >> 8);
+        db[at + 1] = (u8)c;
+    };
+    if (!had) {
+        std::fill(db.begin(), db.end(), 0);
+        memcpy(&db[0], "CFOG\0\x01\0\0", 8);
+        memcpy(&db[0x23F8], "CFHE\xff\xff\xff\xff", 8);
+        for (u32 i = 0; i < 3000; i++) memcpy(&db[0x2400 + i * 0xE + 10], "\xff\x7f\xff\x7f", 4);
+        memcpy(&db[0xC820], "CFRA", 4);
+        put_crc(0xC820, 0xE4BE);
+    }
+    const std::vector<u8> before(db.begin(), db.begin() + 0xC820);
+    u32 placed = 0;
+    for (const auto &m : miis) {
+        int slot = -1, empty = -1;
+        for (int i = 0; i < 100 && slot < 0; i++) {
+            const u8 *s = &db[8 + i * 0x5C];
+            if (!memcmp(s + 0x0C, &m[0x0C], 10)) slot = i;  // the same Mii: its id and the console that made it
+            else if (empty < 0 && !(s[0x0C] | s[0x0D] | s[0x0E] | s[0x0F])) empty = i;
+        }
+        if (slot < 0) slot = empty;
+        if (slot < 0) break;  // all 100 slots taken
+        memcpy(&db[8 + slot * 0x5C], m.data(), 0x5C);
+        placed++;
+    }
+    put_crc(0, 0xC81E);
+    if (had && std::equal(before.begin(), before.end(), db.begin())) return;
+    fsys::create_directories(dir);
+    if (FILE *f = fopen(path.c_str(), "wb")) {
+        fwrite(db.data(), 1, db.size(), f);
+        fclose(f);
+    }
+    LOG("[fs] Mii Maker's database: %u Mii%s from this console\n", placed, placed == 1 ? "" : "s");
 }
 
 // ---- fs:USER
@@ -528,7 +706,8 @@ struct FsUser : Service {
             a.romfs = true;
         } else if (id == 0x2345678A) {
             u64 tid = (u64)p.word(0) | ((u64)p.word(1) << 32);
-            a.host = system_archive_path(tid);
+            a.dlc = (tid >> 32) == 0x0004008C;
+            a.host = !a.dlc ? system_archive_path(tid) : fsys::exists(g_game.dir + "/dlc_contents.bin") ? g_game.dir + "/dlc_" : "";
             if (a.host.empty()) {
                 VLOG("[fs] system archive %016llx not available\n", (unsigned long long)tid);
                 return ERR_NOT_FOUND;
@@ -541,6 +720,7 @@ struct FsUser : Service {
             }
             if (id == 9) fsys::create_directories(a.host);
             if (id == 7 && p.word(1) == 0xF000000B && !fsys::exists(a.host)) create_gamecoin(a.host);
+            if (id == 7 && p.word(1) == 0xF000000B) sync_mii_db(a.host);
             if (!fsys::exists(a.host)) {
                 VLOG("[fs] archive %x (%s) not formatted\n", id, a.host.c_str());
                 return id == 4 ? ERR_NOT_FORMATTED : ERR_NOT_FOUND;
@@ -560,9 +740,16 @@ struct FsUser : Service {
     u32 open_file(Archive *a, const LowPath &p, u32 flags, ObjPtr *out) {
         auto fs = std::make_shared<FileSession>();
         if (a->id == 0x2345678A) {
-            fs->fd = open(a->host.c_str(), O_RDONLY);
+            std::string host = a->host;
+            if (a->dlc) {  // the file path: open type, content index, section (0 RomFS), ExeFS name
+                char nm[24];
+                snprintf(nm, sizeof nm, "%08x.romfs", p.data.size() >= 8 ? p.word(1) : 0);
+                host += nm;
+            }
+            fs->fd = open(host.c_str(), O_RDONLY);
             if (fs->fd < 0) return ERR_NOT_FOUND;
-            VLOG("[fs] system archive file %s\n", a->host.c_str());
+            fs->gamedata = true;
+            VLOG("[fs] system archive file %s\n", host.c_str());
         } else if (a->romfs) {
             // binary path: [type, ...]; type 0 = the RomFS
             open_romfs();
@@ -576,8 +763,16 @@ struct FsUser : Service {
                 std::string name = nm;
                 if (!name.empty() && name[0] == '.') name = name.substr(1);
                 fs->romfs = false;
-                fs->fd = open((g_game.dir + "/exefs/" + name + ".bin").c_str(), O_RDONLY);
+                fs->gamedata = true;
+                fs->fd = open((g_game.dir + EXEFS_PREFIX + name + ".bin").c_str(), O_RDONLY);
                 VLOG("[fs] SelfNCCH ExeFS %s -> %s\n", nm, fs->fd >= 0 ? "ok" : "missing");
+                if (fs->fd < 0) return ERR_NOT_FOUND;
+            } else if (p.data.size() >= 4 && p.word(0) == 5) {
+                // an update's own RomFS (builder/dumps.py), which the game lays over its base RomFS itself
+                fs->romfs = false;
+                fs->gamedata = true;
+                fs->fd = open((g_game.dir + "/update_romfs.bin").c_str(), O_RDONLY);
+                VLOG("[fs] SelfNCCH update RomFS -> %s\n", fs->fd >= 0 ? "ok" : "missing");
                 if (fs->fd < 0) return ERR_NOT_FOUND;
             } else if (p.data.size() >= 4 && p.word(0) != 0) {
                 LOG("[fs] SelfNCCH open of non-RomFS section %u\n", p.word(0));
@@ -595,6 +790,13 @@ struct FsUser : Service {
                 return fsys::exists(fsys::path(path).parent_path()) ? ERR_FILE_NOT_FOUND : ERR_PATH_NOT_FOUND;
             }
             VLOG("[fs] open %s\n", path.c_str());
+#ifdef __WIIU__
+            // the game's own saves are held in memory from here on (save_storage.cpp)
+            if (!path.compare(0, g_save_base.size(), g_save_base) && (fs->held = wiiu::save_file_open(path, fs->fd))) {
+                close(fs->fd);
+                fs->fd = -1;
+            }
+#endif
         }
         auto ses = std::make_shared<Session>();
         ses->service = fs;
@@ -603,6 +805,7 @@ struct FsUser : Service {
     }
 
     void handle(IPC &ipc) override {
+        FsIo io(0x3000 | ipc.cmd());
         switch (ipc.cmd()) {
         case 0x0801:  // Initialize
         case 0x0861:  // InitializeWithSdkVersion
@@ -657,6 +860,7 @@ struct FsUser : Service {
             Archive *a = arch(ipc[2], ipc[3]);
             if (!a) { ipc.result(ERR_ARCHIVE); break; }
             std::string path = a->host + sanitize(read_path(ipc[4], ipc[5], ipc[7]).str());
+            SAVE_SETTLE(path, true);
             ipc.result(fsys::remove(path) ? 0 : ERR_FILE_NOT_FOUND);
             save_changed(path);
             break;
@@ -667,6 +871,8 @@ struct FsUser : Service {
             if (!a || !b) { ipc.result(ERR_ARCHIVE); break; }
             std::string s = a->host + sanitize(read_path(ipc[4], ipc[5], ipc[11]).str());
             std::string d = b->host + sanitize(read_path(ipc[8], ipc[9], ipc[13]).str());
+            SAVE_SETTLE(s, true);
+            SAVE_SETTLE(d, true);
             std::error_code ec;
             fsys::rename(s, d, ec);
             ipc.result(ec ? ERR_FILE_NOT_FOUND : 0);
@@ -678,6 +884,7 @@ struct FsUser : Service {
             Archive *a = arch(ipc[2], ipc[3]);
             if (!a) { ipc.result(ERR_ARCHIVE); break; }
             std::string path = a->host + sanitize(read_path(ipc[4], ipc[5], ipc[7]).str());
+            SAVE_SETTLE(path, true);
             std::error_code ec;
             if (ipc.cmd() == 0x0807) fsys::remove_all(path, ec);
             else fsys::remove(path, ec);
@@ -694,8 +901,7 @@ struct FsUser : Service {
             if (!fsys::exists(fsys::path(path).parent_path())) { ipc.result(ERR_PATH_NOT_FOUND); break; }
             int fd = open(path.c_str(), O_CREAT | O_RDWR, 0644);
             if (fd >= 0) {
-                if (ftruncate(fd, (off_t)size)) {
-                }
+                save_resize(fd, size);
                 close(fd);
             }
             VLOG("[fs] CreateFile %s size %llx\n", path.c_str(), (unsigned long long)size);
@@ -720,6 +926,8 @@ struct FsUser : Service {
             if (!a || !b) { ipc.result(ERR_ARCHIVE); break; }
             std::string s = a->host + sanitize(read_path(ipc[4], ipc[5], ipc[11]).str());
             std::string d = b->host + sanitize(read_path(ipc[8], ipc[9], ipc[13]).str());
+            SAVE_SETTLE(s, true);
+            SAVE_SETTLE(d, true);
             std::error_code ec;
             fsys::rename(s, d, ec);
             ipc.result(ec ? ERR_PATH_NOT_FOUND : 0);
@@ -730,9 +938,11 @@ struct FsUser : Service {
             Archive *a = arch(ipc[1], ipc[2]);
             if (!a || a->romfs) { ipc.result(ERR_ARCHIVE); break; }
             std::string path = a->host + sanitize(read_path(ipc[3], ipc[4], ipc[6]).str());
-            if (!fsys::is_directory(path)) { ipc.result(ERR_PATH_NOT_FOUND, 1, 2); ipc.handles(2, {nullptr}, true); break; }
+            if (!fsys::is_directory(path)) { VLOG("[fs] OpenDirectory %s: not found\n", path.c_str()); ipc.result(ERR_PATH_NOT_FOUND, 1, 2); ipc.handles(2, {nullptr}, true); break; }
+            SAVE_SETTLE(path, false);  // the sizes it lists come from storage
             auto ds = std::make_shared<DirSession>();
             for (auto &e : fsys::directory_iterator(path)) ds->entries.push_back(e);
+            VLOG("[fs] OpenDirectory %s: %zu entries\n", path.c_str(), ds->entries.size());
             auto ses = std::make_shared<Session>();
             ses->service = ds;
             ipc.ok(1, 2);
@@ -743,8 +953,11 @@ struct FsUser : Service {
         case 0x084C: {  // FormatSaveData
             std::string d = save_root() + "/savedata";
             std::error_code ec;
+            FS_NOTE("save: formatting");
+            SAVE_SETTLE(d, true);
             fsys::remove_all(d, ec);
             fsys::create_directories(d);
+            FS_NOTE("save: formatted");
             LOG("[fs] formatted save data at %s\n", d.c_str());
             save_changed(d);
             ipc.ok();

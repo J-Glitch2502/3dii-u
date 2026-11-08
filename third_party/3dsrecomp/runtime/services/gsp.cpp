@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "../gpu_iface.h"
+#include "../loader.h"
 #include "../service.h"
 #include "services.h"
 
@@ -21,6 +22,7 @@ struct GspState {
     u32 next_thread = 0;
     // LCD registers: what is on screen
     FramebufferInfo fb[2] = {};
+    struct Lcd { u32 left[2], right[2], select; } lcd[2] = {};  // each screen's two buffers per eye (physical) and which is shown
     // GX queue (guarded by its own mutex: the GPU thread consumes it without the kernel lock)
     std::mutex qm;
     std::condition_variable qcv;
@@ -64,6 +66,15 @@ static void signal_irq_now(Irq id) {
     }
 }
 
+// GSP shows a framebuffer by writing the LCD's registers for one of its two buffers and selecting it; games can write those registers
+// themselves too (Mario Kart 7 flips its screens only that way), so all three ways meet here. (fb_mutex held)
+static void lcd_record(int screen, u32 select, u32 left, u32 right) {
+    auto &l = gsp.lcd[screen];
+    l.select = select & 1;
+    l.left[l.select] = mem::vaddr_to_paddr(left);
+    l.right[l.select] = mem::vaddr_to_paddr(right);
+}
+
 // framebuffer update from the shared memory (at VBlank), like the GSP module does
 static void update_framebuffer(int screen) {
     u32 base = shm_base();
@@ -75,13 +86,34 @@ static void update_framebuffer(int screen) {
     u32 fbi = info + 4 + (idx & 1) * 0x1C;
     std::lock_guard<std::mutex> lk(fb_mutex);
     FramebufferInfo &f = gsp.fb[screen];
-    if (f.format != r32(fbi + 16) || f.stride != r32(fbi + 12))
+    static u32 logged;
+    if (f.format != r32(fbi + 16) || f.stride != r32(fbi + 12) || (f.addr_left != r32(fbi + 4) && logged++ < 30))
         VLOG("[gsp] screen %d framebuffer %08x stride %x format %x\n", screen, r32(fbi + 4), r32(fbi + 12), r32(fbi + 16));
     f.addr_left = r32(fbi + 4);
     f.addr_right = r32(fbi + 8);
     f.stride = r32(fbi + 12);
     f.format = r32(fbi + 16);
     f.valid = f.addr_left != 0;
+    lcd_record(screen, r32(fbi), f.addr_left, f.addr_right);
+}
+
+// A service wrote guest memory the GPU may read: tell the GPU thread, in order with the GX commands.
+void gsp_cpu_wrote(u32 vaddr, u32 size) {
+    std::array<u32, 8> c{0xFFu, vaddr, size};
+    std::lock_guard<std::mutex> lk(gsp.qm);
+    gsp.queue.push_back(c);
+    gsp.busy++;
+}
+
+// Queued so the GPU thread sees it in order with the GX commands. A real GPU doesn't see what's still in the CPU's cache, and the renderer only
+// checks a texture for changes when told, so every way a game can do this counts: GSP's calls, GX's, and the kernel's own.
+void gsp_cache_op(u32 vaddr, u32 size, bool cpu_will_read) {
+    VLOG("[gsp] cache %s %08x %x\n", cpu_will_read ? "invalidate" : "flush", vaddr, size);
+    if (!size) return;
+    std::array<u32, 8> c{cpu_will_read ? 0xFEu : 0xFFu, vaddr, size};
+    std::lock_guard<std::mutex> lk(gsp.qm);
+    gsp.queue.push_back(c);
+    gsp.busy++;
 }
 
 FramebufferInfo gsp_framebuffer(int screen) {
@@ -89,10 +121,34 @@ FramebufferInfo gsp_framebuffer(int screen) {
     return gsp.fb[screen];
 }
 
+// Tomodachi Life gives up on the GPU after half a second (nngxSetTimeout, called once at start-up) and goes on to its next command list while
+// the last one is still running, which leaves both stuck for good, frozen on whatever was on screen. A 3DS never takes that long; a busy moment
+// here can. With the timeout at zero the game just waits. Professor Layton and the Azran Legacy does the same after 5 seconds, as does Dream Team; Sticker Star has the code too.
+// The timeout's place is found in whatever code is loaded (an update's too), so every game with nngxSetTimeout gets this: on the nine it finds
+// exactly the four addresses that were listed here by hand.
+static void no_gpu_timeout() {
+    static u32 state = ~0u;
+    if (state == ~0u) {
+        // nngxSetTimeout: ldr r3, =state; str r2, [r3, #0x170]!; add r3, r3, #8; stm r3, {r0, r1}; bx lr; then the literal
+        static const u32 code[] = {0xE59F300C, 0xE5A32170, 0xE2833008, 0xE8830003, 0xE12FFF1E};
+        state = 0;
+        for (u32 a = g_game.text_addr; !state && a + 24 <= g_game.text_addr + g_game.text_size; a += 4) {
+            u32 i = 0;
+            while (i < 5 && r32(a + i * 4) == code[i]) i++;
+            if (i == 5) state = r32(a + 20);
+        }
+        if (state) LOG("[gsp] nngxSetTimeout keeps its timeout at %08x: kept at zero\n", state + 0x178);
+    }
+    if (!state) return;
+    w32(state + 0x178, 0);
+    w32(state + 0x17c, 0);
+}
+
 void gsp_frame_boundary();
 void gsp_vblank() {
     gsp_frame_boundary();
     Lock lk(kmutex);
+    no_gpu_timeout();
     update_framebuffer(0);
     update_framebuffer(1);
     signal_irq(PDC0);
@@ -154,13 +210,16 @@ void gsp_frame_boundary() {
     if (cur_frame == dump_frame) dump_state = 1;
 }
 
+volatile bool gx_hold;
+
 // (GPU thread) executes queued GX commands
 void gsp_process_gx() {
     for (;;) {
         std::array<u32, 8> c;
         {
             std::lock_guard<std::mutex> lk(gsp.qm);
-            if (gsp.queue.empty()) return;
+            // a busy game keeps this queue from ever emptying, and the system won't wait long for the GPU thread to let go of GX2
+            if (gsp.queue.empty() || gx_hold) return;
             c = gsp.queue.front();
             gsp.queue.pop_front();
         }
@@ -180,12 +239,15 @@ void gsp_process_gx() {
         switch (c[0] & 0xFF) {
         case 0x00:  // RequestDma(src, dst, size)
             memmove(gptr(c[2]), gptr(c[1]), c[3]);
-            if (u32 pa = va2pa(c[2])) gpu::invalidate_memory(pa, c[3]);
+            if (u32 pa = va2pa(c[2])) gpu::dma_written(pa, c[3]);
             irqs.push_back(DMA);
             break;
         case 0x01: {  // SubmitGpuCommandList(addr, size, flags)
             u64 t0 = real_ns();
             gpu::process_command_list(va2pa(c[1]), c[2]);
+#ifdef __WIIU__
+            gpu::gx2_finish_list();
+#endif
             gx_stats.cmdlists++;
             gx_stats.gpu_ns += real_ns() - t0;
             irqs.push_back(P3D);
@@ -210,10 +272,20 @@ void gsp_process_gx() {
             gpu::texture_copy(va2pa(c[1]), va2pa(c[2]), c[3], c[4], c[5], c[6]);
             irqs.push_back(PPF);
             break;
-        case 0x05:  // FlushCacheRegions
+        case 0x05:  // FlushCacheRegions: up to three of address, size
+            for (u32 i = 1; i + 1 < 8; i += 2)
+                if (u32 pa = c[i + 1] ? va2pa(c[i]) : 0) gpu::invalidate_memory(pa, c[i + 1]);
             break;
         case 0xFF:  // (ours) the CPU wrote this range
             if (u32 pa = va2pa(c[1])) gpu::invalidate_memory(pa, c[2]);
+            break;
+        case 0xFE:  // (ours) the CPU is about to read this range
+            if (u32 pa = va2pa(c[1])) {
+                gpu::invalidate_memory(pa, c[2]);
+#ifdef __WIIU__
+                gpu::gx2_cpu_will_read(pa, c[2]);
+#endif
+            }
             break;
         default:
             LOG("[gsp] unknown GX command %08x\n", c[0]);
@@ -238,17 +310,29 @@ void frontend_wake();
 
 struct GspGpu : Service {
     using Service::Service;
+    // GSP's register offsets count from 0x1EB00000: the LCDs' framebuffer registers are at 0x400400 (top screen) and 0x400500 (bottom)
     void write_hw_regs(u32 reg, u32 size, u32 src) {
+        static u32 logged;
+        if (g_verbose && reg < 0x400600 && reg + size > 0x400400 && logged++ < 40) VLOG("[gsp] LCD registers %x+%x: %08x %08x\n", reg, size, r32(src), size > 4 ? r32(src + 4) : 0);
+        std::lock_guard<std::mutex> lk(fb_mutex);
         for (u32 i = 0; i < size; i += 4) {
-            u32 r = reg + i, v = r32(src + i);
+            const u32 v = r32(src + i);
             for (int s = 0; s < 2; s++) {
-                u32 b = 0x400 + s * 0x100;
-                std::lock_guard<std::mutex> lk(fb_mutex);
+                auto &l = gsp.lcd[s];
                 FramebufferInfo &f = gsp.fb[s];
-                if (r == b + 0x68) { f.addr_left = mem::paddr_to_vaddr(v); f.valid = true; }
-                if (r == b + 0x94) f.addr_right = mem::paddr_to_vaddr(v);
-                if (r == b + 0x70) f.format = v;
-                if (r == b + 0x90) f.stride = v;
+                switch (reg + i - (0x400400 + s * 0x100)) {
+                case 0x68: l.left[0] = v; break;
+                case 0x6C: l.left[1] = v; break;
+                case 0x94: l.right[0] = v; break;
+                case 0x98: l.right[1] = v; break;
+                case 0x78: l.select = v & 1; break;
+                case 0x70: f.format = v; continue;
+                case 0x90: f.stride = v; continue;
+                default: continue;
+                }
+                f.addr_left = mem::paddr_to_vaddr(l.left[l.select]);
+                f.addr_right = mem::paddr_to_vaddr(l.right[l.select]);
+                f.valid = f.addr_left != 0;
             }
         }
     }
@@ -279,21 +363,16 @@ struct GspGpu : Service {
             f.stride = ipc[5];
             f.format = ipc[6];
             f.valid = true;
+            lcd_record(screen & 1, ipc[2], ipc[3], ipc[4]);
             ipc.ok();
             break;
         }
         case 0x0008:    // FlushDataCache(addr, size, process)
-        case 0x0009: {  // InvalidateDataCache
-            // queued so the GPU thread sees it in order with the GX commands
-            std::array<u32, 8> c{0xFF, ipc[1], ipc[2]};
-            {
-                std::lock_guard<std::mutex> lk(gsp.qm);
-                gsp.queue.push_back(c);
-                gsp.busy++;
-            }
+        case 0x0009:    // InvalidateDataCache
+        case 0x001F:    // StoreDataCache
+            gsp_cache_op(ipc[1], ipc[2], ipc.cmd() == 0x0009);
             ipc.ok();
             break;
-        }
         case 0x000B:  // SetLcdForceBlack
         case 0x0010:  // SetAxiConfigQoSMode
         case 0x0016:  // AcquireRight
@@ -301,7 +380,6 @@ struct GspGpu : Service {
         case 0x0019:  // SaveVramSysArea
         case 0x001A:  // RestoreVramSysArea
         case 0x001E:  // SetInternalPriorities
-        case 0x001F:  // StoreDataCache
             ipc.ok();
             break;
         case 0x000C:  // TriggerCmdReqQueue

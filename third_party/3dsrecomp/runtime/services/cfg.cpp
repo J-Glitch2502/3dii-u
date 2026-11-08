@@ -38,7 +38,11 @@ static void fill_block(u32 id, u32 dst, u32 size) {
     switch (id) {
     case 0x00050005: {  // stereo camera settings
         float v[8] = {62.0f, 289.0f, 76.80020141601563f, 46.08010101318359f, 10.0f, 5.0f, 55.58000183105469f, 21.56999969482422f};
-        memcpy(gptr(dst), v, std::min<u32>(size, 32));
+        for (u32 i = 0; i < 8 && (i + 1) * 4 <= size; i++) {
+            u32 u;
+            memcpy(&u, &v[i], 4);
+            w32(dst + 4 * i, u);
+        }
         break;
     }
     case 0x00070001:  // sound output mode: stereo

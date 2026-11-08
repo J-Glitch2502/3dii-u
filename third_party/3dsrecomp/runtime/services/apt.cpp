@@ -58,49 +58,12 @@ static void system_applet_receive(u32 id, u32 signal) {
     send_parameter({id, 0x300, 10, nullptr, {}});  // WakeupByExit: back to the application
 }
 
-// The Mii selector returns a standard Mii: a plain male Mii named "Mario" (made-up console/Mii IDs and a
-// placeholder MAC; games mostly check the flags and the checksum)
+// The Mii selector returns the player's Mii (misc.cpp: the console account's, or a stand-in "Mario")
 static std::vector<u8> mii_selector_result() {
     std::vector<u8> r(0x84, 0);
-    auto be32 = [&](size_t o, u32 v) { r[o] = v >> 24; r[o + 1] = v >> 16; r[o + 2] = v >> 8; r[o + 3] = v; };
-    auto be16 = [&](size_t o, u16 v) { r[o] = v >> 8; r[o + 1] = (u8)v; };
-    be32(0, 0);           // return code: a Mii was selected
-    be32(4, 0);           // not a guest Mii
-    be32(8, 0xFFFFFFFF);  // guest index
-    size_t m = 0x0C;
-    r[m + 0] = 0x03;
-    r[m + 1] = 0x01;  // copying allowed (games that make look-alikes, e.g. Tomodachi Life, refuse it otherwise)
-    r[m + 2] = 0x10;
-    r[m + 3] = 0x30;
-    u64 sys = 0x3D5000000000C0DEull;  // console id of the "author"
-    for (int i = 0; i < 8; i++) r[m + 4 + i] = (u8)(sys >> (56 - 8 * i));
-    be32(m + 0x0C, 0x98000001);  // Mii id: normal Mii flags, creation time 1
-    const u8 mac[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};  // locally administered placeholder
-    memcpy(&r[m + 0x10], mac, 6);
-    be16(m + 0x18, 0xA600);
-    const char *name = "Mario";
-    for (int i = 0; name[i]; i++) r[m + 0x1A + 2 * i] = (u8)name[i];
-    r[m + 0x2E] = 0x40;
-    r[m + 0x2F] = 0x40;
-    r[m + 0x32] = 0x21;
-    r[m + 0x33] = 0x01;
-    be32(m + 0x34, 0x02684418);
-    be32(m + 0x38, 0x26344614);
-    be16(m + 0x3C, 0x8112);
-    be16(m + 0x3E, 0x1768);
-    be16(m + 0x40, 0x0D00);
-    be16(m + 0x42, 0x0029);
-    be16(m + 0x44, 0x0052);
-    be16(m + 0x46, 0x4850);
-    const char *author = "Player";
-    for (int i = 0; author[i]; i++) r[m + 0x48 + 2 * i] = (u8)author[i];
-    // CRC-16/XMODEM over the Mii data and padding
-    u16 crc = 0;
-    for (size_t i = 0; i < 0x5E; i++) {
-        crc ^= (u16)r[m + i] << 8;
-        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (u16)((crc << 1) ^ 0x1021) : (u16)(crc << 1);
-    }
-    be16(m + 0x5E, crc);
+    r[8] = r[9] = r[10] = r[11] = 0xFF;  // a Mii was selected (0), not a guest (0), guest index -1
+    const auto mii = player_mii();
+    memcpy(&r[0x0C], mii.data(), 0x60);
     return r;
 }
 
@@ -153,10 +116,10 @@ unsigned swkbd_serial = 0;
 
 // fills in the text and the button pressed (ok: the confirm button, else the cancel one)
 static void swkbd_result(std::vector<u8> &cfg, ObjPtr mem, std::u16string text, bool ok) {
-    auto wr32 = [&](size_t o, u32 v) { memcpy(&cfg[o], &v, 4); };
+    auto wr32 = [&](size_t o, u32 v) { v = le32(v); memcpy(&cfg[o], &v, 4); };
     u32 buttons, max_len = cfg[0x20] | cfg[0x21] << 8;
     memcpy(&buttons, &cfg[0x04], 4);
-    buttons += 1;
+    buttons = le32(buttons) + 1;
     auto sm = std::dynamic_pointer_cast<SharedMem>(mem);
     if (max_len && text.size() > max_len) text.resize(max_len);
     if (sm && (text.size() + 1) * 2 <= sm->size) {
@@ -175,7 +138,7 @@ static void swkbd_result(std::vector<u8> &cfg, ObjPtr mem, std::u16string text, 
 // true if the applet finished (else it waits for the player: swkbd::finish)
 static bool swkbd_run(u32 id, std::vector<u8> &cfg, ObjPtr mem) {
     if (cfg.size() < 0x14C) return true;
-    auto rd32 = [&](size_t o) { u32 v; memcpy(&v, &cfg[o], 4); return v; };
+    auto rd32 = [&](size_t o) { u32 v; memcpy(&v, &cfg[o], 4); return le32(v); };
     auto rd16s = [&](size_t o, size_t n) {
         std::u16string s;
         for (size_t i = 0; i < n; i++) {
@@ -425,9 +388,54 @@ struct AptService : Service {
             ipc.ok(2);
             ipc.set(2, 0);
             break;
+        case 0x0046:  // Wrap(out size, in size, nonce offset, nonce size, in buffer, out buffer)
+        case 0x0047:  // Unwrap
+            wrap(ipc, ipc.cmd() == 0x0046);
+            break;
         default:
             unimplemented(ipc);
         }
+    }
+    // Wrap seals data with a console key (AES-CCM) for the game to keep, Unwrap opens it again (Mario Kart 7 uses them). It never leaves
+    // this console, so the seal here is the data itself and a 16-byte check: what Wrap made opens, anything else fails as on a 3DS.
+    // Both keep the layouts: Wrap puts the nonce (taken from nonce offset) first and the check last; Unwrap puts the nonce back.
+    static void wrap(IPC &ipc, bool seal) {
+        const u32 out_size = ipc[1], in_size = ipc[2], nonce_at = ipc[3], nonce_size = std::min<u32>(ipc[4] & ~3u, 12), in = ipc[6], out = ipc[8];
+        auto check = [](const std::vector<u8> &d, u8 *mac) {  // two 64-bit FNV-1a hashes, forwards and backwards
+            u64 a = 0xcbf29ce484222325ull, b = 0x84222325cbf29ce4ull;
+            for (size_t i = 0; i < d.size(); i++) a = (a ^ d[i]) * 0x100000001b3ull, b = (b ^ d[d.size() - 1 - i]) * 0x100000001b3ull;
+            for (int i = 0; i < 8; i++) mac[i] = (u8)(a >> 8 * i), mac[8 + i] = (u8)(b >> 8 * i);
+        };
+        std::vector<u8> src(in_size), body;  // body: the nonce, then the data without it
+        for (u32 i = 0; i < in_size; i++) src[i] = r8(in + i);
+        u32 res = 0;
+        if (seal && nonce_at + nonce_size <= in_size) {
+            body.assign(src.begin() + nonce_at, src.begin() + nonce_at + nonce_size);
+            body.insert(body.end(), src.begin(), src.begin() + nonce_at);
+            body.insert(body.end(), src.begin() + nonce_at + nonce_size, src.end());
+            u8 mac[16];
+            check(body, mac);
+            body.insert(body.end(), mac, mac + 16);
+        } else if (!seal && in_size >= nonce_size + 16 && nonce_at <= in_size - nonce_size - 16) {
+            std::vector<u8> sealed(src.begin(), src.end() - 16);
+            u8 mac[16];
+            check(sealed, mac);
+            if (memcmp(mac, &src[in_size - 16], 16)) {
+                res = 0xC9010401;  // PS, wrong argument: what a 3DS answers when the check fails
+            } else {
+                body.assign(sealed.begin() + nonce_size, sealed.begin() + nonce_size + nonce_at);
+                body.insert(body.end(), sealed.begin(), sealed.begin() + nonce_size);
+                body.insert(body.end(), sealed.begin() + nonce_size + nonce_at, sealed.end());
+            }
+        } else {
+            res = 0xC9010401;
+        }
+        for (u32 i = 0; i < out_size && i < body.size(); i++) w8(out + i, body[i]);
+        ipc.result(res, 1, 4);
+        ipc.set(2, (in_size << 4) | 0xA);
+        ipc.set(3, in);
+        ipc.set(4, (out_size << 4) | 0xC);
+        ipc.set(5, out);
     }
     void set_handles(IPC &ipc) {
         ipc.set(2, 1 << 26);  // copy 2 handles

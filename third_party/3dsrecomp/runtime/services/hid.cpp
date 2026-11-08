@@ -1,4 +1,5 @@
 // hid:USER / hid:SPVR: pad, circle pad, touch screen, accelerometer and gyroscope through shared memory.
+#include <mutex>
 #include <algorithm>
 #include <atomic>
 #include "../service.h"
@@ -44,6 +45,16 @@ static void ensure_shm() {
 // (mem_<tag>_<address>.bin, as RECOMP_MEMDUMP), "POKE8 <hex address> <hex value>" writes a byte at once,
 // "DRAG <x>/<y> <x1>/<y1> <frames>" touches and moves (bottom-screen pixels), "PAD <host inputs> <frames>" plays host inputs by position (one-screen play: "PAD zl 6", "PAD rs-up 30"),
 // "KEY <SDL key name>" presses a host key, "TEXT <text>" types on the game's own keyboard (the profile's keys), "WINSHOT" writes the whole window at the next frame (window_<frame>.ppm, as RECOMP_WINSHOT).
+#ifdef __WIIU__
+const char *g_live_path;
+// Lines from the PC over the network (port/wiiu/net_console.cpp): no file, so nothing is left to play again at the next boot
+static std::mutex live_fed_m;
+static std::vector<std::string> live_fed;
+void live_feed(const char *line) {
+    std::lock_guard<std::mutex> lk(live_fed_m);
+    live_fed.emplace_back(line);
+}
+#endif
 namespace {
 struct LiveCmd {
     u32 buttons = 0;
@@ -128,11 +139,29 @@ LiveCmd parse_live(const std::string &line) {
     return c;
 }
 
-void live_input(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 &tx, u16 &ty) {
-    static const char *path = getenv("RECOMP_LIVE");
-    if (!path) return;
+void live_line(const std::string &line) {
+    if (line == "DUMP") dump_threads();  // right away: the state of every thread in the log
+    else if (line.rfind("POKE8 ", 0) == 0) {  // right away: "POKE8 <address> <value>" writes a byte of guest memory
+        unsigned a = 0, v = 0;
+        if (sscanf(line.c_str() + 6, "%x %x", &a, &v) == 2) w8(a, (u8)v);
+    }
+    else if (!line.empty()) live.queue.push_back(parse_live(line));
+}
+
+void live_read(const char *path) {
     if (!live.f) live.f = fopen(path, "r");
     if (!live.f) return;
+#ifdef __WIIU__
+    // Cemu keeps a file's size from when it was opened, so lines added later only show after opening it again
+    static u32 reopen;
+    if (++reopen % 60 == 0) {
+        const long at = ftell(live.f);
+        fclose(live.f);
+        live.f = fopen(path, "r");
+        if (!live.f) return;
+        fseek(live.f, at, SEEK_SET);
+    }
+#endif
     char buf[512];
     clearerr(live.f);
     while (fgets(buf, sizeof buf, live.f)) {
@@ -140,13 +169,24 @@ void live_input(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 &tx, u16 &ty) {
         if (live.partial.back() != '\n') break;
         std::string line = live.partial.substr(0, live.partial.size() - 1);
         live.partial.clear();
-        if (line == "DUMP") dump_threads();  // right away: the state of every thread in the log
-        else if (line.rfind("POKE8 ", 0) == 0) {  // right away: "POKE8 <address> <value>" writes a byte of guest memory
-            unsigned a = 0, v = 0;
-            if (sscanf(line.c_str() + 6, "%x %x", &a, &v) == 2) w8(a, (u8)v);
-        }
-        else if (!line.empty()) live.queue.push_back(parse_live(line));
+        live_line(line);
     }
+}
+
+void live_input(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 &tx, u16 &ty) {
+#ifdef __WIIU__
+    {
+        std::lock_guard<std::mutex> lk(live_fed_m);
+        for (const auto &line : live_fed) live_line(line);
+        live_fed.clear();
+    }
+    if (g_live_path) live_read(g_live_path);  // the frontend looks once: asking the file system at 234 Hz would be slow
+    else if (live.queue.empty()) return;
+#else
+    static const char *path = getenv("RECOMP_LIVE");
+    if (!path) return;
+    live_read(path);
+#endif
     if (g_frame >= live.until) {
         if (live.active) {
             live.active = false;
@@ -188,6 +228,14 @@ void live_input(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 &tx, u16 &ty) {
     }
 }
 }  // namespace
+
+// at rest, face up (y = -1g in the 3DS's frame), unless the host has real sensors
+static s16 motion_accel[3] = {0, -512, 0}, motion_gyro[3];
+
+void hid_motion(const s16 *accel, const s16 *gyro) {
+    memcpy(motion_accel, accel, sizeof motion_accel);
+    memcpy(motion_gyro, gyro, sizeof motion_gyro);
+}
 
 void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
     live_input(buttons, cx, cy, touch, tx, ty);
@@ -233,7 +281,6 @@ void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
     w32(b + 0xC4, touch ? 1 : 0);
     hid.ev_pad0->signal();
     hid.ev_pad1->signal();
-    // accelerometer: at rest, face up (y = -1g in the 3DS's frame)
     if (hid.accel_on && !getenv("RECOMP_NO_ACCEL")) {
         u32 aidx = (r32(b + 0x118) + 1) % 8;
         if (aidx == 0) {
@@ -242,9 +289,9 @@ void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
         }
         w32(b + 0x118, aidx);
         u32 ae = b + 0x128 + aidx * 6;
-        w16(ae, 0);
-        w16(ae + 2, (u16)(s16)-512);
-        w16(ae + 4, 0);
+        w16(ae, (u16)motion_accel[0]);
+        w16(ae + 2, (u16)motion_accel[1]);
+        w16(ae + 4, (u16)motion_accel[2]);
         hid.ev_accel->signal();
     }
     if (hid.gyro_on) {
@@ -255,9 +302,9 @@ void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
         }
         w32(b + 0x168, gidx);
         u32 ge = b + 0x178 + gidx * 6;
-        w16(ge, 0);
-        w16(ge + 2, 0);
-        w16(ge + 4, 0);
+        w16(ge, (u16)motion_gyro[0]);
+        w16(ge + 2, (u16)motion_gyro[1]);
+        w16(ge + 4, (u16)motion_gyro[2]);
         hid.ev_gyro->signal();
     }
     schedule_async();
@@ -305,7 +352,7 @@ struct Hid : Service {
         case 0x0016: {  // GetGyroscopeLowCalibrateParam
             ipc.ok(6);
             const s16 p[9] = {0, 6700, -6700, 0, 6700, -6700, 0, 6700, -6700};
-            memcpy(gptr(ipc.buf + 8), p, 18);
+            for (u32 i = 0; i < 9; i++) w16(ipc.buf + 8 + 2 * i, (u16)p[i]);
             break;
         }
         case 0x0017:  // GetSoundVolume

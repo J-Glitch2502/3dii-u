@@ -24,9 +24,7 @@ void set_game_cros(const GuestCro *cros, u32 count) {
 #else
 extern "C" {
 extern const GuestCro guest_cros[];
-extern const u32 guest_cro_count;
-__attribute__((weak)) const GuestCro guest_cros[1] = {};
-__attribute__((weak)) const u32 guest_cro_count = 0;
+extern const u32 guest_cro_count;  // ro_none.cpp if the game has none
 }
 #endif
 
@@ -479,6 +477,11 @@ struct Ro : Service {
         c.register_in(auto_link != 0);
         g_data_size = 0;
         u32 fixed = c.fix(level, size);
+        // The module's code runs at the slot, and code finds its own module's header by rounding an address in it down to a page
+        // (nn::ro's __aeabi_atexit takes __dso_handle to the control object): there it found the file's raw header, not the loaded one,
+        // and Animal Crossing's first module wrote through a garbage pointer, which only the PC's 4 GB of mapped guest memory
+        // survived (2026-11-08). The slot starts with the loaded header too.
+        if (code_base != addr) memcpy(gptr(code_base), gptr(addr), H_END);
         // the game copies the relocated .data from its buffer into the .data block itself, then frees what the
         // module no longer needs
         if (addr != buf) memmove(gptr(buf), gptr(addr), size);

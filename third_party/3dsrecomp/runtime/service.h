@@ -14,7 +14,7 @@ struct IPC {
     u32 buf;  // guest address of the command buffer (TLS + 0x80)
     Lock *lk;
     u32 req[64];  // the request as received (replies overwrite the buffer in place)
-    IPC(Thread *t_, u32 buf_, Lock *lk_) : t(t_), buf(buf_), lk(lk_) { memcpy(req, gptr(buf), sizeof req); }
+    IPC(Thread *t_, u32 buf_, Lock *lk_) : t(t_), buf(buf_), lk(lk_) { for (int i = 0; i < 64; i++) req[i] = r32(buf + 4 * i); }
     u32 word(int i) const { return req[i]; }
     u16 cmd() const { return (u16)(req[0] >> 16); }
     u32 operator[](int i) const { return req[i]; }

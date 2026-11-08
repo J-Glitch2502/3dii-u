@@ -1,5 +1,6 @@
 // Service registry, IPC helpers and srv: (the service manager).
 #include "service.h"
+#include "loader.h"
 
 #include <set>
 
@@ -59,6 +60,11 @@ u32 service_request(std::shared_ptr<Session> s, Thread *t, Lock &lk) {
     IPC ipc(t, t->tls + 0x80, &lk);
     if (g_verbose >= 2) LOG("[ipc] %s cmd %08x\n", s->service->name.c_str(), ipc.word(0));
     u32 cmd = ipc.word(0);
+    if (kstats.ipc) {
+        char k[48];
+        snprintf(k, sizeof k, "%s:%04x", s->service->name.c_str(), cmd >> 16);
+        kstats.requests[k]++;
+    }
     s->service->handle(ipc);
     if (g_verbose && (ipc.word(1) & 0x80000000))
         LOG("[ipc] %s cmd %08x -> error %08x\n", s->service->name.c_str(), cmd, ipc.word(1));
@@ -134,7 +140,20 @@ struct ErrF : Service {
             u32 type = ipc[1] & 0xFF;
             u32 code = ipc[2];
             u32 pc = ipc[3];
-            FATAL("[err:f] fatal error type %u result %08x pc %08x lr %08x\n", type, code, pc, ipc[0x14 / 4]);
+            // where it was called from: words on the thread's stack that point just past a call in the game's code (innermost first)
+            std::string calls;
+            const u32 sp = ipc.t->cpu.r[13], end = sp < mem::STACK_TOP ? std::min(sp + 0x1000, mem::STACK_TOP) : sp + 0x1000;
+            for (u32 a = sp & ~3u, n = 0; a < end && n < 12; a += 4) {
+                const u32 v = r32(a);
+                if (v & 3 || v < g_game.text_addr + 4 || v >= g_game.text_addr + g_game.text_size) continue;
+                const u32 w = r32(v - 4);  // bl, blx immediate, blx register
+                if ((w & 0x0F000000) != 0x0B000000 && (w & 0xFE000000) != 0xFA000000 && (w & 0x0FFFFFF0) != 0x012FFF30) continue;
+                char b[12];
+                snprintf(b, sizeof b, " %08x", v - 4);
+                calls += b;
+                n++;
+            }
+            FATAL("[err:f] fatal error type %u result %08x pc %08x lr %08x, calls from%s\n", type, code, pc, ipc[0x14 / 4], calls.c_str());
         }
         ipc.ok();
     }
