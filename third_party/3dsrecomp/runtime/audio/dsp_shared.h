@@ -26,11 +26,46 @@ constexpr u32 kRegion0 = 0x50000;      // byte offsets inside DSP RAM
 constexpr u32 kRegion1 = 0x70000;
 constexpr u32 kDspRamSize = 0x80000;
 
+#ifdef __BIG_ENDIAN__
+// DSP shared memory is written and read by little-endian guest code: on a big-endian host every access swaps.
+template <class T, class R>
+struct LeField {
+    R raw;
+    static T conv(R v) {
+        if (sizeof(R) == 2) v = (R)__builtin_bswap16((uint16_t)v);
+        else v = (R)__builtin_bswap32((uint32_t)v);
+        T t;
+        memcpy(&t, &v, sizeof t);
+        return t;
+    }
+    operator T() const { return conv(raw); }
+    LeField &operator=(T x) {
+        R v;
+        memcpy(&v, &x, sizeof v);
+        if (sizeof(R) == 2) v = (R)__builtin_bswap16((uint16_t)v);
+        else v = (R)__builtin_bswap32((uint32_t)v);
+        raw = v;
+        return *this;
+    }
+} __attribute__((packed));
+using le_u16 = LeField<u16, u16>;
+using le_s16 = LeField<s16, u16>;
+using le_u32 = LeField<u32, u32>;
+using le_s32 = LeField<s32, u32>;
+using le_float = LeField<float, u32>;
+#else
+using le_u16 = u16;
+using le_s16 = s16;
+using le_u32 = u32;
+using le_s32 = s32;
+using le_float = float;
+#endif
+
 #pragma pack(push, 1)
 
 // 32-bit value stored as [high u16][low u16].
 struct DspU32 {
-    u16 hi, lo;
+    le_u16 hi, lo;
     u32 get() const { return ((u32)hi << 16) | lo; }
     void set(u32 v) { hi = (u16)(v >> 16); lo = (u16)v; }
     operator u32() const { return get(); }
@@ -66,40 +101,40 @@ enum class Format : u8 { PCM8 = 0, PCM16 = 1, ADPCM = 2 };
 struct SourceBuffer {        // one entry of the buffer queue (20 bytes)
     DspU32 paddr;            // physical address of the sample data
     DspU32 length;           // in samples
-    u16 adpcm_ps;            // predictor/scale (unused: frames carry their own header)
-    u16 adpcm_yn[2];         // y[n-1], y[n-2]
+    le_u16 adpcm_ps;            // predictor/scale (unused: frames carry their own header)
+    le_u16 adpcm_yn[2];         // y[n-1], y[n-2]
     u8 adpcm_dirty;          // non-zero: load adpcm_yn when this buffer starts
     u8 is_looping;
-    u16 buffer_id;
-    u16 pad;
+    le_u16 buffer_id;
+    le_u16 pad;
 };
 static_assert(sizeof(SourceBuffer) == 20);
 
 struct SourceConfig {        // per source, written by the application (192 bytes)
-    u32 dirty;
-    float gain[3][4];        // [intermediate mix][front L, front R, back L, back R]
-    float rate_multiplier;
+    le_u32 dirty;
+    le_float gain[3][4];        // [intermediate mix][front L, front R, back L, back R]
+    le_float rate_multiplier;
     u8 interpolation_mode;   // Interp
     u8 pad0;
-    u16 filters_enabled;     // bit0 simple, bit1 biquad
-    s16 simple_b0, simple_a1;                                    // Q15, H = b0 / (1 - a1 z^-1)
-    s16 biquad_a2, biquad_a1, biquad_b2, biquad_b1, biquad_b0;  // Q14, feedback negated
-    u16 buffers_dirty;       // bit i -> buffers[i]
+    le_u16 filters_enabled;     // bit0 simple, bit1 biquad
+    le_s16 simple_b0, simple_a1;                                    // Q15, H = b0 / (1 - a1 z^-1)
+    le_s16 biquad_a2, biquad_a1, biquad_b2, biquad_b1, biquad_b0;  // Q14, feedback negated
+    le_u16 buffers_dirty;       // bit i -> buffers[i]
     SourceBuffer buffers[4];
     DspU32 loop_related;
     u8 enable;
     u8 pad1;
-    u16 sync_count;
+    le_u16 sync_count;
     DspU32 play_position;    // start sample of the embedded buffer
-    u16 pad2[2];
+    le_u16 pad2[2];
     // embedded buffer
     DspU32 paddr;
     DspU32 length;
-    u16 flags1;              // bits 0-1 mono(1)/stereo(2), bits 2-3 format, bit 5 fade in
-    u16 adpcm_ps;
-    u16 adpcm_yn[2];
-    u16 flags2;              // bit0 adpcm dirty, bit1 looping
-    u16 buffer_id;
+    le_u16 flags1;              // bits 0-1 mono(1)/stereo(2), bits 2-3 format, bit 5 fade in
+    le_u16 adpcm_ps;
+    le_u16 adpcm_yn[2];
+    le_u16 flags2;              // bit0 adpcm dirty, bit1 looping
+    le_u16 buffer_id;
 
     unsigned channels() const { return (flags1 & 3) == 2 ? 2 : 1; }
     Format format() const { return (Format)((flags1 >> 2) & 3); }
@@ -112,10 +147,10 @@ static_assert(offsetof(SourceConfig, paddr) == 172);
 struct SourceStatus {        // per source, written by the DSP (12 bytes)
     u8 is_enabled;
     u8 current_buffer_id_dirty;
-    u16 sync_count;
+    le_u16 sync_count;
     DspU32 buffer_position;
-    u16 current_buffer_id;
-    u16 last_buffer_id;
+    le_u16 current_buffer_id;
+    le_u16 last_buffer_id;
 };
 static_assert(sizeof(SourceStatus) == 12);
 
@@ -141,69 +176,69 @@ enum : u32 {  // DspConfig::dirty bits
 };
 
 struct DelayConfig {         // 20 bytes. H(z) = a z^-N / (1 - b z^-1 + a g z^-N), Q7 coefficients
-    u16 dirty;               // bit0 enable, bit1 work buffer, bit2 other
-    u16 enable;
-    u16 pad;
-    u16 outputs;
+    le_u16 dirty;               // bit0 enable, bit1 work buffer, bit2 other
+    le_u16 enable;
+    le_u16 pad;
+    le_u16 outputs;
     DspU32 work_buffer;
-    u16 frame_count;         // N = frame_count * 160
-    s16 g, a, b;
+    le_u16 frame_count;         // N = frame_count * 160
+    le_s16 g, a, b;
 };
 static_assert(sizeof(DelayConfig) == 20);
 
 struct DspConfig {           // written by the application (196 bytes)
-    u32 dirty;
-    float master_volume;     // volume of intermediate mix 0 in the final mix
-    float aux_return_volume[2];  // volumes of intermediate mixes 1 and 2
-    u16 output_buffer_count;
-    u16 pad0[2];
-    u16 output_format;       // 0 mono, 1 stereo, 2 surround
-    u16 clipping_mode;
-    u16 headphones_connected;
-    u16 surround_depth;
-    u16 surround_speaker_position;
-    u16 pad1;
-    u16 rear_ratio;
-    u16 aux_front_bypass[2];
-    u16 aux_bus_enable[2];
+    le_u32 dirty;
+    le_float master_volume;     // volume of intermediate mix 0 in the final mix
+    le_float aux_return_volume[2];  // volumes of intermediate mixes 1 and 2
+    le_u16 output_buffer_count;
+    le_u16 pad0[2];
+    le_u16 output_format;       // 0 mono, 1 stereo, 2 surround
+    le_u16 clipping_mode;
+    le_u16 headphones_connected;
+    le_u16 surround_depth;
+    le_u16 surround_speaker_position;
+    le_u16 pad1;
+    le_u16 rear_ratio;
+    le_u16 aux_front_bypass[2];
+    le_u16 aux_bus_enable[2];
     DelayConfig delay[2];
-    u16 reverb[2][26];
-    u16 sync_mode;
-    u16 pad2;
-    u32 dirty2;
+    le_u16 reverb[2][26];
+    le_u16 sync_mode;
+    le_u16 pad2;
+    le_u32 dirty2;
 };
 static_assert(sizeof(DspConfig) == 196);
 static_assert(offsetof(DspConfig, delay) == 44);
 static_assert(offsetof(DspConfig, sync_mode) == 0xBC);
 
 struct DspStatusBlock {      // 32 bytes
-    u16 unknown;
-    u16 dropped_frames;
-    u16 pad[14];
+    le_u16 unknown;
+    le_u16 dropped_frames;
+    le_u16 pad[14];
 };
 static_assert(sizeof(DspStatusBlock) == 32);
 
 struct IntermediateMix {     // little-endian s32, [channel][sample]
-    s32 pcm32[4][kFrameSamples];
+    le_s32 pcm32[4][kFrameSamples];
 };
 
 struct SharedMemory {
-    u16 pad0[0x400];
+    le_u16 pad0[0x400];
     DspStatusBlock dsp_status;                  // 0x8400
-    u16 dsp_debug[0x130];                       // 0x8410
-    s16 final_samples[kFrameSamples][2];        // 0x8540
+    le_u16 dsp_debug[0x130];                       // 0x8410
+    le_s16 final_samples[kFrameSamples][2];        // 0x8540
     SourceStatus source_status[kNumSources];    // 0x8680
-    u16 compressor[0xD20];                      // 0x8710
+    le_u16 compressor[0xD20];                      // 0x8710
     DspConfig dsp_config;                       // 0x9430
     IntermediateMix intermediate[2];            // 0x9492 (aux bus 0 = mix 1, aux bus 1 = mix 2)
     SourceConfig source_config[kNumSources];    // 0x9E92
-    s16 adpcm_coeffs[kNumSources][16];          // 0xA792 (Q11)
-    u16 unknown10[0x100];                       // 0xA912
-    u16 unknown11[0xC0];                        // 0xAA12
-    u16 unknown12[0x180];                       // 0xAAD2
-    u16 unknown13[0xA];                         // 0xAC52
-    u16 unknown14[0x13A3];                      // 0xAC5C
-    u16 frame_counter;                          // 0xBFFF
+    le_s16 adpcm_coeffs[kNumSources][16];          // 0xA792 (Q11)
+    le_u16 unknown10[0x100];                       // 0xA912
+    le_u16 unknown11[0xC0];                        // 0xAA12
+    le_u16 unknown12[0x180];                       // 0xAAD2
+    le_u16 unknown13[0xA];                         // 0xAC52
+    le_u16 unknown14[0x13A3];                      // 0xAC5C
+    le_u16 frame_counter;                          // 0xBFFF
 };
 static_assert(sizeof(SharedMemory) == 0x8000);
 static_assert(offsetof(SharedMemory, dsp_status) == 0x800);

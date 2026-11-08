@@ -59,12 +59,18 @@ void decode_pcm8(unsigned channels, const u8 *data, size_t count, Sample *out) {
 
 void decode_pcm16(unsigned channels, const u8 *data, size_t count, Sample *out) {
     if (channels == 2) {
-        memcpy(out, data, count * 4);
+        for (size_t i = 0; i < count; i++) {
+            u16 l, r;
+            memcpy(&l, data + 4 * i, 2);
+            memcpy(&r, data + 4 * i + 2, 2);
+            out[i][0] = (s16)le16(l);
+            out[i][1] = (s16)le16(r);
+        }
     } else {
         for (size_t i = 0; i < count; i++) {
-            s16 v;
+            u16 v;
             memcpy(&v, data + 2 * i, 2);
-            out[i][0] = out[i][1] = v;
+            out[i][0] = out[i][1] = (s16)le16(v);
         }
     }
 }

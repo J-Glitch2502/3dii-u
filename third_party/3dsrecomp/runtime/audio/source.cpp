@@ -250,7 +250,11 @@ void Source::generate() {
         return;
     }
 
+#ifdef __WIIU__  // no thread-local storage in an RPX; one audio thread
+    static std::vector<Sample> scratch;
+#else
     thread_local std::vector<Sample> scratch;
+#endif
     size_t outi = 0;
     int dequeues = 0;
     while (outi < frame.size()) {

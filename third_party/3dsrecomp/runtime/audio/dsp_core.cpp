@@ -1,4 +1,6 @@
 // DSP firmware HLE: pipes, power state changes and the per-frame processing (audio:: interface).
+#include <algorithm>
+#include <cstdlib>
 #include <mutex>
 
 #include "../audio_iface.h"
@@ -35,7 +37,7 @@ SharedMemory &region(int i) { return *(SharedMemory *)(dsp_ram() + (i ? kRegion1
 u16 frame_counter(int i) {
     u16 v;
     memcpy(&v, (const u8 *)&region(i) + offsetof(SharedMemory, frame_counter), 2);
-    return v;
+    return le16(v);
 }
 
 // The application submits the region whose frame counter is newer (with wraparound).
@@ -110,7 +112,7 @@ StereoFrame generate_frame(Dsp &d) {
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
-        memcpy(coeffs, rd.adpcm_coeffs[i], sizeof(coeffs));
+        for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
         SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs);
         memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
@@ -121,7 +123,10 @@ StereoFrame generate_frame(Dsp &d) {
     memcpy(&wr.dsp_status, &status, sizeof(status));
 
     StereoFrame out = d.mixer.output();
-    memcpy(wr.final_samples, out.data(), sizeof(wr.final_samples));
+    for (int f = 0; f < kFrameSamples; f++) {
+        wr.final_samples[f][0] = out[f][0];
+        wr.final_samples[f][1] = out[f][1];
+    }
     d.frames++;
     return out;
 }
@@ -133,11 +138,66 @@ StereoFrame generate_frame(Dsp &d) {
 namespace audio {
 using namespace hle;
 
+// Builds without a decoder give silence, so that choosing those tracks can't leave the game waiting: port/aac/aac_ffmpeg.cpp has the real ones.
+extern "C" __attribute__((weak, noinline)) void aac_host_reset() {}
+extern "C" __attribute__((weak, noinline)) int aac_host_decode(const unsigned char *, unsigned, short *, short *, unsigned *, unsigned *) { return 0; }
+
+// Pipe 3 is the firmware's AAC decoder, used only for the Mario & Luigi remakes' optional classic soundtracks. A request is 32 bytes: codec and
+// command (u16 each), result (u32), then for a decode: source, size and the two channels' buffers, by physical address. A reply repeats the codec and
+// command, then gives the rate as an index, the channels, the size it was given and, in the last word, the samples per channel.
+static void aac_request(Dsp &d, const u8 *data) {
+    static short out[2][2048];
+    static const u32 rates[9] = {48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000};
+    u8 reply[32] = {};
+    memcpy(reply, data, 4);
+    VLOG("dsp: AAC codec %u command %u, %08x %08x %08x %08x\n", data[0] | data[1] << 8, data[2] | data[3] << 8, le32(*(u32 *)(data + 8)), le32(*(u32 *)(data + 12)), le32(*(u32 *)(data + 16)), le32(*(u32 *)(data + 20)));
+    if ((data[2] | data[3] << 8) == 1) {
+        u32 w[4];  // source, size, buffers
+        memcpy(w, data + 8, sizeof w);
+        const u32 size = le32(w[1]);
+        const u8 *in = mem::paddr_ptr(le32(w[0]));
+        unsigned rate = 44100, channels = 2;
+        int n = in ? aac_host_decode(in, size, out[0], out[1], &rate, &channels) : 0;
+        if (n <= 0) {
+            static bool logged;
+            if (!logged) LOG("dsp: an AAC frame wasn't decoded: silence instead\n");
+            logged = true;
+            n = 1024;
+            memset(out, 0, sizeof out);
+        } else {
+            // the loudest sample of the first 200 frames: a log from a console shows there's sound, and it should match a PC's
+            static u32 frames;
+            static int peak;
+            if (frames == 0) LOG("dsp: AAC decoding, %u Hz, %u channels, %d samples a frame\n", rate, channels, n);
+            if (frames < 200)
+                for (int i = 0; i < n; i++) peak = std::max(peak, std::abs((int)out[0][i]));
+            if (++frames == 200) LOG("dsp: AAC peak level %d\n", peak);
+        }
+        for (u32 ch = 0; ch < 2; ch++)
+            if (u8 *p = mem::paddr_ptr(le32(w[2 + ch])))
+                for (int i = 0; i < n; i++) {
+                    const u16 v = le16((u16)out[ch][i]);
+                    memcpy(p + i * 2, &v, 2);
+                }
+        u32 index = 1;
+        for (u32 i = 0; i < 9; i++)
+            if (rates[i] == rate) index = i;
+        const u32 r[6] = {le32(index), le32(channels), w[1], 0, 0, le32((u32)n)};
+        memcpy(reply + 8, r, sizeof r);
+    } else {
+        aac_host_reset();
+    }
+    d.pipes[3].insert(d.pipes[3].end(), reply, reply + sizeof reply);
+}
+
 void pipe_write(u32 pipe, const u8 *data, u32 size) {
     Dsp &d = dsp();
     std::lock_guard lk(d.lock);
+    if (pipe == 3 && size == 32) {
+        aac_request(d, data);
+        return;
+    }
     if (pipe != 2) {
-        // pipe 3 is the AAC decoder (binary pipe): unsupported
         LOG("dsp: write of %u bytes to unsupported pipe %u ignored\n", size, pipe);
         return;
     }
