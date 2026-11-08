@@ -1,0 +1,7 @@
+third_party/**
+phase0/**
+toolchain/**
+**/gen_abi/**
+**/gen_safe/**
+**/build/**
+**/build_*/**

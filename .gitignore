@@ -4,6 +4,8 @@
 /*
 !/.gitignore
 !/.gitattributes
+!/.clang-format
+!/.clang-format-ignore
 !/README.md
 !/ARCHITECTURE.md
 !/CONTRIBUTING.md
