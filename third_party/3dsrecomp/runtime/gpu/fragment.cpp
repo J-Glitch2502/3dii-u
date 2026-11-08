@@ -12,8 +12,13 @@ namespace gpu {
 // and a 4-lane vector for four fragments. Both instantiations evaluate the same expressions, so
 // the vector path is bit-identical to the scalar one. LUT lookups are done per lane.
 namespace {
+#ifdef __clang__
 typedef float lf4 __attribute__((ext_vector_type(4)));
 typedef s32 li4 __attribute__((ext_vector_type(4)));
+#else
+typedef float lf4 __attribute__((vector_size(16)));
+typedef s32 li4 __attribute__((vector_size(16)));
+#endif
 
 template <class T>
 struct V3T {
@@ -42,7 +47,10 @@ inline lf4 tsqrt(lf4 v) { return (lf4){sqrtf(v[0]), sqrtf(v[1]), sqrtf(v[2]), sq
 inline float tsel(bool c, float a, float b) { return c ? a : b; }
 inline lf4 tsel(li4 c, lf4 a, lf4 b) { return (lf4)((c & (li4)a) | (~c & (li4)b)); }
 template <class T>
-inline T K(float v) { return (T)v; }
+inline T K(float v) {
+    if constexpr (sizeof(T) == sizeof(float)) return (T)v;
+    else return T{v, v, v, v};
+}
 template <class T>
 constexpr int lanes() { return sizeof(T) / sizeof(float); }
 template <class T>
@@ -311,6 +319,7 @@ void tev_prepare(DrawState &ds) {
         const bool identity = t.cop == 0 && t.aop == 0 && t.csrc[0] == 15 && t.cmod[0] == 0 &&
                               t.asrc[0] == 15 && t.amod[0] == 0 && t.cmul == 1 && t.amul == 1;
         if (!identity) ds.tev_n = si + 1;
+#ifndef __WIIU__  // tables for the vectorized combiner: the GPU does this there, and they cost several microseconds a draw
         memset(t.idx, 0, sizeof(t.idx));
         memset(t.inv, 0, sizeof(t.inv));
         for (u32 k = 0; k < 3; k++) {
@@ -344,6 +353,7 @@ void tev_prepare(DrawState &ds) {
                 }
             }
         }
+#endif
     }
     tev_finish_prepare(ds);
 }
@@ -750,6 +760,8 @@ float combine_map(float u, float v, u32 comb, const float *mv, const float *md) 
     return pt_lut(mv, md, f);
 }
 }  // namespace
+
+float proctex_rand(u32 x, u32 y) { return noise_rand2d(x, y); }
 
 u32 sample_proctex(const ProcTexState &pt, float u, float v) {
     const ProcTexLuts &L = *pt.luts;

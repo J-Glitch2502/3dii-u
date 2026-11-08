@@ -91,11 +91,13 @@ static inline u32 decode_texel(const u8 *tile, u32 x, u32 y, u32 fmt) {
         if (alpha) {
             u64 pa;
             memcpy(&pa, sp, 8);
+            pa = le64(pa);
             a = c4((pa >> (4 * (x * 4 + y))) & 15);
             sp += 8;
         }
         u64 blk;
         memcpy(&blk, sp, 8);
+        blk = le64(blk);
         return (decode_etc1_texel(blk, x, y) & 0xffffff) | (a << 24);
     }
     default: return 0;
@@ -137,6 +139,13 @@ void invalidate_memory(u32 paddr, u32 size) {
     metal_poll();
     texcache_invalidate(paddr, size);
     metal_guest_written(paddr, size, false);  // CPU cache maintenance: maybe written
+}
+
+// GX RequestDma. A "maybe": the textures there are checked against their hashes and uploaded only if they changed. Taken as definite,
+// Metroid: Samus Returns, which copies the same data every frame, uploaded 130 MB of textures every 5 s. Dream Team's Goombas with Luigi's
+// head were the hash a sample-only upload left unknown (gx2_backend.cpp's get_texture), not this.
+void dma_written(u32 paddr, u32 size) {
+    invalidate_memory(paddr, size);
 }
 
 void texcache_new_epoch() {

@@ -59,7 +59,15 @@ inline s32 sbits(u32 v, u32 lo, u32 n) { return (s32)(v << (32 - lo - n)) >> (32
 
 // Generic small float format (M mantissa bits, E exponent bits, 1 sign bit) to float32.
 float float_from_raw(u32 hex, u32 M, u32 E);
-inline float f24(u32 v) { return float_from_raw(v, 16, 7); }
+// Every uniform a game sends comes through here, a dozen or so a draw: only the rare cases go the long way round
+inline float f24(u32 v) {
+    const u32 e = (v >> 16) & 0x7f;
+    if (e == 0 || e == 0x7f) return float_from_raw(v, 16, 7);
+    const u32 out = (v & 0x800000) << 8 | (e + 64) << 23 | (v & 0xffff) << 7;
+    float f;
+    memcpy(&f, &out, 4);
+    return f;
+}
 inline float f16(u32 v) { return float_from_raw(v, 10, 5); }
 inline float f20(u32 v) { return float_from_raw(v, 12, 7); }
 
@@ -122,8 +130,14 @@ u64 shader_program_hash(const ShaderProgram *p);  // of the code and swizzle wor
 std::string shader_msl(const ShaderProgram *p, u32 entry, const char *name);
 // the same for one set of bool/int uniforms (flow resolved statically), or "" if it cannot be done exactly
 std::string shader_msl_spec(const ShaderProgram *p, u32 entry, const char *name, u32 b, const u8 (*iu)[4]);
+std::string shader_glsl_spec(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs);
 // the bool uniforms (bit mask) and int uniforms (*loops, bit mask) the program's flow control reads
 u32 shader_static_uniforms(const ShaderProgram *p, u32 *loops);
+void shader_entry_info(const ShaderProgram *p, u32 entry, u64 *id, u32 *bmask, u32 *lmask);
+// is this Level-5's outline geometry shader? If so, which uniforms hold its colour and thickness
+bool shader_outline_gs(const ShaderProgram *p, u32 *color_reg, u32 *thick_reg);
+int shader_outline_normal(const ShaderProgram *p, u32 entry);
+constexpr s8 kOutlineSlot = -128;  // in a vertex shader's output map: it draws such an outline (see gen_vs_glsl)
 bool shader_run4(const ShaderProgram *p, ShaderUnit4 &u, const V4 *uniforms, const bool *b,
                  const u8 (*i)[4], u32 entry, const V4 (*in)[16], u32 inmask, V4 (*out)[16],
                  u32 outmask);
@@ -184,6 +198,7 @@ struct TexUnitState {
     u32 border = 0;
     u32 w = 0, h = 0;
     const TexEntry *face[6] = {};
+    u32 face_addr[6] = {}, fmt = 0, levels = 1;  // (Wii U) what to decode
     u32 shadow_bias = 0;
     bool shadow_ortho = false;
     bool fast_wrap = false;  // both wrap modes are clamp-to-edge or repeat, power-of-two size
@@ -197,6 +212,7 @@ struct TevStageState {
     u8 cop, aop, cmul, amul;
     u32 konst;
     bool upd_rgb, upd_a;
+#ifndef __WIIU__
     // precomputed for the vectorized combiner (tev_prepare)
     alignas(16) u8 idx[16];  // byte indices into the 64-byte source table: operand k lanes 4k..4k+3
     alignas(16) u8 inv[16];  // 0xff where the modifier inverts (1 - x)
@@ -206,6 +222,7 @@ struct TevStageState {
     alignas(16) u8 q_idx[3][16];   // both, when color and alpha sources are the same
     alignas(16) u8 q_inv[3][16];
     bool q_same[3];
+#endif
 };
 struct DrawState;
 void tev_prepare(DrawState &ds);  // fills idx/inv and the number of active stages
@@ -247,6 +264,9 @@ struct LightingState {
          shadow_secondary = false, shadow_alpha = false, primary_alpha = false,
          secondary_alpha = false, clamp_highlights = false;
     std::shared_ptr<const LightLuts> luts;
+#ifdef __WIIU__
+    void *lut_tex = nullptr;  // in place of luts: the tables as a texture (gx2_backend.cpp)
+#endif
 };
 
 struct ProcTexState {
@@ -297,6 +317,8 @@ struct DrawState {
     TexUnitState tex[3];
     ProcTexState proctex;
     bool need_tex[4];
+    bool uses_tex[3];  // the combiners or lighting read them
+    u32 tex_sig = 0;   // (Wii U) the registers the units came from
     TevStageState tev[6];
     u32 tev_n;  // stages after this are pass-through
     // per-pixel stage program after constant folding / pass-through removal (tev_prepare)
@@ -310,6 +332,9 @@ struct DrawState {
     bool fog_flip;
     u32 fog_color;
     std::shared_ptr<const FogLut> fog_lut;
+#ifdef __WIIU__
+    void *fog_tex = nullptr;  // in place of fog_lut
+#endif
     bool gas;
 
     // output merger
@@ -361,6 +386,9 @@ struct GpuState {
     u32 fog_lut[128];
     u32 pt_noise[128], pt_cmap[128], pt_amap[128], pt_color[256], pt_cdiff[256];
     bool light_lut_dirty, fog_lut_dirty, pt_dirty;
+#ifdef __WIIU__
+    u64 light_lut_hash, fog_lut_hash;  // of what's in the tables, kept up to date by each write
+#endif
     std::shared_ptr<const LightLuts> light_luts;
     std::shared_ptr<const FogLut> fog_luts;
     std::shared_ptr<const ProcTexLuts> pt_luts;
@@ -372,6 +400,9 @@ struct GpuState {
     u64 regs_version;
     u64 ds_version;
     DrawState *ds;
+#ifdef __WIIU__
+    u64 ds_hash;  // of the registers a draw state comes from, kept up to date by each write
+#endif
 };
 extern GpuState g;
 
@@ -499,6 +530,36 @@ void metal_display_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_di
 // (call after metal_guest_read); metal_note_gpu_output: a transfer or copy of GPU output wrote it.
 bool metal_gpu_made(u32 paddr, u32 size);
 void metal_note_gpu_output(u32 paddr, u32 size);
+#ifdef __WIIU__
+// one draw for port/wiiu/gx2_backend.cpp, which runs the vertex program as a compiled GX2 shader reading guest memory directly
+struct Gx2Attr {
+    u32 offset, stride;
+    u8 fmt, elems;
+    bool is_default;
+};
+struct Gx2Draw {
+    u32 base, num_attr, in_maxi;
+    Gx2Attr attr[16];
+    u64 in_map;
+    s8 slot_src[24];
+    u32 topology, count, index_addr, first;
+    bool indexed, index_u16;
+    const ShaderProgram *prog;
+    u32 entry;
+    const DrawState *ds;
+    const float *outline_color = nullptr, *outline_thick = nullptr;  // set when this is that outline shader's mesh
+    bool outline_scale_w = false;
+};
+bool gx2_draw(const Gx2Draw &d);  // false: no compiled shader, shade it on the CPU
+bool gxt();                       // a debug trace is on: a file named "gxtrace" in the data folder holds a frame number and a count of lines
+void *gx2_light_lut();            // the tables as they are now, as a texture
+void *gx2_fog_lut();
+void gx2_flush_cpu_batch();
+bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control);  // true: done, guest memory needn't be filled too
+extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing will show
+extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
+bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
+#endif
 // deferred draws (vertex.cpp): draws are recorded and processed in parallel at batch flush
 bool vtx_jobs_pending();
 void vtx_finish_jobs();
@@ -511,6 +572,11 @@ bool raster_blend_selftest();  // vectorized vs scalar blending (unit tests)
 void raster_begin_draw(const DrawState *ds);
 
 void build_draw_state(DrawState &ds);
+#ifdef __WIIU__
+void draw_state_cache_trim();
+extern u32 ds_built;         // for the log
+extern u32 ds_churn[0x200];  // (Wii U) and which registers changed between the builds
+#endif
 
 // fragment pipeline helpers (fragment.cpp)
 struct FragIn {
@@ -519,6 +585,7 @@ struct FragIn {
 };
 u32 sample_texture(const TexUnitState &tu, float u, float v, float w, float lod);
 u32 sample_proctex(const ProcTexState &pt, float u, float v);
+float proctex_rand(u32 x, u32 y);  // its noise generator: -1..1, repeats every 144 in both
 void compute_lighting(const LightingState &ls, const float quat[4], const float view[3],
                       const u32 tex[4], u32 &primary, u32 &secondary);
 // four fragments: quat[component][lane], view[component][lane], tex[unit][lane]

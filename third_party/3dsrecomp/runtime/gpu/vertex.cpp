@@ -83,10 +83,17 @@ inline void load_vertex(const Loader &L, u32 vertex, V4 *in, const V4 *defaults 
             for (u32 c = 0; c < A.elems; c++) {
                 s16 v;
                 memcpy(&v, p + 2 * c, 2);
-                o[c] = (float)v;
+                o[c] = (float)(s16)le16((u16)v);
             }
             break;
-        default: memcpy(o, p, 4 * A.elems); break;
+        default:
+            for (u32 c = 0; c < A.elems; c++) {
+                u32 v;
+                memcpy(&v, p + 4 * c, 4);
+                v = le32(v);
+                memcpy(&o[c], &v, 4);
+            }
+            break;
         }
         for (u32 c = A.elems; c < 4; c++) o[c] = c == 3 ? 1.0f : 0.0f;
     }
@@ -685,26 +692,84 @@ void vtx_draw(bool indexed) {
     gs_reconfigure();
 
     // vertex ids
-    idx_list.resize(n);
-    if (indexed) {
-        const u32 ia = regs[R::INDEX_ARRAY];
-        const u8 *ip = pptr(L.base + (ia & 0x0fffffff));
-        if (!ip) return;
-        if (ia >> 31) {
-            for (u32 i = 0; i < n; i++) {
-                u16 v;
-                memcpy(&v, ip + 2 * i, 2);
-                idx_list[i] = v;
+    const auto fill_ids = [&]() -> bool {
+        idx_list.resize(n);
+        if (indexed) {
+            const u32 ia = regs[R::INDEX_ARRAY];
+            const u8 *ip = pptr(L.base + (ia & 0x0fffffff));
+            if (!ip) return false;
+            if (ia >> 31) {
+                for (u32 i = 0; i < n; i++) {
+                    u16 v;
+                    memcpy(&v, ip + 2 * i, 2);
+                    idx_list[i] = le16(v);
+                }
+            } else {
+                for (u32 i = 0; i < n; i++) idx_list[i] = ip[i];
             }
         } else {
-            for (u32 i = 0; i < n; i++) idx_list[i] = ip[i];
+            const u32 off = regs[R::VERTEX_OFFSET];
+            for (u32 i = 0; i < n; i++) idx_list[i] = i + off;
         }
-    } else {
-        const u32 off = regs[R::VERTEX_OFFSET];
-        for (u32 i = 0; i < n; i++) idx_list[i] = i + off;
-    }
+        return true;
+    };
+#ifdef __WIIU__
+    // the GX2 path below reads the indices itself
+    const bool gx2_path = !gsp.active && !cur_ds->skip && g.pa.index == 0 && !g.pa.strip_ready;
+    if (!gx2_path && !fill_ids()) return;
+#else
+    if (!fill_ids()) return;
+#endif
 
+#ifdef __WIIU__
+    auto fill_gx2_draw = [&](Gx2Draw &d) {
+        d.base = L.base;
+        d.num_attr = L.num;
+        for (u32 i = 0; i < 16; i++) {
+            d.attr[i].offset = L.a[i].offset;
+            d.attr[i].stride = L.a[i].stride;
+            d.attr[i].fmt = L.a[i].fmt;
+            d.attr[i].elems = L.a[i].elems;
+            d.attr[i].is_default = L.a[i].is_default;
+        }
+        d.in_maxi = regs[R::VS + R::SH_INPUT_CFG] & 0xf;
+        d.in_map = (u64)regs[R::VS + R::SH_PERM_LO] | ((u64)regs[R::VS + R::SH_PERM_HI] << 32);
+        d.topology = g.pa.topology;
+        d.indexed = indexed;
+        d.count = n;
+        d.index_addr = indexed ? L.base + (regs[R::INDEX_ARRAY] & 0x0fffffff) : 0;
+        d.index_u16 = indexed && (regs[R::INDEX_ARRAY] >> 31);
+        d.first = indexed ? 0 : regs[R::VERTEX_OFFSET];
+        d.prog = prog;
+        d.entry = entry;
+        d.ds = cur_ds;
+    };
+#endif
     if (gsp.active) {
+#ifdef RECOMP_VS_LOG
+        {
+            extern void vs_log(const ShaderProgram *, u32, const ShaderSetup &, const s8 *);
+            extern void fs_log(const DrawState &);
+            s8 slots[24];
+            memset(slots, kOutlineSlot, sizeof slots);
+            vs_log(prog, entry, g.vs, slots);
+            fs_log(*cur_ds);
+        }
+#endif
+#ifdef __WIIU__
+        // Level-5's outlines take about 25 us a vertex here, far too slow: on the GPU they're the mesh itself, pushed out the same way behind the model
+        u32 color_reg, thick_reg;
+        if (gsp.mode == 0 && gsp.end == 3 && outmask == 7 && indexed && !g.gs.b[0] && (regs[R::GS + R::SH_PERM_LO] & 0xfff) == 0x210 &&
+            shader_outline_gs(shader_get_program(g.gs), &color_reg, &thick_reg)) {
+            Gx2Draw d;
+            fill_gx2_draw(d);
+            memset(d.slot_src, kOutlineSlot, sizeof d.slot_src);
+            d.outline_color = g.gs.f[color_reg].v;
+            d.outline_thick = g.gs.f[thick_reg].v;
+            d.outline_scale_w = g.gs.b[1];
+            if (gx2_draw(d)) return;
+        }
+#endif
         // geometry shader path: sequential (GS state persists between invocations)
         vtx_finish_jobs();
         ShaderUnit &u = unit_for(0);
@@ -750,6 +815,48 @@ void vtx_draw(bool indexed) {
         return;
     }
 
+#ifdef __WIIU__
+    {
+        OutMap om;
+        setup_outmap(om);
+        Gx2Draw d;
+        fill_gx2_draw(d);
+        // output registers are numbered among those the mask enables
+        u32 out_reg[16], nout = 0;
+        for (u32 r = 0; r < 16; r++)
+            if (outmask & (1u << r)) out_reg[nout++] = r;
+        for (u32 i = 0; i < 24; i++) {
+            const s32 s = om.slot_src[i];
+            d.slot_src[i] = s >= 0 && (u32)(s >> 2) < nout ? (s8)(out_reg[s >> 2] * 4 + (s & 3)) : -1;
+        }
+        if (gx2_draw(d)) return;
+        if (!fill_ids()) return;
+    }
+#endif
+#ifdef RECOMP_VS_LOG
+    {
+        extern void vs_log(const ShaderProgram *, u32, const ShaderSetup &, const s8 *);
+        extern void fs_log(const DrawState &);
+        OutMap om;
+        setup_outmap(om);
+        u32 out_reg[16], nout = 0;
+        for (u32 r = 0; r < 16; r++)
+            if (outmask & (1u << r)) out_reg[nout++] = r;
+        s8 slots[24];
+        for (u32 i = 0; i < 24; i++) {
+            const s32 s = om.slot_src[i];
+            slots[i] = s >= 0 && (u32)(s >> 2) < nout ? (s8)(out_reg[s >> 2] * 4 + (s & 3)) : -1;
+        }
+        vs_log(prog, entry, g.vs, slots);
+        fs_log(*cur_ds);
+    }
+#ifndef __WIIU__
+    // RECOMP_NO_DRAW: only the last two seconds of every minute are drawn, for a run after what a game draws with: the software renderer is nearly all of the time, and games get
+    // much further without it. The end of the minute, so that a shot every 3600 frames (or a multiple) comes after two seconds of drawing, not of nothing.
+    static const bool no_draw = getenv("RECOMP_NO_DRAW");
+    if (no_draw && g_frame % 3600 < 3480) return;
+#endif
+#endif
     if (gpu_vs && gpu_draw(L, prog, entry, outmask, indexed, n)) return;
 
     // record a deferred job

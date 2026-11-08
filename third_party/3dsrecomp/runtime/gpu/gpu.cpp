@@ -178,8 +178,12 @@ void worker_main(u32 tid) {
 
 void pool_init() {
     if (!workers.empty()) return;
+#ifdef __WIIU__
+    u32 n = 0;  // the three cores are spoken for
+#else
     u32 hw = std::thread::hardware_concurrency();
     u32 n = hw > 2 ? hw - 2 : 0;
+#endif
     if (n > 8) n = 8;
     if (const char *e = getenv("GPU_THREADS")) n = (u32)atoi(e) > 0 ? (u32)atoi(e) - 1 : 0;
     for (u32 i = 0; i < n; i++) {
@@ -271,9 +275,10 @@ static void submit_immediate(u32 value) {
     g.imm_queue[g.imm_n++] = value;
     if (g.imm_n < 3) return;
     g.imm_n = 0;
+    // Unpacked before idx is compared, or GCC saves that compare with mfcr across the call. Cemu then takes the wrong branch below and drops every immediate vertex; a real console doesn't.
+    const V4 a = unpack_f24(g.imm_queue);
     u32 &idx = g.regs[R::FIXATTR_INDEX];
     if (idx > 15) return;
-    V4 a = unpack_f24(g.imm_queue);
     if (idx < 15) {
         g.default_attr[idx] = a;
         idx++;
@@ -333,6 +338,15 @@ void init_special() {
     }
 }
 
+#ifdef __WIIU__
+// A table entry's share of the hash of the whole table: a write only has to swap one share for another.
+inline u64 lut_mix(u32 slot, u32 value) {
+    const u32 a = (value ^ 0x9E3779B9u) * 0x85EBCA6Bu + slot * 0xC2B2AE35u;
+    const u32 b = (a ^ (a >> 15)) * 0x2C1B3C6Du;
+    return (u64)(b ^ (b >> 12)) << 32 | (((a + value) * 0x297A2D39u) ^ (b >> 13));
+}
+#endif
+
 void handle_special(u32 id, u32 value) {
     u32 *regs = g.regs;
     if (id >= R::VS + R::SH_FLOAT_DATA && id < R::VS + R::SH_FLOAT_DATA + 8) {
@@ -382,6 +396,9 @@ void handle_special(u32 id, u32 value) {
         u32 &cfg = regs[R::LUT_INDEX];
         u32 index = cfg & 0xff, type = (cfg >> 8) & 0x1f;
         if (type < 24 && g.light_lut[type][index] != value) {
+#ifdef __WIIU__
+            g.light_lut_hash ^= lut_mix(type << 8 | index, g.light_lut[type][index]) ^ lut_mix(type << 8 | index, value);
+#endif
             g.light_lut[type][index] = value;
             g.light_lut_dirty = true;
         }
@@ -392,6 +409,9 @@ void handle_special(u32 id, u32 value) {
         u32 &off = regs[R::FOG_LUT_OFFSET];
         u32 o = off & 0xffff;
         if (g.fog_lut[o % 128] != value) {
+#ifdef __WIIU__
+            g.fog_lut_hash ^= lut_mix(o % 128, g.fog_lut[o % 128]) ^ lut_mix(o % 128, value);
+#endif
             g.fog_lut[o % 128] = value;
             g.fog_lut_dirty = true;
         }
@@ -446,6 +466,9 @@ void handle_special(u32 id, u32 value) {
     case R::DRAW:
     case R::DRAW_INDEXED:
         if (g_trace) LOG("gpu trace: draw%s n=%u\n", id == R::DRAW_INDEXED ? " indexed" : "", regs[R::NUM_VERTICES]);
+#ifdef __WIIU__
+        if (gx2_skip_pass) break;
+#endif
         vtx_draw(id == R::DRAW_INDEXED);
         break;
     case R::GS + R::SH_BOOL:
@@ -483,7 +506,20 @@ void handle_special(u32 id, u32 value) {
 inline void write_reg(u32 id, u32 value, u32 mask) {
     if (id >= 0x300) return;
     const u32 m = expand_mask[mask];
-    g.regs[id] = (g.regs[id] & ~m) | (value & m);
+    const u32 was = g.regs[id];
+    g.regs[id] = (was & ~m) | (value & m);
+#ifdef __WIIU__
+    // Vertex arrays, draws and the shader units (0x200 up) aren't in the draw state, and games resend a lot of unchanged state
+    if (special[id]) {
+        if (id < 0x200) g.regs_version++;
+        handle_special(id, value);
+    } else if (id < 0x200 && g.regs[id] != was) {
+        g.regs_version++;
+        // (these three count their own place as tables are written, so what's here isn't what was last written; and a state is looked up without
+        // its texture units, or a game with thousands of sprites has a state for each: see cached_draw_state)
+        if (id != R::LUT_INDEX && id != R::FOG_LUT_OFFSET && id != R::PT_LUT_CONFIG && !(id > R::TEX_CONFIG && id <= R::TEX2_TYPE)) g.ds_hash ^= lut_mix(id, was) ^ lut_mix(id, g.regs[id]);
+    }
+#else
     if (special[id]) {
         // data streams don't affect the draw state
         if (!(id >= R::FIXATTR_DATA && id < R::FIXATTR_DATA + 3)) g.regs_version++;
@@ -491,6 +527,7 @@ inline void write_reg(u32 id, u32 value, u32 mask) {
     } else {
         g.regs_version++;
     }
+#endif
 }
 }  // namespace
 
@@ -501,8 +538,8 @@ void cmd_run(u32 paddr, u32 size) {
     while (cl.idx < cl.len && !stop_requested) {
         if (cl.idx & 1) cl.idx++;
         if (cl.idx + 1 >= cl.len) break;
-        const u32 value = cl.head[cl.idx];
-        const u32 header = cl.head[cl.idx + 1];
+        const u32 value = le32(cl.head[cl.idx]);
+        const u32 header = le32(cl.head[cl.idx + 1]);
         cl.idx += 2;
         const u32 id = header & 0xffff;
         const u32 mask = (header >> 16) & 0xf;
@@ -514,7 +551,7 @@ void cmd_run(u32 paddr, u32 size) {
         cl.idx += count;
         write_reg(id, value, mask);
         for (u32 i = 0; i < count && !stop_requested; i++)
-            write_reg(group ? id + 1 + i : id, extra[i], mask);
+            write_reg(group ? id + 1 + i : id, le32(extra[i]), mask);
     }
 }
 
@@ -549,6 +586,9 @@ void process_command_list(u32 paddr, u32 size_bytes) {
     metal_poll();
     texcache_new_epoch();
     g.ds_version = 0;
+#ifdef __WIIU__
+    draw_state_cache_trim();
+#endif
     static const double hitch_ms = getenv("GPU_HITCH_MS") ? atof(getenv("GPU_HITCH_MS")) : 0;
     const double t0 = g_stats || hitch_ms ? now_ms() : 0;
     cmd_run(paddr, size_bytes);

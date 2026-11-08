@@ -14,6 +14,12 @@ void memory_fill(u32 start, u32 end, u32 value, u32 control) {
         return;
     }
     const u32 len = end - start;
+#ifdef __WIIU__
+    if (gx2_memory_fill(start, end, value, control)) {
+        texcache_invalidate(start, len);
+        return;
+    }
+#endif
     metal_guest_prewrite(start, len);
     if (control & 0x100) {
         for (u32 i = 0; i + 3 <= len; i += 3) {
@@ -22,13 +28,34 @@ void memory_fill(u32 start, u32 end, u32 value, u32 control) {
             s[i + 2] = value >> 16;
         }
     } else if (control & 0x200) {
-        for (u32 i = 0; i + 4 <= len; i += 4) memcpy(s + i, &value, 4);
+        {
+            const u32 v = le32(value);
+            for (u32 i = 0; i + 4 <= len; i += 4) memcpy(s + i, &v, 4);
+        }
     } else {
-        const u16 v = (u16)value;
+        const u16 v = le16((u16)value);
         for (u32 i = 0; i + 2 <= len; i += 2) memcpy(s + i, &v, 2);
     }
     texcache_invalidate(start, len);
     metal_guest_written(start, len);
+}
+
+// Azran's title and save screens copy the finished screen to a texture and build its mipmaps this way, every frame. In a tile, a 2x2 block is
+// four pixels in a row, and 16 of those averages fill a quarter of the output tile, so no pixel needs a position of its own. The average is per
+// byte, so byte order doesn't matter.
+static void halve_tiled_rgba8(const u8 *src, u8 *dst, u32 in_w, u32 out_w, u32 out_h) {
+    for (u32 y = 0; y < out_h; y += 8)
+        for (u32 x = 0; x < out_w; x += 8) {
+            u32 *d = (u32 *)(dst + tiled_offset(x, y, out_w, 4));
+            for (u32 q = 0; q < 4; q++) {
+                const u32 *s = (const u32 *)(src + tiled_offset(2 * x + (q & 1) * 8, 2 * y + (q >> 1) * 8, in_w, 4));
+                for (u32 i = 0; i < 16; i++, s += 4) {
+                    const u32 even = (s[0] & 0xff00ff) + (s[1] & 0xff00ff) + (s[2] & 0xff00ff) + (s[3] & 0xff00ff);
+                    const u32 odd = (s[0] >> 8 & 0xff00ff) + (s[1] >> 8 & 0xff00ff) + (s[2] >> 8 & 0xff00ff) + (s[3] >> 8 & 0xff00ff);
+                    *d++ = (even >> 2 & 0xff00ff) | (odd << 6 & 0xff00ff00);
+                }
+            }
+        }
 }
 
 void transfer_convert(const u8 *src, u8 *dst, u32 in_dims, u32 out_dims, u32 flags) {
@@ -41,6 +68,11 @@ void transfer_convert(const u8 *src, u8 *dst, u32 in_dims, u32 out_dims, u32 fla
     const u32 ibpp = pixel_bytes(in_fmt), obpp = pixel_bytes(out_fmt);
     const u32 hs = scaling != 0 ? 1 : 0, vs = scaling == 2 ? 1 : 0;
     const u32 out_w = out_w0 >> hs, out_h = out_h0 >> vs;
+    const bool halve = scaling == 2 && in_fmt == 0 && out_fmt == 0 && !flip && !in_linear && dont_swizzle && !(out_w & 7) && !(out_h & 7);
+    if (halve) {
+        halve_tiled_rgba8(src, dst, in_w, out_w, out_h);
+        return;
+    }
     for (u32 y = 0; y < out_h; y++) {
         const u32 iy = y << vs;
         const u32 oy = flip ? out_h - 1 - y : y;
@@ -119,6 +151,9 @@ void display_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u3
 void texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap,
                   u32 flags) {
     (void)flags;
+#ifdef __WIIU__
+    if (gx2_skip_copies) return;
+#endif
     ensure_init();
     raster_flush();
     metal_poll();
@@ -130,6 +165,10 @@ void texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 o
     }
     u32 remaining = size & ~15u;
     if (!remaining) return;
+#ifdef __WIIU__
+    if (gxt()) LOG("[gxt] texture copy %08x -> %08x, size %x, gaps %08x %08x\n", in_paddr, out_paddr, size, in_width_gap, out_width_gap);
+    if (gx2_texture_copy(in_paddr, out_paddr, size, in_width_gap, out_width_gap)) return;
+#endif
     const u32 in_gap = (in_width_gap >> 16) * 16, out_gap = (out_width_gap >> 16) * 16;
     const u32 in_width = in_gap == 0 ? remaining : (in_width_gap & 0xffff) * 16;
     const u32 out_width = out_gap == 0 ? remaining : (out_width_gap & 0xffff) * 16;

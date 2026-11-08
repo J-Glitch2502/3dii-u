@@ -2,6 +2,7 @@
 // rasterizer with the full per-fragment pipeline (textures, lighting, TEV, fog, alpha / stencil /
 // depth tests, blending, logic ops) operating on PICA tiled framebuffers in guest memory.
 #include <algorithm>
+#include <unordered_map>
 
 #include "gpu/pica.h"
 
@@ -15,7 +16,11 @@ namespace {
 constexpr u32 TILE_SHIFT = 5, TILE = 1u << TILE_SHIFT;
 
 // where triangle setup output goes on this thread (null: straight into the batch, binned)
+#ifdef __WIIU__  // no thread-local storage in an RPX; one GPU thread
+TriSink *tl_sink = nullptr;
+#else
 thread_local TriSink *tl_sink = nullptr;
+#endif
 
 struct Batch {
     RTConfig rt;
@@ -99,6 +104,7 @@ void raster_init() {
 
 // ---------------------------------------------------------------- LUT snapshots
 static void update_luts() {
+#ifndef __WIIU__  // there, gx2_backend.cpp makes textures straight from the game's values: converting to float and back is slow on its CPU
     if (g.light_lut_dirty || !g.light_luts) {
         auto L = std::make_shared<LightLuts>();
         for (u32 t = 0; t < 24; t++)
@@ -121,6 +127,7 @@ static void update_luts() {
         g.fog_luts = F;
         g.fog_lut_dirty = false;
     }
+#endif
     if (g.pt_dirty || !g.pt_luts) {
         auto P = std::make_shared<ProcTexLuts>();
         for (u32 i = 0; i < 128; i++) {
@@ -252,14 +259,22 @@ static void setup_texunit(DrawState &ds, u32 i) {
     for (u32 f = 0; f < nfaces; f++)
         if (overlaps_rt(faddr[f], total)) raster_flush();
     for (u32 f = 0; f < nfaces; f++) {
+#ifdef __WIIU__
+        tu.face_addr[f] = faddr[f];
+        tu.fmt = fmt;
+        tu.levels = levels;
+#else
         metal_guest_read(faddr[f], total);  // render-to-texture: GPU-only data to guest first
         tu.face[f] = texcache_get(faddr[f], tu.w, tu.h, fmt, levels);
+#endif
     }
     auto simple = [](u32 m) { return m == 0 || m == 2 || m == 6 || m == 7; };
     const bool pow2 = (tu.w & (tu.w - 1)) == 0 && (tu.h & (tu.h - 1)) == 0;
     tu.fast_wrap = simple(tu.wrap_s) && simple(tu.wrap_t) && pow2;
     tu.simple2d = tu.type == 0 && tu.fast_wrap && !tu.need_lod && tu.face[0] && !tu.face[0]->lv.empty();
+#ifndef __WIIU__  // for the software sampler
     tu.mag_rho2 = exp2f(-2.0f * tu.bias) * 0.999f;
+#endif
 }
 
 // selection tables for blend factor slot k (0..3 source, 4..7 destination; channel = k & 3)
@@ -285,6 +300,29 @@ static void blend_factor_tables(DrawState &ds, u32 k, u32 f) {
     ds.bf_q[k] = (u8)(ds.bf_w[k] * 4 + ds.bf_sh[k] / 8);
     ds.bf_qinv[k] = inv;
     ds.bf_inv[k] = inv;
+}
+
+// The texture units and the attributes that follow from them: what changes from draw to draw where the rest of a state doesn't (cached_draw_state)
+static void setup_textures(DrawState &ds) {
+    for (u32 i = 0; i < 3; i++) {
+        if (ds.uses_tex[i] && ds.need_shade && !ds.skip) {
+            setup_texunit(ds, i);
+        } else {
+            ds.tex[i] = TexUnitState{};
+        }
+        ds.need_tex[i] = ds.tex[i].enabled;
+    }
+    u32 ag = 0;
+    if (ds.need_shade) {
+        ag |= AG_COLOR;
+        auto need_coord = [&](u32 c) { ag |= c == 2 ? AG_TC2W : AG_TC01; };
+        for (u32 i = 0; i < 3; i++)
+            if (ds.need_tex[i]) need_coord(ds.tex[i].coord);
+        if (ds.need_tex[0] && ds.tex[0].type != 0) ag |= AG_TC2W;  // tc0.w
+        if (ds.need_tex[3]) need_coord(ds.proctex.coord);
+        if (ds.lighting) ag |= AG_QUAT | AG_VIEW;
+    }
+    ds.attr_groups = ag;
 }
 
 void build_draw_state(DrawState &ds) {
@@ -411,6 +449,9 @@ void build_draw_state(DrawState &ds) {
     ds.fog_flip = (bufin >> 16) & 1;
     ds.fog_color = regs[R::FOG_COLOR] & 0xffffff;
     ds.fog_lut = g.fog_luts;
+#ifdef __WIIU__
+    if (ds.fog && ds.need_shade && !ds.skip) ds.fog_tex = gx2_fog_lut();
+#endif
 
     // lighting
     ds.lighting = !(regs[R::LIGHTING_DISABLE] & 1);
@@ -481,19 +522,15 @@ void build_draw_state(DrawState &ds) {
             lt.num = num;
         }
         ls.luts = g.light_luts;
+#ifdef __WIIU__
+        if (ds.need_shade && !ds.skip) ls.lut_tex = gx2_light_lut();
+#endif
         if (ls.bump_mode == 1 || ls.bump_mode == 2) uses_tex[ls.bump_sel & 3] = true;
         if (ls.shadow_enable) uses_tex[ls.shadow_sel & 3] = true;
     }
 
-    // textures
-    for (u32 i = 0; i < 3; i++) {
-        if (uses_tex[i] && ds.need_shade && !ds.skip) {
-            setup_texunit(ds, i);
-        } else {
-            ds.tex[i] = TexUnitState{};
-        }
-        ds.need_tex[i] = ds.tex[i].enabled;
-    }
+    // textures: setup_textures below
+    for (u32 i = 0; i < 3; i++) ds.uses_tex[i] = uses_tex[i];
     ProcTexState &pt = ds.proctex;
     pt.enabled = ((regs[R::TEX_CONFIG] >> 10) & 1) && uses_tex[3];
     ds.need_tex[3] = pt.enabled;
@@ -520,20 +557,58 @@ void build_draw_state(DrawState &ds) {
         pt.lut_offset = regs[R::PT_LUT_OFFSET] & 0xff;
         pt.luts = g.pt_luts;
     }
-
-    // attributes to interpolate
-    u32 ag = 0;
-    if (ds.need_shade) {
-        ag |= AG_COLOR;
-        auto need_coord = [&](u32 c) { ag |= c == 2 ? AG_TC2W : AG_TC01; };
-        for (u32 i = 0; i < 3; i++)
-            if (ds.need_tex[i]) need_coord(ds.tex[i].coord);
-        if (ds.need_tex[0] && ds.tex[0].type != 0) ag |= AG_TC2W;  // tc0.w
-        if (ds.need_tex[3]) need_coord(pt.coord);
-        if (ds.lighting) ag |= AG_QUAT | AG_VIEW;
-    }
-    ds.attr_groups = ag;
+    setup_textures(ds);
 }
+
+#ifdef __WIIU__
+// Building a state is a large part of a draw on this CPU, and the same ones keep coming back, the game's materials frame after frame. A state comes from the registers, whose hash is
+// kept up to date as they're written, and from tables that change without them, so what comes from those is looked up again each time.
+static std::unordered_map<u64, std::unique_ptr<DrawState>> ds_cache;
+u32 ds_built;
+u32 ds_churn[0x200];  // per register: how many state builds found it changed since the build before (the frame-rate report prints the worst)
+static u32 ds_last_regs[0x200];
+
+void draw_state_cache_trim() {
+    if (ds_cache.size() >= 4096) ds_cache.clear();  // called between command lists, when nothing is using one
+}
+
+// the texture units' registers, which ds_hash leaves out
+static u32 tex_regs_sig() {
+    u32 h = 0;
+    for (u32 id = R::TEX_CONFIG + 1; id <= R::TEX2_TYPE; id++) h = (h ^ g.regs[id]) * 0x9E3779B1u;
+    return h;
+}
+
+static DrawState *cached_draw_state() {
+    const auto it = ds_cache.find(g.ds_hash);
+    if (it == ds_cache.end()) return nullptr;
+    DrawState &ds = *it->second;
+    update_luts();
+    if (ds.need_shade && !ds.skip) {
+        if (ds.fog) ds.fog_tex = gx2_fog_lut();
+        if (ds.lighting) ds.light.lut_tex = gx2_light_lut();
+    }
+    if (ds.need_tex[3]) ds.proctex.luts = g.pt_luts;
+    // Other textures, the state otherwise the same: thousands of them in Dream Team, which built a state for each, up to 180 a frame, at 11 fps
+    if (const u32 sig = tex_regs_sig(); sig != ds.tex_sig) {
+        if (batch_nonempty()) raster_flush();  // the draws in it hold this state, with the textures they need
+        ds.tex_sig = sig;
+        setup_textures(ds);
+        return &ds;
+    }
+    // what setup_texunit does for render to texture
+    if (batch_nonempty())
+        for (u32 i = 0; i < 3; i++) {
+            const TexUnitState &t = ds.tex[i];
+            if (!ds.need_tex[i] || t.null_tex) continue;
+            u32 total = 0;
+            for (u32 l = 0; l < t.levels; l++) total += texture_level_bytes(t.w >> l, t.h >> l, t.fmt);
+            for (u32 f = 0; f < (t.type == 1 || t.type == 4 ? 6u : 1u); f++)
+                if (overlaps_rt(t.face_addr[f], total)) raster_flush();
+        }
+    return &ds;
+}
+#endif
 
 DrawState *draw_state() {
     if (g.ds && g.ds_version == g.regs_version) return g.ds;
@@ -548,7 +623,25 @@ DrawState *draw_state() {
         batch.bins.resize(batch.tiles_x * batch.tiles_y);
         for (auto &b : batch.bins) b.clear();
     }
+#ifdef __WIIU__
+    if (DrawState *cached = cached_draw_state()) {
+        if (!batch.has_rt) {  // a flush for its textures
+            batch.rt = rt;
+            batch.has_rt = true;
+        }
+        g.ds = cached;
+        g.ds_version = g.regs_version;
+        return cached;
+    }
+#endif
     auto ds = std::make_unique<DrawState>();
+#ifdef __WIIU__
+    for (u32 i = 0; i < 0x200; i++)
+        if (g.regs[i] != ds_last_regs[i]) {
+            ds_churn[i]++;
+            ds_last_regs[i] = g.regs[i];
+        }
+#endif
     build_draw_state(*ds);  // may flush (render-to-texture); states vector survives as needed
     // the texture setup may have flushed the batch: make sure our RT is still registered
     if (!batch.has_rt) {
@@ -557,12 +650,33 @@ DrawState *draw_state() {
     }
     g.ds = ds.get();
     g.ds_version = g.regs_version;
+#ifdef __WIIU__
+    g.ds->tex_sig = tex_regs_sig();
+    ds_cache[g.ds_hash] = std::move(ds);
+    ds_built++;
+#else
     batch.states.push_back(std::move(ds));
+#endif
     return g.ds;
 }
 
 void raster_begin_draw(const DrawState *) {}
 
+#ifdef __WIIU__  // GX2 does clipping and rasterization; only the batching below is shared
+void raster_prepare_vertex(const DrawState &, const OutVertex &, SV &, u32 &) {}
+void raster_triangle_sv(const DrawState *, const SV &, const SV &, const SV &) {}
+void raster_triangle(const DrawState *ds, const OutVertex &a, const OutVertex &b, const OutVertex &c) {
+    if (!tl_sink) vtx_finish_jobs();  // keep primitive order with deferred draws
+    MBatch &mb = batch.mb;
+    const u32 first = (u32)mb.idx.size(), v = (u32)mb.cverts.size();
+    mb.cverts.push_back(a);
+    mb.cverts.push_back(b);
+    mb.cverts.push_back(c);
+    mb.idx.insert(mb.idx.end(), {v | MIDX_CPU, (v + 1) | MIDX_CPU, (v + 2) | MIDX_CPU});
+    mb.add_seg(ds, first);
+}
+bool raster_blend_selftest() { return true; }
+#else
 // ---------------------------------------------------------------- clipping & setup
 namespace {
 struct CV {
@@ -1486,6 +1600,8 @@ void process_tile(u32 item, u32 tid) {
 }
 }  // namespace
 
+#endif
+
 void raster_flush() {
     vtx_finish_jobs();
     if (!batch.mb.empty()) {
@@ -1497,6 +1613,7 @@ void raster_flush() {
         if (rt.depth_addr) texcache_invalidate(rt.depth_addr, rt.w * rt.h * depth_bytes(rt.depth_fmt));
         if (g_stats) g_t_flush += now_ms() - tf;
     }
+#ifndef __WIIU__
     if (!batch.tris.empty()) {
         const double tf = g_stats ? now_ms() : 0;
         batch.active_tiles.clear();
@@ -1545,6 +1662,7 @@ void raster_flush() {
         batch.tris.clear();
         for (auto &b : batch.bins) b.clear();
     }
+#endif
     batch.states.clear();
     g.ds = nullptr;
     g.ds_version = 0;

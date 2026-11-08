@@ -9,9 +9,15 @@
 
 namespace gpu {
 
+#ifdef __clang__
 typedef float f4 __attribute__((ext_vector_type(4)));
 typedef u32 u4 __attribute__((ext_vector_type(4)));
 typedef s32 i4 __attribute__((ext_vector_type(4)));
+#else
+typedef float f4 __attribute__((vector_size(16)));
+typedef u32 u4 __attribute__((vector_size(16)));
+typedef s32 i4 __attribute__((vector_size(16)));
+#endif
 
 enum Op : u8 {
     OP_ADD, OP_DP3, OP_DP4, OP_DPH, OP_DST, OP_EX2, OP_LG2, OP_LITP, OP_MUL, OP_SGE, OP_SLT,
@@ -38,6 +44,11 @@ struct ShaderProgram {
     std::vector<DInst> ins;
     bool simd_ok = true;  // can run in the 4-wide SoA interpreter
     u64 hash = 0;
+    std::vector<u32> raw_code, raw_swz;  // what it was decoded from (for shader_entry_info)
+    struct EntryInfo { u64 id; u32 bmask, lmask; };
+    std::unordered_map<u32, EntryInfo> entries;
+    s8 outline = -1;  // shader_outline_gs: not looked at yet
+    u32 outline_color = 0, outline_thick = 0;
 };
 
 static void set_swizzle(DInst &d, int k, u32 pat) {
@@ -173,10 +184,104 @@ ShaderProgram *shader_decode(const u32 *code, u32 code_size, const u32 *swizzle)
         const u8 op = p->ins[i].op;
         if (op == OP_DST || op == OP_LITP || op == OP_EMIT || op == OP_SETEMIT) p->simd_ok = false;
     }
+    p->raw_code.assign(code, code + code_size);
+    p->raw_swz.assign(swizzle, swizzle + 128);
     return p;
 }
 
+// What an entry point actually runs: instruction memory keeps the tail of longer programs loaded earlier, so the words it was
+// decoded from don't identify a program, only those reachable from the entry do. id doesn't depend on the host's byte order.
+void shader_entry_info(const ShaderProgram *pc, u32 entry, u64 *id, u32 *bmask, u32 *lmask) {
+    auto *p = const_cast<ShaderProgram *>(pc);
+    auto it = p->entries.find(entry);
+    if (it == p->entries.end()) {
+        const u32 n = (u32)p->ins.size();
+        std::vector<char> seen(n, 0);
+        std::vector<u32> todo{entry};
+        ShaderProgram::EntryInfo e{0xcbf29ce484222325ull, 0, 0};
+        while (!todo.empty()) {
+            u32 i = todo.back();
+            todo.pop_back();
+            while (i < n && !seen[i]) {
+                seen[i] = 1;
+                const DInst &I = p->ins[i];
+                if (I.op == OP_END) break;
+                switch (I.op) {
+                case OP_JMPU: case OP_CALLU: case OP_IFU: e.bmask |= 1u << I.bid; break;
+                case OP_LOOP: e.lmask |= 1u << I.iid; break;
+                default: break;
+                }
+                if (I.op == OP_JMPU || I.op == OP_JMPC || I.op == OP_CALL || I.op == OP_CALLC || I.op == OP_CALLU) todo.push_back(I.fdst);
+                if (I.op == OP_IFU || I.op == OP_IFC) {
+                    todo.push_back(I.fdst);
+                    todo.push_back(I.fdst + I.fnum);
+                }
+                i++;
+            }
+        }
+        auto mix = [&](u32 w) {
+            for (u32 k = 0; k < 4; k++) e.id = (e.id ^ ((w >> (8 * k)) & 255)) * 0x100000001b3ull;
+        };
+        mix(entry);
+        for (u32 i = 0; i < n; i++) {
+            if (!seen[i]) continue;
+            mix(i);
+            mix(p->raw_code[i]);
+            if (p->ins[i].op <= OP_MAD) mix(p->raw_swz[p->raw_code[i] >> 26 >= 0x30 ? p->raw_code[i] & 0x1f : p->raw_code[i] & 0x7f]);
+        }
+        it = p->entries.emplace(entry, e).first;
+    }
+    *id = it->second.id;
+    *bmask = it->second.bmask;
+    *lmask = it->second.lmask;
+}
+
 void shader_free(const ShaderProgram *p) { delete p; }
+
+// Level-5's outlines walk a triangle strip with adjacency and, at each silhouette edge, emit a quad from the edge out along an offset each
+// vertex carries. Nothing else has its emit routine, and the offset comes from the one multiply of an input by a uniform into a temporary.
+bool shader_outline_gs(const ShaderProgram *cp, u32 *color_reg, u32 *thick_reg) {
+    auto *p = const_cast<ShaderProgram *>(cp);
+    if (p->outline < 0) {
+        p->outline = 0;
+        static const u8 ops[18] = {OP_MOV, OP_ADD, OP_MOV, OP_SETEMIT, OP_EMIT, OP_MOV, OP_ADD, OP_MOV, OP_SETEMIT, OP_EMIT,
+                                   OP_MOV, OP_MOV, OP_SETEMIT, OP_EMIT, OP_MOV, OP_MOV, OP_SETEMIT, OP_EMIT};
+        static const u8 dsts[18] = {0, 0, 1, 255, 255, 0, 0, 1, 255, 255, 0, 1, 255, 255, 0, 1, 255, 255};
+        static const u8 vids[18] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0};
+        const auto &v = p->ins;
+        for (size_t i = 0; i + 18 <= v.size() && !p->outline; i++) {
+            bool match = true;
+            for (u32 k = 0; k < 18 && match; k++) {
+                const DInst &d = v[i + k];
+                match = d.op == ops[k] && (dsts[k] == 255 || d.dst == REG_OUT + dsts[k]) && (d.op != OP_SETEMIT || (d.vid == vids[k] && d.prim == (k >= 12)));
+            }
+            if (!match || v[i + 2].src[0] < REG_UNI || v[i + 2].src[0] >= REG_OUT || v[i + 7].src[0] != v[i + 2].src[0]) continue;
+            for (const DInst &d : v)
+                if (d.op == OP_MUL && d.dst >= REG_TMP && d.dst < REG_UNI && d.src[0] >= REG_UNI && d.src[0] < REG_OUT && d.src[1] == REG_IN + 2) {
+                    p->outline = 1;
+                    p->outline_color = v[i + 2].src[0] - REG_UNI;
+                    p->outline_thick = d.src[0] - REG_UNI;
+                    break;
+                }
+        }
+    }
+    *color_reg = p->outline_color;
+    *thick_reg = p->outline_thick;
+    return p->outline == 1;
+}
+
+// The vertex programs that go with it normalise the normal in view space, then copy its x and y to make the offset. Which temporary it's
+// still in when the program ends, or -1.
+int shader_outline_normal(const ShaderProgram *p, u32 entry) {
+    int reg = -1;
+    for (u32 i = entry; i < p->ins.size() && p->ins[i].op != OP_END; i++) {
+        const DInst &d = p->ins[i];
+        if (d.op > OP_MAD || d.dst < REG_TMP || d.dst >= REG_UNI) continue;
+        if (reg == d.dst - REG_TMP) reg = -1;
+        if (d.op == OP_MOV && d.src[0] >= REG_TMP && d.src[0] < REG_UNI && d.mask[0] && d.mask[1] && !d.mask[2] && !d.mask[3]) reg = d.src[0] - REG_TMP;
+    }
+    return reg;
+}
 
 const ShaderProgram *shader_get_program(ShaderSetup &s) {
     static std::unordered_map<u64, std::unique_ptr<ShaderProgram>> cache;
@@ -1032,8 +1137,8 @@ struct SpecGen {
     bool ends_plain(u32 s, u32 e) {
         return e <= s || (e - 1 < n && (plain(P->ins[e - 1]) || P->ins[e - 1].op == OP_END));
     }
-    // emits [s, e); in_loop: directly in a loop body, where BREAK/BREAKC end the loop (inc: its counter
-    // increment). Returns whether control can reach e.
+    // emits [s, e); in_loop: directly in a loop body, where BREAK/BREAKC end the loop (inc: which integer uniform
+    // holds its counter increment). Returns whether control can reach e.
     bool block(u32 s, u32 e, bool in_loop, int inc) {
         u32 i = s;
         while (i < e && !fail) {
@@ -1064,10 +1169,10 @@ struct SpecGen {
                     return false;
                 }
                 if (I.op == OP_BREAK) {
-                    w.f("    aL += %d; break;\n", inc);
+                    w.f("    aL += uInt[%d].z; break;\n", inc);
                     return false;
                 }
-                w.o += "    if (" + w.cond(I) + ") { aL += " + std::to_string(inc) + "; break; }\n";
+                w.o += "    if (" + w.cond(I) + ") { aL += uInt[" + std::to_string(inc) + "].z; break; }\n";
                 break;
             case OP_JMPU:
             case OP_JMPC: {
@@ -1155,19 +1260,20 @@ struct SpecGen {
                     fail = true;
                     return false;
                 }
-                const u8 *l = iu[I.iid];
+                // The count, start and step come from the uniform block (uInt, the integer uniforms the key already fixes), not the number itself:
+                // a bound the compiler can see gets the loop unrolled, and a 7-turn body of relative reads never came out of CafeGLSL on a console.
                 const int k = counter++;
-                w.f("    aL = %d;\n    for (uint it%d = 0; it%d < %uu; it%d++) {\n", l[1], k, k, l[0] + 1u, k);
+                w.f("    aL = uInt[%u].y;\n    for (uint it%d = 0u; it%d < uint(uInt[%u].x) + 1u; it%d++) {\n", I.iid, k, k, I.iid, k);
                 loops++;
                 const int saved_ifs = ifs, saved_calls = calls;
                 ifs = calls = 0;  // a BREAKC directly in this body ends this loop
-                block(i + 1, dst + 1, true, l[2]);
+                block(i + 1, dst + 1, true, I.iid);
                 ifs = saved_ifs;
                 calls = saved_calls;
                 loops--;
                 ends.pop_back();
-                w.f("    aL += %d;\n    }\n", l[2]);
-                if (loops) w.f("    aL = %d;\n", l[1]);  // shader_run restores the counter it saved: this loop's start
+                w.f("    aL += uInt[%u].z;\n    }\n", I.iid);
+                if (loops) w.f("    aL = uInt[%u].y;\n", I.iid);  // shader_run restores the counter it saved: this loop's start
                 cont = dst + 1;
                 if (cont == e) {
                     fail = true;
@@ -1185,6 +1291,59 @@ struct SpecGen {
     }
 };
 }  // namespace
+
+// The body of main() for GLSL (port/wiiu/shadergen.cpp declares the registers and helpers).
+std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs) {
+    const u32 n = (u32)P->ins.size();
+    if (entry >= n) return "";
+    u32 in_used = 0;
+    for (const DInst &I : P->ins) {
+        const int ns = I.op == OP_MAD ? 3 : 2;
+        if (I.op <= OP_MAD)
+            for (int k = 0; k < ns; k++)
+                if (I.src[k] < REG_TMP) in_used |= 1u << I.src[k];
+    }
+    *inputs = in_used;
+    MslWriter w{P};
+    w.al = "aL";
+    SpecGen g{w, P, n, b, iu};
+    g.block(entry, n, false, 0);
+    if (g.fail) return "";
+    std::string s = w.o;
+    auto replace_all = [&](const char *from, const char *to) {
+        const std::string f = from, t = to;
+        for (size_t at = s.find(f); at != std::string::npos; at = s.find(f, at + t.size())) s.replace(at, f.size(), t);
+    };
+    replace_all("vs_output(P, o, outv, li); return;", "vs_output(); return;");
+    replace_all("const float4", "vec4");
+    replace_all("float4(1.0 / ", "vs_lim(1.0 / ");  // gen_vs_glsl says why
+    replace_all("float4", "vec4");
+    replace_all("precise::", "");
+    replace_all("P.f[", "f[");
+    replace_all("vs_rel(P, ", "vs_rel(");
+    replace_all("select(vec4(0.0), vec4(1.0), ", "SEL(");
+    replace_all("uint it", "int it");
+    for (char op : {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}) {
+        const std::string u = std::string(1, op) + "u; it";
+        replace_all(u.c_str(), (std::string(1, op) + "; it").c_str());
+    }
+    // SEL(a >= b) and SEL(a < b): GLSL compares vectors with functions
+    for (size_t at = s.find("SEL("); at != std::string::npos; at = s.find("SEL(", at)) {
+        size_t end = at + 4;
+        for (int depth = 1; end < s.size(); end++) {
+            if (s[end] == '(') depth++;
+            if (s[end] == ')' && --depth == 0) break;
+        }
+        end++;
+        const std::string inner = s.substr(at + 4, end - at - 5);
+        size_t op = inner.find(" >= ");
+        const bool ge = op != std::string::npos;
+        if (!ge) op = inner.find(" < ");
+        const std::string lhs = inner.substr(0, op), rhs = inner.substr(op + (ge ? 4 : 3));
+        s.replace(at, end - at, std::string(ge ? "sel_ge(" : "sel_lt(") + lhs + ", " + rhs + ")");
+    }
+    return s;
+}
 
 std::string shader_msl_spec(const ShaderProgram *P, u32 entry, const char *name, u32 b, const u8 (*iu)[4]) {
     const u32 n = (u32)P->ins.size();

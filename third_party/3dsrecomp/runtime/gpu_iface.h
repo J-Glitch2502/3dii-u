@@ -10,6 +10,7 @@ void process_command_list(u32 paddr, u32 size_bytes);
 void memory_fill(u32 start_paddr, u32 end_paddr, u32 value, u32 control);
 void display_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags);
 void invalidate_memory(u32 paddr, u32 size);
+void dma_written(u32 paddr, u32 size);  // a copy the runtime made itself (GX RequestDma): a definite write
 bool save_state(const char *path);
 // A high-resolution upright RGBA image of what the framebuffer at fb_paddr shows, if the GPU backend has one
 // (called from the UI thread at VBlank).
@@ -33,6 +34,10 @@ void set_clear_after_top_transfer(bool on);
 // (Metal) the bottom screen's display images with black made transparent (one-screen play)
 void set_key_black_bottom(bool on);
 void texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap, u32 flags);
+#ifdef __WIIU__
+void gx2_cpu_will_read(u32 paddr, u32 size);
+void gx2_finish_list();  // wait for the GPU to finish what the last command list queued
+#endif
 }
 
 namespace gpu {
