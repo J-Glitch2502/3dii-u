@@ -12,7 +12,6 @@
 #include <coreinit/time.h>
 #include <coreinit/title.h>
 #include <gx2/event.h>
-#include <proc_ui/procui.h>
 #include <sysapp/launch.h>
 #include <malloc.h>
 #include <nn/act.h>
@@ -38,6 +37,7 @@
 #include "gpu_iface.h"
 #include "kernel.h"
 #include "loader.h"
+#include "procui.hpp"
 #include "service.h"
 #include "services/services.h"
 #include "settings.h"
@@ -132,42 +132,13 @@ static OSThread *spawn(OSThreadEntryPointFn fn, int core, int prio, u32 stack_si
     return t;
 }
 
-static volatile bool quitting, gpu_parked, audio_parked, gfx_may_close;
-static volatile bool gpu_pause, foreground_back;
+static volatile bool quitting, audio_parked, gfx_may_close;
 #ifdef LAYTON_PROF
 extern "C" BOOL GfxHeapInitMEM1();
 extern "C" BOOL GfxHeapDestroyMEM1();
 extern "C" void *GfxHeapAllocMEM1(uint32_t, uint32_t);
 extern "C" void GfxHeapFreeMEM1(void *);
 #endif
-
-namespace gpu {
-extern bool gx2_skip_pass;
-}
-static volatile bool home_slow;  // on_release's stack is small, so the watchdog does its logging
-static volatile int home_release_ms = -1;
-
-// The system is taking the GPU back, for the HOME Menu or for good: stop using it first. ProcUI waits for this before it goes on.
-// This runs on the GPU thread's core with a higher priority than WHB's own callback, which frees the screens' memory and waits for the GPU from a thread that can stop the GPU thread
-// anywhere, even in the middle of a command. On a console both used to run while the game kept drawing, and the GPU thread was still at it when GX2 went away a second later.
-static uint32_t on_release(void *) {
-    const OSTime t0 = OSGetSystemTime();
-    foreground_back = false;
-    kernel::gx_hold = true;
-    gpu::gx2_skip_pass = true;  // what's left of the list it's on only sets registers
-    gpu_pause = true;
-    for (int i = 0; i < 500 && !gpu_parked; i++) {
-        OSSleepTicks(OSMillisecondsToTicks(2));
-        if (i == 100) home_slow = !gpu_parked;
-    }
-    home_release_ms = (int)OSTicksToMilliseconds(OSGetSystemTime() - t0);
-    return 0;
-}
-
-static uint32_t on_acquire(void *) {
-    foreground_back = true;
-    return 0;
-}
 
 // on_exception sends the GPU thread here if GX2 went away under it anyway
 static jmp_buf gpu_restart;
@@ -183,25 +154,25 @@ static int gpu_thread(int, void *) {
     stage("gpu thread ready");
     setjmp(gpu_restart);
     while (!quitting) {
-        if (gpu_pause) {
+        if (wiiu::procui::IsPauseRequested()) {
             if (gpu_tripped) LOG("[home] the GPU thread was still drawing when GX2 went away\n");
             else wiiu::gfx_shutdown();
             gpu_tripped = false;
-            gpu_parked = true;
-            while (gpu_pause && !quitting) OSSleepTicks(OSMillisecondsToTicks(2));
+            wiiu::procui::SetGpuParked(true);
+            while (wiiu::procui::IsPauseRequested() && !quitting) OSSleepTicks(OSMillisecondsToTicks(2));
             if (quitting) break;
             wiiu::gfx_reacquire();
-            gpu_parked = false;
+            wiiu::procui::SetGpuParked(false);
             continue;
         }
         OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
         const OSTime t0 = OSGetSystemTime();
         kernel::gsp_process_gx();
-        if (!gpu_pause) wiiu::gfx_pump();
+        if (!wiiu::procui::IsPauseRequested()) wiiu::gfx_pump();
         wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
-    if (!gpu_parked) wiiu::gfx_shutdown();
-    gpu_parked = true;
+    if (!wiiu::procui::IsGpuParked()) wiiu::gfx_shutdown();
+    wiiu::procui::SetGpuParked(true);
     // GX2 has to close on the core it started on, once the system has taken the foreground back
     while (!gfx_may_close) OSSleepTicks(OSMillisecondsToTicks(2));
     WHBGfxShutdown();
@@ -315,8 +286,8 @@ static int audio_thread(int, void *) {
     OSTime next = OSGetSystemTime();
     bool silent = false;
     while (!quitting) {
-        if (gpu_pause != silent) {
-            silent = gpu_pause;
+        if (wiiu::procui::IsPauseRequested() != silent) {
+            silent = wiiu::procui::IsPauseRequested();
             audio::pause(silent);
             next = OSGetSystemTime();
         }
@@ -328,7 +299,7 @@ static int audio_thread(int, void *) {
         const OSTime now = OSGetSystemTime();
         if (next > now) OSSleepTicks(next - now);
         else if (now - next > period * 8) next = now;  // never try to catch up on more than a short stall
-        while (!kernel::dsp_tick() && !quitting && !gpu_pause) OSSleepTicks(OSMicrosecondsToTicks(500));
+        while (!kernel::dsp_tick() && !quitting && !wiiu::procui::IsPauseRequested()) OSSleepTicks(OSMicrosecondsToTicks(500));
     }
     audio_parked = true;
     return 0;
@@ -437,15 +408,7 @@ static int watchdog_thread(int, void *) {
             crash_pending = false;
             return 0;
         }
-        if (home_slow) {
-            home_slow = false;
-            LOG("[home] the GPU thread still hasn't stopped\n");
-            wiiu::log_threads();
-        }
-        if (home_release_ms >= 0) {
-            LOG("[home] %s after %d ms\n", gpu_parked ? "the GPU thread stopped" : "gave up on the GPU thread", home_release_ms);
-            home_release_ms = -1;
-        }
+        wiiu::procui::ReportReleaseStatus();
         if (want_dump) {
             want_dump = false;
             want_hang_dump = 1;
@@ -455,7 +418,7 @@ static int watchdog_thread(int, void *) {
         tenths = 0;
         if (++seconds >= 41 && !drawn && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
         const u64 lists = kernel::gx_stats.cmdlists;
-        if (lists != last || gpu_pause || wiiu::menu_open() || wiiu::keyboard_open()) {
+        if (lists != last || wiiu::procui::IsPauseRequested() || wiiu::menu_open() || wiiu::keyboard_open()) {
             if (lists && !drawn) {
                 drawn = true;
                 stage("the game is drawing");
@@ -533,14 +496,9 @@ void frontend_run() {
     u64 frames = 0;
     while (WHBProcIsRunning()) {
         // While the HOME Menu is up nothing may touch GX2, and with no VBlanks the game waits. WHBProcIsRunning blocks until we're back.
-        if (gpu_pause) {
-            if (!foreground_back) continue;
-            for (int i = 0; i < 1000 && !gpu_parked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
-            gpu::gx2_skip_pass = false;
-            gpu_pause = false;
-            kernel::gx_hold = false;
-            while (gpu_parked) OSSleepTicks(OSMillisecondsToTicks(1));
-            LOG("[wiiu] back in the foreground\n");
+        if (wiiu::procui::IsPauseRequested()) {
+            if (!wiiu::procui::IsForegroundBack()) continue;
+            wiiu::procui::ResumeGpu();
         }
         GX2WaitForVsync();  // the guest's VBlank is the TV's, so frames line up with its refresh
         kernel::timers_poke();  // a timer whose wake-up went missing, whatever the reason, costs a frame rather than the game: frames carry on even when everything else waits
@@ -559,7 +517,7 @@ void frontend_run() {
 #ifdef LAYTON_PROF
         if (frames % 1800 == 0) {
             LOG("[homesim] release at frame %llu\n", (unsigned long long)frames);
-            on_release(nullptr);
+            wiiu::procui::SimulateRelease();
             GX2ColorBuffer *const cbs[2] = {WHBGfxGetTVColourBuffer(), WHBGfxGetDRCColourBuffer()};
             GX2DepthBuffer *const dbs[2] = {WHBGfxGetTVDepthBuffer(), WHBGfxGetDRCDepthBuffer()};
             for (auto *c : cbs)
@@ -572,7 +530,7 @@ void frontend_run() {
             for (auto *c : cbs) c->surface.image = GfxHeapAllocMEM1(c->surface.imageSize, c->surface.alignment);
             for (auto *d : dbs) d->surface.image = GfxHeapAllocMEM1(d->surface.imageSize, d->surface.alignment);
             LOG("[homesim] acquire\n");
-            on_acquire(nullptr);
+            wiiu::procui::SimulateAcquire();
         }
 #endif
         if (OSGetSystemTime() >= next_clock) {
@@ -661,8 +619,7 @@ int main(int argc, char **argv) {
     trace_stage = "system libraries";
     WHBProcInit();
     // WHB registers its own at priority 100 from the GPU thread, on core 2. Each core has its own list, highest first: the GPU stops before WHB's goes, and starts after WHB's has made the screens again.
-    ProcUIRegisterCallbackCore(PROCUI_CALLBACK_RELEASE, on_release, nullptr, 1000, 2);
-    ProcUIRegisterCallbackCore(PROCUI_CALLBACK_ACQUIRE, on_acquire, nullptr, 50, 2);
+    wiiu::procui::RegisterCallbacks();
     VPADInit();
     OSEnableHomeButtonMenu(TRUE);
     trace_stage = "save storage";
