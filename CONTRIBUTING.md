@@ -143,3 +143,13 @@ you also tried a console.
   message, not in the code.
 - Changes under `third_party/3dsrecomp/` are changes to nathsou's EUPL-1.2 code and stay under that licence. Keep them
   separate from other changes, so they can be offered upstream.
+
+## Pulling a newer 3dsrecomp
+
+`third_party/3dsrecomp` is a git subtree: upstream's code arrived as one squashed commit, and this project's changes are
+ordinary commits on top. To bring in a newer upstream:
+
+    git subtree pull --prefix=third_party/3dsrecomp https://github.com/nathsou/3dsrecomp main --squash
+
+Then build and check the ports, as for any runtime change. `git log -- third_party/3dsrecomp` lists this project's
+changes.
