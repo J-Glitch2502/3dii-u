@@ -179,10 +179,22 @@ u64 real_ns();
 void set_clock_speed(u32 percent);
 u64 system_tick();
 void add_timeout(u64 deadline_ns, std::function<void()> fn);  // (lock held) run fn (lock held) at deadline
+void timers_poke();  // have the timer thread look at its queue now
 
 std::shared_ptr<Event> make_event(ResetType rt, const char *name);
 void svc_dispatch(CPU *c, u32 imm);
 void dump_threads();
+bool guest_idle();  // no guest thread wants the CPU right now (any thread; for statistics)
+// How busy the kernel is: SVCs by number, thread switches, and with `ipc` on, service requests by service and command. kstats_report() says
+// how many of each per frame since the last report and starts over (lock not held).
+struct KStats {
+    u64 svc[128], switches, wakes;
+    bool ipc;
+    std::map<std::string, u64> requests;
+};
+extern KStats kstats;
+std::string kstats_report(u64 frames);
+void *guest_host_thread(u32 i);  // (Wii U, for hang reports) the OSThread behind slot i of 64, or null
 void dump_memory(const char *prefix);  // RECOMP_MEMDUMP
 bool guest_readable(u32 addr, u32 size);
 bool guest_busy();  // a guest thread is running (not all waiting)  // mapped and readable (host-side reads of game state)

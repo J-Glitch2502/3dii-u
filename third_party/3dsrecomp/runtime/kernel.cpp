@@ -1,7 +1,13 @@
 // Kernel objects, scheduler and SVCs.
 #include "kernel.h"
 
+#ifdef __WIIU__
+#include <coreinit/event.h>
+#include <coreinit/thread.h>
+#include <malloc.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <mach/mach.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -12,6 +18,7 @@
 
 #include "loader.h"
 #include "service.h"
+#include "services/services.h"
 
 namespace kernel {
 
@@ -27,7 +34,9 @@ static u64 boot_ns;
 static std::shared_ptr<Process> self_process = std::make_shared<Process>();
 static std::shared_ptr<ResLimit> self_reslimit = std::make_shared<ResLimit>();
 u32 heap_size, linear_used;
+#ifndef __WIIU__
 static thread_local Thread *tls_thread;
+#endif
 static void flush_deferred();
 
 // ---------------------------------------------------------------- handles
@@ -49,7 +58,11 @@ ObjPtr get_object(Handle h) {
 
 bool close_handle(Handle h) { return handles.erase(h) > 0; }
 
+#ifdef __WIIU__  // no thread-local storage in an RPX
+Thread *current_thread() { return (Thread *)OSGetThreadSpecific(OS_THREAD_SPECIFIC_0); }
+#else
 Thread *current_thread() { return tls_thread; }
+#endif
 
 std::shared_ptr<Event> make_event(ResetType rt, const char *name) {
     auto e = std::make_shared<Event>();
@@ -87,7 +100,11 @@ static u64 to_real(u64 guest_ns) {
 u64 system_tick() {
     u64 ns = now_ns() - boot_ns;
     // 268111856 Hz
+#ifdef __WIIU__
+    return ns / 1000000000u * 268111856u + ns % 1000000000u * 268111856u / 1000000000u;
+#else
     return (u64)((__uint128_t)ns * 268111856u / 1000000000u);
+#endif
 }
 
 // timeouts run on a host thread
@@ -98,6 +115,32 @@ struct TimeoutQueue {
 };
 static TimeoutQueue tq;
 
+#ifdef __WIIU__
+// wut's timed condition wait sets a timer, then sleeps. If the timer fires in between, its signal is lost and the thread sleeps until
+// something else wakes it, and every guest thread waiting on a timeout stops with it: a loading screen that never ends, while the
+// frames driven by VBlank carry on. The system's own event wait has no such gap.
+static OSEvent tq_event;
+static bool tq_event_ready;
+static void tq_wake() {
+    if (tq_event_ready) OSSignalEvent(&tq_event);
+}
+#else
+static void tq_wake() { tq.cv.notify_one(); }
+#endif
+
+// until a timeout is added, or for this long in real time (0: no limit); the kernel lock is let go meanwhile
+static void tq_sleep(Lock &lk, u64 real_ns) {
+#ifdef __WIIU__
+    lk.unlock();
+    if (real_ns) OSWaitEventWithTimeout(&tq_event, real_ns);
+    else OSWaitEvent(&tq_event);
+    lk.lock();
+#else
+    if (real_ns) tq.cv.wait_for(lk, std::chrono::nanoseconds(real_ns));
+    else tq.cv.wait(lk);
+#endif
+}
+
 void set_clock_speed(u32 pct) {
     const u64 v = now_ns();
     {
@@ -107,25 +150,27 @@ void set_clock_speed(u32 pct) {
         clock_rbase = real_ns();
         clock_pct = pct;
     }
-    tq.cv.notify_one();  // pending timeouts now fall due at another real time
+    tq_wake();  // pending timeouts now fall due at another real time
 }
 
 void add_timeout(u64 deadline, std::function<void()> fn) {
     tq.q.emplace(deadline, std::move(fn));
-    tq.cv.notify_one();
+    tq_wake();
 }
+
+void timers_poke() { tq_wake(); }
 
 static void timeout_thread() {
     Lock lk(kmutex);
     for (;;) {
         if (tq.q.empty()) {
-            tq.cv.wait(lk);
+            tq_sleep(lk, 0);
             continue;
         }
         u64 t = tq.q.begin()->first;
         u64 n = now_ns();
         if (t > n) {
-            tq.cv.wait_for(lk, std::chrono::nanoseconds(to_real(t - n)));
+            tq_sleep(lk, std::max<u64>(to_real(t - n), 1));
             continue;
         }
         auto fn = std::move(tq.q.begin()->second);
@@ -162,6 +207,7 @@ static void switch_from(Thread *cur, Lock &lk) {
         if (next != cur) next->cv.notify_one();
     }
     if (next == cur) return;
+    kstats.switches++;
     cur->cv.wait(lk, [&] { return running == cur; });
 }
 
@@ -207,6 +253,7 @@ void schedule_async() {
     if (!next) return;
     running = next;
     next->status = TStatus::Running;
+    kstats.wakes++;
     next->cv.notify_one();
 }
 
@@ -322,9 +369,19 @@ static u32 alloc_tls() {
 
 static void thread_exit_locked(Thread *t, Lock &lk);
 
+#ifdef __WIIU__
+static OSThread *guest_hosts[64];
+void *guest_host_thread(u32 i) { return i < 64 ? guest_hosts[i] : nullptr; }
+#endif
+
 static void *thread_main(void *arg) {
     Thread *t = (Thread *)arg;
+#ifdef __WIIU__
+    OSSetThreadSpecific(OS_THREAD_SPECIFIC_0, t);
+    guest_hosts[t->id % 64] = OSGetCurrentThread();
+#else
     tls_thread = t;
+#endif
     {
         Lock lk(kmutex);
         t->cv.wait(lk, [&] { return running == t; });
@@ -334,6 +391,34 @@ static void *thread_main(void *arg) {
     thread_exit_locked(t, lk);
     return nullptr;
 }
+
+#ifdef __WIIU__
+// Pinned from birth. Asking from inside a pthread, with OSSetThreadAffinity, left guest code on cores 0 and 2 of a real console and core 1 idle (cos coretrace), though Cemu did as it was told.
+// Core 1 has the 2 MB of L2, and the GPU thread needs core 2 to itself.
+struct GuestHost {
+    OSThread os;
+    alignas(16) u8 stack[2 << 20];
+};
+static char guest_names[64][12];
+
+static int guest_entry(int, void *t) {
+    thread_main(t);
+    return 0;
+}
+
+static void start_guest_host(Thread *t) {
+    auto *host = (GuestHost *)memalign(16, sizeof(GuestHost));
+    if (!host) FATAL("no memory for a guest thread\n");
+    if (!OSCreateThread(&host->os, guest_entry, 0, t, host->stack + sizeof host->stack, sizeof host->stack, 16, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
+        FATAL("cannot create a guest thread\n");
+    char *name = guest_names[t->id % 64];
+    snprintf(name, sizeof guest_names[0], "guest %u", t->id);
+    OSSetThreadName(&host->os, name);
+    OSSetThreadDeallocator(&host->os, [](OSThread *th, void *) { free(th); });
+    OSSetThreadRunQuantum(&host->os, 1000);  // as wut's pthreads have
+    OSResumeThread(&host->os);
+}
+#endif
 
 std::shared_ptr<Thread> create_thread(u32 entry, u32 arg, u32 stack_top, s32 prio, bool start) {
     auto t = std::make_shared<Thread>();
@@ -349,6 +434,9 @@ std::shared_ptr<Thread> create_thread(u32 entry, u32 arg, u32 stack_top, s32 pri
     t->cpu.fpscr = 0x03C00000;  // RunFast: default NaN, flush to zero (what the SDK sets)
     t->cpu.thread = t.get();
     threads.push_back(t);
+#ifdef __WIIU__
+    start_guest_host(t.get());
+#else
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 64 << 20);
@@ -356,12 +444,16 @@ std::shared_ptr<Thread> create_thread(u32 entry, u32 arg, u32 stack_top, s32 pri
     if (pthread_create(&pt, &attr, thread_main, t.get())) FATAL("pthread_create failed\n");
     t->mach = pthread_mach_thread_np(pt);
     pthread_detach(pt);
+#endif
     if (start) make_ready(t.get());
     return t;
 }
 
 static void thread_exit_locked(Thread *t, Lock &lk) {
     t->status = TStatus::Dead;
+#ifdef __WIIU__
+    guest_hosts[t->id % 64] = nullptr;
+#endif
     tls_used.erase((t->tls - mem::TLS_BASE) / mem::TLS_SLOT);
     t->wakeup_waiters();
     // release mutexes it holds
@@ -986,9 +1078,11 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         c->r[0] = RES_OK;
         break;
     }
-    case 0x52:
-    case 0x53:
-    case 0x54:
+    case 0x52:  // StoreProcessDataCache(process, address, size)
+    case 0x53:  // FlushProcessDataCache
+    case 0x54:  // InvalidateProcessDataCache
+        VLOG("[svc] process cache %02x\n", imm);
+        gsp_cache_op(c->r[1], c->r[2], imm == 0x54);
         c->r[0] = RES_OK;
         break;
     default:
@@ -998,8 +1092,45 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
     }
 }
 
+KStats kstats;
+}  // namespace kernel
+extern u64 rt_lookups, rt_lookup_misses;
+namespace kernel {
+
+std::string kstats_report(u64 frames) {
+    Lock lk(kmutex);
+    if (!frames) frames = 1;
+    std::vector<std::pair<u64, u32>> s;
+    u64 all = 0;
+    for (u32 i = 0; i < 128; i++)
+        if (kstats.svc[i]) s.push_back({kstats.svc[i], i}), all += kstats.svc[i];
+    std::sort(s.rbegin(), s.rend());
+    char b[160];
+    snprintf(b, sizeof b, "[kstats] per frame: %.1f SVCs, %.1f switches, %.1f wakes from idle;", (double)all / frames, (double)kstats.switches / frames, (double)kstats.wakes / frames);
+    std::string out = b;
+    for (size_t i = 0; i < s.size() && i < 8; i++) {
+        snprintf(b, sizeof b, " %02x:%.1f", s[i].second, (double)s[i].first / frames);
+        out += b;
+    }
+    std::vector<std::pair<u64, std::string>> r;
+    for (auto &[k, n] : kstats.requests) r.push_back({n, k});
+    std::sort(r.rbegin(), r.rend());
+    for (size_t i = 0; i < r.size() && i < 10; i++) {
+        snprintf(b, sizeof b, "%s %s %.1f", i ? "," : " | requests:", r[i].second.c_str(), (double)r[i].first / frames);
+        out += b;
+    }
+    snprintf(b, sizeof b, " | indirect jumps %.1f, %.1f not in the cache", (double)rt_lookups / frames, (double)rt_lookup_misses / frames);
+    out += b;
+    rt_lookups = rt_lookup_misses = 0;
+    const bool ipc = kstats.ipc;
+    kstats = KStats{};
+    kstats.ipc = ipc;
+    return out + "\n";
+}
+
 void svc_dispatch(CPU *c, u32 imm) {
     Lock lk(kmutex);
+    kstats.svc[imm & 127]++;
     flush_deferred();
     static int svclog = getenv("RECOMP_SVCLOG") ? atoi(getenv("RECOMP_SVCLOG")) : -1;
     if (svclog >= 0 && (svclog == 0 || current_thread()->id == (u32)svclog))
@@ -1010,6 +1141,9 @@ void svc_dispatch(CPU *c, u32 imm) {
 
 // The guest functions (f_<address>) on a thread's host stack, innermost first: a thread that spins without SVCs
 // shows only a stale pc otherwise, and a waiting one shows where it waits from.
+#ifdef __WIIU__
+static std::string guest_backtrace(Thread *) { return ""; }
+#else
 static std::string guest_backtrace(Thread *t) {
     if (!t->mach || pthread_mach_thread_np(pthread_self()) == t->mach) return "";
     u64 pcs[64];
@@ -1042,6 +1176,7 @@ static std::string guest_backtrace(Thread *t) {
     }
     return out;
 }
+#endif
 
 // Debugging (RECOMP_MEMDUMP): the data/bss segment and every mapped region, one file each
 // (<prefix>_<address>.bin), for diffing snapshots taken at different moments
@@ -1060,9 +1195,12 @@ void dump_memory(const char *prefix) {
         if (r.perm & 1) put(base, r.size);
 }
 
+bool guest_idle() { return running == nullptr; }
+
 void dump_threads() {
     Lock lk(kmutex);
     static const char *st[] = {"ready", "running", "wait-sync", "sleep", "wait-arb", "dormant", "dead"};
+    if (!tq.q.empty()) LOG("[timers] %u pending, the next one %lld us from now\n", (u32)tq.q.size(), (long long)(tq.q.begin()->first - now_ns()) / 1000);
     for (auto &t : threads) {
         std::string w;
         for (auto &o : t->wait_objs) w += " " + (o->name.empty() ? std::string("?") : o->name);
@@ -1076,6 +1214,10 @@ void dump_threads() {
 void start(const BootInfo &bi) {
     boot_ns = now_ns();
     linear_free[mem::LINEAR_BASE] = mem::LINEAR_SIZE - 0x00200000;  // (a little kept for the system)
+#ifdef __WIIU__
+    OSInitEvent(&tq_event, FALSE, OS_EVENT_MODE_AUTO);
+    tq_event_ready = true;
+#endif
     tq.th = std::thread(timeout_thread);
     tq.th.detach();
     u32 stack_top = mem::STACK_TOP;
