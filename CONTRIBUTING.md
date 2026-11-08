@@ -20,51 +20,62 @@ it that way, and don't add exceptions for any of these:
 | Logs and console captures | `games/<name>/console/`, `*.log` | Game output, memory contents and your network's addresses |
 | The console tools | `tools/console_*` | They hold one developer's console address and PC paths. They come back once those are arguments |
 | The old WSL environment | `env/` | It holds one developer's PC paths, and the build no longer uses it |
-| Third-party binaries | `third_party/cafeglsl*/`, `toolchain/aac_ppc/`, `builder/bin/makerom.exe` | Not this project's code. Get them as described below |
+| Third-party binaries | `third_party/cafeglsl*/`, `toolchain/aac_ppc/`, `builder/bin/makerom.exe` | Not this project's code. `tools/setup.py` fetches them from a release |
 
 Machine-specific settings, such as paths and your console's address, belong in arguments or environment variables,
 never in the code.
 
-## What you need
+## Setting up
 
-Windows 10 or 11, 64-bit. A Linux route is planned.
+This repository is private. To get access, ask the maintainer for an invite. You need Windows 10 or 11 and
+[Python](https://www.python.org/) 3.10 or newer. Then:
+
+1. Install the GitHub CLI and sign in: `winget install GitHub.cli`, then `gh auth login`.
+2. Get the code: `gh repo clone josiahg2502-glitch/3dii-u`
+3. In that folder, run `python tools/setup.py`.
+
+The setup script checks every tool the build needs, and installs what it can:
+
+- the Python packages
+- MinGW's GCC
+- devkitPPC and wut
+- a zip of prebuilt dependencies from this repository's releases
+
+MSYS2 and LLVM have their own installers, so for those it tells you what to install. Run it again afterwards.
+`--check` only reports.
+
+This is what ends up installed:
 
 | Tool | Where it goes | Version tested | Used for |
 |---|---|---|---|
-| Python | on `PATH` | 3.14 | everything scripted |
-| `pip install PySide6-Essentials pyctr pycryptodome cryptography` | | PySide6 6.12, pyctr 0.7.6 | the builder, decrypting, packing WUPs |
+| Python packages: PySide6-Essentials, pyctr, pycryptodome, cryptography | | PySide6 6.12, pyctr 0.7.6 | the builder, decrypting, packing WUPs |
 | MSYS2, with `mingw-w64-x86_64-gcc` | `C:\msys64` | GCC 16.2 | the toolchain installer, and the C library for the PC builds |
 | LLVM | `C:\Program Files\LLVM` | clang 23.1 | the shader generator and the PC trial |
 | devkitPPC and wut | `C:\devkitPro`, from `tools/win/install_toolchain.sh` | see below | the Wii U build |
-| CafeGLSL v0.2.0 for Windows | `third_party/cafeglsl/`, from `tools/win/build_cafeglsl.ps1` | v0.2.0 | compiling shaders ahead of time |
-| CafeGLSL v1.0.0-rc1 for the Wii U | `third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc/` | v1.0.0-rc1 | compiling missing shaders on the console |
+| CafeGLSL v0.2.0 for Windows | `third_party/cafeglsl/` | v0.2.0 | compiling shaders ahead of time |
+| CafeGLSL v1.0.0-rc1 for the Wii U | `third_party/cafeglsl_ppc/` | v1.0.0-rc1 | compiling missing shaders on the console |
 | FFmpeg's AAC decoder, built for the Wii U | `toolchain/aac_ppc/` | FFmpeg 4.4 | games with AAC music, and every untested game |
 | makerom | `builder/bin/makerom.exe` | v0.19.0 | turning a game's CIA into a `.3ds` before decrypting |
-| Cemu, portable | `build_win/cemu/` | | `tools/check_ports.py` |
+| Cemu, portable (only for `check_ports.py`, install it yourself) | `build_win/cemu/` | | `tools/check_ports.py` |
 
-**devkitPPC and wut.** Run this once from the repository root:
+**devkitPPC and wut** are installed with MSYS2's pacman, but with their own settings, database and keys under
+`C:\devkitPro`, so MSYS2's setup isn't changed. The versions tested are devkitppc-gcc 16.2.0-1, devkitppc-binutils
+2.47-2, devkitppc-newlib 4.6.0.20260123-4, devkitppc-crtls 2.1.0-1, wut 1.9.2-1, wut-tools 1.3.5-1 and
+general-tools 1.4.4-1. devkitPro's server only keeps the newest packages, so you may get later ones. Builds made with
+those haven't been tried on a console yet.
 
-    C:\msys64\usr\bin\bash.exe --noprofile --norc tools/win/install_toolchain.sh devkitppc-gcc devkitppc-binutils devkitppc-newlib devkitppc-crtls wut wut-tools general-tools
+**The prebuilt dependencies** are the four tools no package manager has. `third_party/DEPS-NOTICES.txt` lists their
+licences after unpacking. This is where each one comes from:
 
-The script uses MSYS2's pacman, but keeps its own settings, database and keys under `C:\devkitPro`, so MSYS2's setup
-isn't changed. The versions tested are devkitppc-gcc 16.2.0-1, devkitppc-binutils 2.47-2,
-devkitppc-newlib 4.6.0.20260123-4, devkitppc-crtls 2.1.0-1, wut 1.9.2-1, wut-tools 1.3.5-1 and general-tools 1.4.4-1.
-devkitPro's server only keeps the newest packages, so you may get later ones. Builds made with those haven't been
-tried on a console yet.
+- **CafeGLSL v0.2.0 for Windows** is built by `tools/win/build_cafeglsl.ps1`. Upstream's own Windows build is a later
+  version, and its vertex shaders draw some scenes wrong.
+- **CafeGLSL's Wii U library** is upstream's v1.0.0-rc1, with traps patched out by
+  `tools/win/patch_cafeglsl_traps.py`.
+- **The AAC libraries** are built by `tools/aac_build.sh`, which so far runs only under WSL.
+- **makerom** is Project_CTR's v0.19.0.
 
-**CafeGLSL v0.2.0 for Windows.** `powershell -File tools/win/build_cafeglsl.ps1` builds it from source. It needs MSYS2
-with `flex`, `bison` and `ninja`, and takes about half an hour. Upstream's own Windows build is a later version, and
-its vertex shaders draw some scenes wrong, so don't use it in place of this one.
-
-**CafeGLSL for the Wii U.** Unpack `cafeglsl-1.0.0-rc1-wiiu-ppc` from
-[CafeGLSL's releases](https://github.com/Exzap/CafeGLSL/releases) into `third_party/cafeglsl_ppc/`, then run
-`python tools/win/patch_cafeglsl_traps.py` once.
-
-**FFmpeg's AAC decoder.** `tools/aac_build.sh` builds only the AAC decoder from an FFmpeg 4.4 source tree, for the PC
-and for the Wii U. For now it runs only under Linux (WSL). A native Windows route is still to be written.
-
-**makerom.** Download v0.19.0 for Windows from [Project_CTR's releases](https://github.com/3DSGuy/Project_CTR/releases)
-into `builder/bin/`.
+To update any of them, run `python tools/setup.py --pack` on a PC that has them all. Put the hash it prints into the
+script, and upload the zip as a new release.
 
 ## Building a game
 
