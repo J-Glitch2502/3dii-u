@@ -14,6 +14,7 @@ COND_READS = [
     {'zf'}, {'zf'}, {'cf'}, {'cf'}, {'nf'}, {'nf'}, {'vf'}, {'vf'},
     {'cf', 'zf'}, {'cf', 'zf'}, {'nf', 'vf'}, {'nf', 'vf'},
     {'zf', 'nf', 'vf'}, {'zf', 'nf', 'vf'}, set(), set(),
+    set(), set(), {'zf'}, {'zf'},  # 16-19: fused signed conditions (gen.py fuse_compares)
 ]
 _TOK = re.compile(r'\b(nf|zf|cf|vf)\b')
 _ASSIGN = re.compile(r'\b(nf|zf|cf|vf) = ')

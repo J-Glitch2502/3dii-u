@@ -12,9 +12,11 @@ that function pointers in its tables are found. Words that the loader patches at
 are reported so the recompiler never folds them as constants: that includes words of the main program patched
 with addresses of module symbols (static.crs imports).
 """
+import os
 import struct
 
-CRO_BASE = 0x40000000
+# the Wii U's flat guest block ends at 0x20000000, so its builds choose a slot range inside it
+CRO_BASE = int(os.environ.get('RECOMP_CRO_BASE', '0x40000000'), 16)
 SLOT_ALIGN = 0x10000
 
 
@@ -195,16 +197,19 @@ class CroSet:
                     self.batch(m, bo, v, src is self.crs)
 
     def entry_points(self):
-        """Code addresses named by the module headers (control function, OnLoad, OnExit, OnUnresolved)."""
+        """Code addresses named by the module headers (control function, OnLoad, OnExit, OnUnresolved) and its exports: games
+        look functions up by name, Mario & Luigi's EntryTask for one, and nothing else in the module refers to those."""
         out = []
         for m in self.mods:
-            for o in (0xA0, 0xA4, 0xA8, 0xAC):
-                tag = m.h(o)
+            tags = [m.h(o) for o in (0xA0, 0xA4, 0xA8, 0xAC)]
+            exports = list(m.named_exports().values()) + [u32(m.d, m.h(0xD8) + 4 * k) for k in range(m.h(0xDC))]
+            tags += [t for t in exports if t != 0xFFFFFFFF and (t & 15) < len(m.segs) and m.segs[t & 15][2] == 0]
+            for tag in tags:
                 if tag != 0xFFFFFFFF:
                     a = m.tag_addr(tag)
                     if a is not None:
                         out.append(a)
-        return out
+        return sorted(set(out))
 
 
 def load(gamedir):
@@ -213,7 +218,13 @@ def load(gamedir):
     path = os.path.join(gamedir, 'romfs.bin')
     if not os.path.exists(path):
         return None
-    files = romfs_files(path, lambda n: n.endswith('.cro') or n.endswith('.crs'))
+    want = lambda n: n.endswith('.cro') or n.endswith('.crs')
+    files = romfs_files(path, want)
+    # An update's RomFS, which the game reads first: its modules replace the base's. Bowser's Inside Story's v2.2 ships only a new static.crs, the
+    # table of where the updated code's functions are; read from the base, every module call into the updated code missed (2026-11-08).
+    update = os.path.join(gamedir, 'update_romfs.bin')
+    if os.path.exists(update):
+        files.update(romfs_files(update, want))
     if not any(p.endswith('.crs') for p in files):
         return None
     s = CroSet(files)

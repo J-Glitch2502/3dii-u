@@ -109,7 +109,7 @@ class Analyzer:
         if i.kind == JMP and not i.ret:
             # `mov lr, pc` / `add lr, pc, #n` then a write to pc: an indirect call
             link = None
-            for back in (1, 2):
+            for back in range(1, 9):  # Mario Kart 7 sets lr three instructions before the jump, Layton and Paper Jam too
                 pa = i.addr - 4 * back
                 p = img.read32(pa)
                 if p is None:
@@ -122,7 +122,7 @@ class Analyzer:
                     break
                 if (p >> 12) & 15 in (14, 15) or (p >> 25) & 7 in (4, 5):
                     break  # writes lr/pc or is a branch / ldm: stop looking
-            if link is not None and link > i.addr:
+            if link is not None and link > i.addr and (back <= 2 or link == i.addr + 4):  # further back, only a return right after the jump
                 i.kind = ICALL
                 i.link = link
                 i.size = link - i.addr
@@ -553,6 +553,14 @@ class Analyzer:
         return sorted(self.funcs)
 
 
+def mask_regs(m):
+    return {r for r in range(16) if m >> r & 1}
+
+
+def mask_vregs(m):
+    return {v for v in range(32) if m >> (16 + v) & 1}
+
+
 class Emitter:
     def __init__(self, an, outdir, per_file=400):
         self.an = an
@@ -564,7 +572,11 @@ class Emitter:
         self.flag_opt = True
         self.flag_returning = set()
         self.flag_reading_entries = set()
+        self.custom_in = {}   # functions outside the calling convention: registers they take from their caller (mask_regs, mask_vregs)
+        self.custom_out = {}  # ... and registers they hand back
         self.override = {}
+        # Wii U mode: trusts the ARM calling convention around calls and drops resume points, which shrinks and speeds up code.
+        self.abi = False
 
     def emit_function(self, key):
         an = self.an
@@ -572,7 +584,49 @@ class Emitter:
         start = key & ~1
         insts, _ = an.explore(key)
         addrs = sorted(insts)
+        out_mask = self.custom_out.get(key, 0) if self.abi else 0
         self.override = {}
+        fused = self.fuse_compares(insts, th, start) if self.flag_opt else {}
+        try:
+            return self._emit_function(key, insts, addrs, th, start, out_mask, fused)
+        finally:
+            for a, (cond, _) in fused.items():  # the instructions are shared with other functions: put them back
+                insts[a].cond = cond
+                flags._cache.pop(id(insts[a]), None)
+
+    # A signed condition (GE LT GT LE) right after the subtract or compare that set the flags, reached only from it, reads the
+    # compare itself: "N != V" after a - b is "a < b" signed, which C can't see through the flag arithmetic, and N and V then
+    # often die and are stripped. The Wii U spent about five instructions per such branch on it.
+    SUB_FLAGS = (('u32 res = a - b;', 'vf = ((a ^ b) & (a ^ res)) >> 31;', 'slt = (s32)a < (s32)b;'),
+                 ('u32 res = b - a;', 'vf = ((b ^ a) & (b ^ res)) >> 31;', 'slt = (s32)b < (s32)a;'))
+
+    def fuse_compares(self, insts, th, start):
+        if th:
+            return {}
+        targets = {start}
+        for i in insts.values():
+            if i.kind == B and i.target is not None:
+                targets.add(i.target)
+            if i.kind == JMP and i.jt:
+                targets |= {t & ~1 for t in i.jt}
+        fused = {}
+        for a, i in insts.items():
+            if i.cond not in (10, 11, 12, 13) or a in targets or (a | th) in self.an.funcs:
+                continue
+            p = insts.get(a - 4)  # the instruction right before (ARM only: 4 bytes each)
+            if p is None or p.size != 4 or p.cond != 14 or p.kind != OP or not p.falls_through:
+                continue
+            txt = ' '.join(p.code)
+            pat = next((f for f in self.SUB_FLAGS if f[0] in txt and f[1] in txt and txt.count('u32 res =') == 1), None)
+            if not pat:
+                continue
+            fused[a] = (i.cond, (p.addr, pat))
+            i.cond += 6  # 10..13 -> 16..19
+            flags._cache.pop(id(i), None)
+        return fused
+
+    def _emit_function(self, key, insts, addrs, th, start, out_mask, fused):
+        an = self.an
         if self.flag_opt:
             lo = flags.liveness(insts, th, start, an.funcs, key in self.flag_returning, self.flag_reading_entries)
             for a, i in insts.items():
@@ -580,6 +634,10 @@ class Emitter:
                 if c is not None:
                     self.override[a] = c
                     self.stats['flag_strips'] += 1
+        for _, (pa, pat) in fused.values():
+            code = self.override.get(pa, insts[pa].code)
+            self.override[pa] = [line.replace(pat[0], pat[0] + ' ' + pat[2], 1) for line in code]
+            self.stats['fused_compares'] += 1
         labels = set([start])
         resume = []
         for a in addrs:
@@ -597,7 +655,7 @@ class Emitter:
                         resume.append(nxt)
             if i.falls_through:
                 labels.add(a + i.size) if False else None
-        resume = sorted(set(resume))
+        resume = [] if self.abi else sorted(set(resume))
         labels |= set(resume)
         regs = set()
         vregs = set()
@@ -616,8 +674,17 @@ class Emitter:
             if 'fpsr' in txt:
                 uses_fpsr = True
         regs.discard(15)
+        if self.abi and any(i.kind in (CALL, ICALL) for i in insts.values()):
+            # Callees leave c->r stale for what the ABI lets them change, so anything that calls keeps its own sp. A piece
+            # of a split function (no prologue of its own) must also carry every callee-saved register on to the next piece.
+            regs.add(13)
+            if not self.prologue_saved(start, th):
+                regs |= set(range(4, 12))
+        regs |= mask_regs(out_mask)  # kept in locals, so whatever it calls can't disturb them on the way back
+        vregs |= mask_vregs(out_mask)
         regs = sorted(regs)
         vregs = sorted(vregs)
+        self.cur_regs, self.cur_vregs = regs, vregs
         fn = fname(key)
         out = []
         so = ['c->r[%d] = r%d;' % (r, r) for r in regs]
@@ -639,9 +706,12 @@ class Emitter:
             si.append('S%d = c->s[%d];' % (v, v))
         out.append('void %s(CPU *c, u32 entry) {' % fn)
         decl = []
+        unloaded = self.prologue_saved(start, th) - mask_regs(self.custom_in.get(key, 0) | out_mask) if self.abi else set()
         if regs:
-            decl.append('u32 ' + ', '.join('r%d = c->r[%d]' % (r, r) for r in regs) + ';')
-        if uses_flags:
+            decl.append('u32 ' + ', '.join(('r%d = 0' % r) if r in unloaded else 'r%d = c->r[%d]' % (r, r) for r in regs) + ';')
+        if uses_flags and self.abi and key not in self.flag_returning and key not in self.flag_reading_entries:
+            decl.append('u32 nf = 0, zf = 0, cf = 0, vf = 0;')
+        elif uses_flags:
             decl.append('u32 nf = c->nf, zf = c->zf, cf = c->cf, vf = c->vf;')
         if uses_q:
             decl.append('u32 qf = c->qf;')
@@ -651,10 +721,31 @@ class Emitter:
             decl.append('u32 fpsr = c->fpscr;')
         if vregs:
             decl.append('float ' + ', '.join('S%d = c->s[%d]' % (v, v) for v in vregs) + ';')
+        if fused:
+            decl.append('u32 slt = 0;')
+        if any(i.kind == JMP and not i.ret for i in insts.values()):
+            decl.append('const u32 lr0 = c->r[14];')
         decl.append('u32 tpc = 0; u8 *const M = MEMBASE; (void)M; (void)tpc;')
         out += ['  ' + d for d in decl]
         out.append('#define SO() do { %s } while (0)' % ' '.join(so))
         out.append('#define SI() do { %s } while (0)' % ' '.join(si))
+        if self.abi:
+            def sync(fmt, wanted_r, wanted_s, extra):
+                return ' '.join([fmt[0] % (r, r) for r in regs if r in wanted_r] + [fmt[1] % (v, v) for v in vregs if v in wanted_s] + extra)
+            store, load = ('c->r[%d] = r%d;', 'c->s[%d] = S%d;'), ('r%d = c->r[%d];', 'S%d = c->s[%d];')
+            store_extra = (['c->qf = qf;'] if uses_q else []) + (['c->ge = ge;'] if uses_ge else []) + (['c->fpscr = fpsr;'] if uses_fpsr else [])
+            load_extra = (['qf = c->qf;'] if uses_q else []) + (['ge = c->ge;'] if uses_ge else []) + (['fpsr = c->fpscr;'] if uses_fpsr else [])
+            flag_store = ['c->nf = nf; c->zf = zf; c->cf = cf; c->vf = vf;'] if uses_flags else []
+            flag_load = ['nf = c->nf; zf = c->zf; cf = c->cf; vf = c->vf;'] if uses_flags else []
+            out.append('#define SOC() do { %s } while (0)' % sync(store, {0, 1, 2, 3, 12, 13, 14}, set(range(16)), store_extra))
+            out.append('#define SIC() do { %s } while (0)' % sync(load, {0, 1, 2, 3, 12}, {0, 1, 2, 3}, load_extra))
+            out.append('#define SICF() do { SIC(); %s } while (0)' % ' '.join(flag_load))
+            # s16-s31 go back too: a split callee's tail calls left its working values in c->s, and a split caller reads its own from there
+            out.append('#define SOR() do { %s } while (0)' % sync(store, {0, 1, 2, 3} | mask_regs(out_mask),
+                                                                  {0, 1, 2, 3} | set(range(16, 32)) | mask_vregs(out_mask),
+                                                                  store_extra + (flag_store if key in self.flag_returning else [])))
+        else:
+            out.append('#define SOC() SO()\n#define SIC() SI()\n#define SICF() SI()\n#define SOR() SO()')
         if resume:
             out.append('  switch (entry) {')
             for k, a in enumerate(resume, 1):
@@ -683,7 +774,7 @@ class Emitter:
                     self.stats['fallthrough_tail'] += 1
         if prev_falls is not None:
             out.append('  goto L_%x;' % prev_falls)
-        out.append('#undef SO\n#undef SI\n}')
+        out.append('#undef SO\n#undef SI\n#undef SOC\n#undef SIC\n#undef SICF\n#undef SOR\n}')
         self.stats['functions'] += 1
         self.stats['instructions'] += len(insts)
         return '\n'.join(out)
@@ -701,8 +792,10 @@ class Emitter:
                 body.append('SO(); __attribute__((musttail)) return %s(c, 0);' % fname(t | th))
             elif t <= i.addr:
                 # a loop: give way if an interrupt readied a higher-priority thread (a busy wait for that
-                # thread would otherwise never end; the 3DS kernel preempts)
-                body.append('if (__builtin_expect(rt_preempt_flag, 0)) { SO(); c->pc = 0x%xu; rt_preempt(c); SI(); } '
+                # thread would otherwise never end; the 3DS kernel preempts). The registers stay in this host thread's
+                # locals while it waits and nothing else reads or changes them, so only pc is stored (for thread dumps):
+                # spilling them all made every loop's cold path big, and the code is far larger than the cache
+                body.append('if (__builtin_expect(rt_preempt_flag, 0)) { c->pc = 0x%xu; rt_preempt(c); } '
                             'goto L_%x;' % (t | th, t))
                 self.stats['loop_checks'] += 1
             else:
@@ -713,10 +806,14 @@ class Emitter:
             body.append('SO(); c->pc = 0x%xu; rt_dispatch(c, 0); SI(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
                 i.target, i.link | th))
         elif i.kind == CALL:
-            body.append('SO(); %s(c, 0); SI(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
-                fname(i.target), i.link | th))
+            # A callee that reads flags on entry is split-off code, so it gets a full sync; so does one that returns flags.
+            before = 'SO' if i.target in self.flag_reading_entries or i.target in self.flag_returning else 'SOC'
+            after = 'SICF' if i.target in self.flag_returning else 'SIC'
+            give, take = self.custom_sync(i.target)
+            body.append('%s();%s %s(c, 0); %s();%s if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
+                before, give, fname(i.target), after, take, i.link | th))
         elif i.kind == ICALL:
-            body.append('SO(); c->pc = tpc; rt_dispatch(c, 0); SI(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
+            body.append('SOC(); c->pc = tpc; rt_dispatch(c, 0); SIC(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
                 i.link | th))
         elif i.kind == JMP:
             if i.jt:
@@ -724,9 +821,11 @@ class Emitter:
                 body.append('switch (tpc) { %s default: break; }' % cases)
                 self.stats['jump_tables'] += 1
             if i.ret:
-                body.append('c->pc = tpc; SO(); return;')
+                body.append('c->pc = tpc; SOR(); return;')
             else:
-                body.append('c->pc = tpc; SO(); __attribute__((musttail)) return rt_dispatch(c, 0);')
+                # a jump to where this function was called from is its return, whichever register kept the address: Mario Kart 7's
+                # hand-written decoder returns with `mov pc, r6`, which went through the dispatcher and lost its caller
+                body.append('if (tpc == lr0) { c->pc = tpc; SOR(); return; } c->pc = tpc; SO(); __attribute__((musttail)) return rt_dispatch(c, 0);')
                 self.stats['indirect_jumps'] += 1
         elif i.kind == SVC:
             body.append('SO(); c->pc = 0x%xu; rt_svc(c, 0x%x); SI();' % (i.addr + i.size, i.imm))
@@ -739,6 +838,26 @@ class Emitter:
         if cc:
             return '  if (%s) { %s } /* %x: %s */' % (cc, s, i.addr, note)
         return '  %s /* %x: %s */' % (s, i.addr, note)
+
+    def custom_sync(self, target):
+        """What a call to a function outside the calling convention also passes, and takes back. What it hands back is passed too: on a path
+        that doesn't write it, the callee hands back what it was given (Mario Kart 7's directory reads took a stale r7 as their count)"""
+        mi, mo = self.custom_in.get(target, 0), self.custom_out.get(target, 0)
+        if not mi and not mo:
+            return '', ''
+        give = ''.join(' c->r[%d] = r%d;' % (r, r) for r in self.cur_regs if r in mask_regs(mi | mo)) + ''.join(' c->s[%d] = S%d;' % (v, v) for v in self.cur_vregs if v in mask_vregs(mi | mo))
+        take = ''.join(' r%d = c->r[%d];' % (r, r) for r in self.cur_regs if r in mask_regs(mo)) + ''.join(' S%d = c->s[%d];' % (v, v) for v in self.cur_vregs if v in mask_vregs(mo))
+        return give, take
+
+    def prologue_saved(self, start, th):
+        """Callee-saved registers the first instruction pushes. Their caller keeps its own copy in a local, so they aren't loaded."""
+        first = self.an.decode(start, th)
+        if first is None:
+            return set()
+        w = first.word
+        if th:
+            return {r for r in range(4, 8) if w & (1 << r)} if (w & 0xFE00) == 0xB400 else set()
+        return {r for r in range(4, 12) if w & (1 << r)} if (w & 0xFFFF0000) == 0xE92D0000 else set()
 
     def find_flag_returning(self, keys):
         an = self.an
@@ -784,8 +903,167 @@ class Emitter:
                 a += n.size
             if flags.reads_flags_first(seq):
                 fre.add(k)
+        self.refine_flag_sets(keys, fr, fre, tails)
+        if self.abi:
+            self.find_custom_convention(keys, tails)
         self.flag_reading_entries = fre
         print('flag-returning functions: %d, entries reading flags: %d' % (len(fr), len(fre)))
+
+    def find_custom_convention(self, keys, tails):
+        """Hand-written code doesn't always keep to the calling convention: RVCT's soft float helpers, for one, pass values in r4-r8. --abi
+        keeps those registers in the caller's locals, so the call sites of such a function pass what it reads and take back what it changes.
+        Only those: a function's other registers in c->r may be stale, as ordinary callees leave them. A false alarm costs a load or a store."""
+        an = self.an
+        reg_write = re.compile(r'(?<![\w>\[])(r|S)(\d+) = ')
+        reg_any = re.compile(r'(?<![\w>\[])(r|S)(\d+)\b')
+        bit = lambda kind, n: 1 << (int(n) + (16 if kind == 'S' else 0))
+        reserved = sum(1 << r for r in range(4, 12)) | sum(1 << (16 + v) for v in range(16, 32))
+        scratch = (1 << 12) | sum(1 << (16 + v) for v in range(4, 16))
+        low_thumb = ~sum(1 << r for r in range(8, 12))  # Thumb saves r8-r11 by moving them to low registers, and rarely uses them otherwise
+
+        def rw(i):
+            txt = ' '.join(i.code)
+            wr = rd = 0
+            for m in reg_write.finditer(txt):
+                wr |= bit(m.group(1), m.group(2))
+            for m in reg_any.finditer(txt):
+                if txt[m.end():m.end() + 3] != ' = ':
+                    rd |= bit(m.group(1), m.group(2))
+            return rd, wr
+
+        def is_save(i):
+            n = i.note
+            return n.startswith('stm r13!') or n.startswith('vstm sp!') or n == 'push' or (n.startswith('str ') and '[r13' in n)
+
+        def summary(k):
+            """(read before anything defines them, written, saved) as register masks, for one function"""
+            insts, _ = an.explore(k)
+            th, start = k & 1, k & ~1
+            defined = {start: 0}
+            work = [start]
+            reads = wrote = saved = 0
+            while work:
+                a = work.pop()
+                i = insts.get(a)
+                if i is None:
+                    continue
+                st = defined[a]
+                rd, wr = rw(i)
+                if is_save(i):
+                    saved |= rd
+                    st |= rd
+                else:
+                    reads |= rd & ~st
+                st |= wr
+                wrote |= wr
+                succ = []
+                if i.kind == B and not ((i.target | th) in an.funcs and i.target != start):
+                    succ.append(i.target)
+                if i.kind == JMP and i.jt:
+                    succ += [t & ~1 for t in i.jt if (t & 1) == th]
+                if i.falls_through:
+                    succ.append(a + i.size)
+                for b in succ:
+                    if b in insts:
+                        old = defined.get(b)
+                        new = st if old is None else old & st
+                        if new != old:
+                            defined[b] = new
+                            work.append(b)
+            if th:
+                reads &= low_thumb
+                wrote &= low_thumb
+            return reads, wrote, saved
+
+        called = {}
+        for k in keys:
+            insts, _ = an.explore(k)
+            for i in insts.values():
+                if i.kind == CALL and i.target in an.funcs:
+                    called.setdefault(i.target, []).append(k)
+        sums = {k: summary(k) for k in keys}
+        eff_in = {k: v[0] & reserved for k, v in sums.items()}
+        eff_out = {k: v[1] & ~v[2] & reserved for k, v in sums.items()}
+        eff_wrote = {k: v[1] for k, v in sums.items()}
+        changed = True
+        while changed:
+            changed = False
+            for k, ts in tails.items():
+                if k not in sums:
+                    continue
+                r, w, sv = sums[k]
+                for t in ts:
+                    if t not in sums:
+                        continue
+                    ni = eff_in[k] | (eff_in[t] & ~w & ~sv)
+                    no = eff_out[k] | (eff_out[t] & ~sv)
+                    nw = eff_wrote[k] | eff_wrote[t]
+                    if ni != eff_in[k] or no != eff_out[k] or nw != eff_wrote[k]:
+                        eff_in[k], eff_out[k], eff_wrote[k] = ni, no, nw
+                        changed = True
+        cin = {k: eff_in[k] for k in called if eff_in[k]}
+        cout = {k: eff_out[k] for k in called if eff_out[k]}
+        # results in scratch registers: the caller reads one right after the call, and the callee writes it
+        for k in keys:
+            insts, _ = an.explore(k)
+            for i in insts.values():
+                if i.kind != CALL or i.target not in an.funcs:
+                    continue
+                a, have = i.link, 0
+                for _ in range(24):
+                    n = insts.get(a & ~1)
+                    if n is None or n.kind != 'op':
+                        break
+                    rd, wr = rw(n)
+                    got = rd & scratch & ~have & eff_wrote[i.target]
+                    if got:
+                        cout[i.target] = cout.get(i.target, 0) | got
+                    if n.cond == 14:
+                        have |= wr
+                    a = n.addr + n.size
+        # what they tail-call returns on their behalf
+        work = list(cout)
+        while work:
+            k = work.pop()
+            for t in tails.get(k, ()):
+                if t in sums and cout[k] & ~cout.get(t, 0):
+                    cout[t] = cout.get(t, 0) | cout[k]
+                    work.append(t)
+        self.custom_in, self.custom_out = cin, cout
+        print('functions outside the calling convention: %d take registers, %d hand them back' % (len(cin), len(cout)))
+
+    def refine_flag_sets(self, keys, fr, fre, tails):
+        """Flags are computed and passed only for the functions marked here, so the marks must be exact: a read of a flag can be any
+        distance after the call or the entry, past the short window find_flag_returning looks at. RVCT's early-outs do this: cmp; bcs body;
+        return, with the body testing the same flags several instructions past its push."""
+        an = self.an
+        changed = True
+        while changed:
+            changed = False
+            for k in keys:
+                insts, _ = an.explore(k)
+                start = k & ~1
+                lo = flags.liveness(insts, k & 1, start, an.funcs, k in fr, fre)
+                for a, i in insts.items():
+                    if i.kind == CALL and lo[a] and i.target in an.funcs and i.target not in fr:
+                        fr.add(i.target)
+                        changed = True
+                first = insts.get(start)
+                if first is None or k in fre:
+                    continue
+                r, w = flags.rw(first)
+                if first.kind in (CALL, ICALL):
+                    live = set(flags.COND_READS[first.cond])
+                else:
+                    live = (lo[start] - (w if first.cond == 14 else set())) | r
+                if live:
+                    fre.add(k)
+                    changed = True
+            for f in list(fr):
+                for t in tails.get(f, ()):
+                    if t not in fr:
+                        fr.add(t)
+                        changed = True
 
     def run(self, keys):
         if self.flag_opt:
@@ -861,6 +1139,7 @@ def main():
     ap.add_argument('--extra', action='append', default=[], help='file listing extra function addresses')
     ap.add_argument('--lazy', help='only emit the function at this address (and new functions it calls)')
     ap.add_argument('--lazy-out', help='C file for --lazy')
+    ap.add_argument('--abi', action='store_true', help='Wii U mode: trust the calling convention, drop resume points')
     args = ap.parse_args()
     if args.lazy:
         return lazy(args)
@@ -874,6 +1153,7 @@ def main():
                     an.extra.add(int(line, 16))
     keys = an.discover()
     em = Emitter(an, args.outdir)
+    em.abi = args.abi
     files = em.run(keys)
     with open(os.path.join(args.outdir, 'funcs.txt'), 'w') as f:
         for k in keys:

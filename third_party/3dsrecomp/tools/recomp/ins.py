@@ -3,7 +3,8 @@ import re
 
 COND_C = ['zf', '!zf', 'cf', '!cf', 'nf', '!nf', 'vf', '!vf',
           '(cf&&!zf)', '(!cf||zf)', '(nf==vf)', '(nf!=vf)',
-          '(!zf&&nf==vf)', '(zf||nf!=vf)', None, None]
+          '(!zf&&nf==vf)', '(zf||nf!=vf)', None, None,
+          '(!slt)', '(slt)', '(!zf&&!slt)', '(zf||slt)']  # 16-19: GE LT GT LE fused with the subtract right before (gen.py)
 
 # control-flow kinds
 OP = 'op'          # straight-line code
