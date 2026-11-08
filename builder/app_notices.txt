@@ -1,0 +1,36 @@
+Third-party software in 3Dii U Builder
+======================================
+
+3Dii U Builder carries the programs and libraries below. Each is under its own licence. Where a licence text ships with this copy, the folder is named; the links lead to each project and its source code.
+
+3dsrecomp by nathsou (European Union Public Licence v1.2), the recompiler and runtime the builder is built on, with this project's changes
+  engine\third_party\3dsrecomp, its source as it ships here, licence text in engine\third_party\3dsrecomp\LICENSE: https://github.com/nathsou/3dsrecomp
+
+Python 3.14 (Python Software Foundation License)
+  _internal: https://www.python.org/
+
+Qt 6 and PySide6 / Shiboken6 (GNU LGPL v3)
+  _internal\PySide6 and _internal\shiboken6, as separate DLLs that can be replaced with other builds: https://www.qt.io/ and https://code.qt.io/
+
+PyInstaller bootloader (GNU GPL v2, with its exception for bundled programs)
+  3Dii U Builder.exe: https://pyinstaller.org/
+
+pyctr (MIT), PyCryptodome (BSD 2-Clause and public domain), cryptography (Apache 2.0 or BSD 3-Clause)
+  _internal: https://github.com/ihaveamac/pyctr, https://www.pycryptodome.org/, https://cryptography.io/
+
+makerom v0.19.0, from Project_CTR by 3DSGuy (MIT)
+  _internal\bin\makerom.exe: https://github.com/3DSGuy/Project_CTR
+
+devkitPro: devkitPPC (GCC and Binutils, GNU GPL v3; newlib, BSD-style licences), wut and their tools
+  engine\devkitpro, licence texts in engine\devkitpro\licenses: https://devkitpro.org/ and https://github.com/devkitPro
+
+CafeGLSL by Exzap (MIT)
+  engine\third_party\cafeglsl and engine\third_party\cafeglsl_ppc (licence text in its folder): https://github.com/Exzap/CafeGLSL
+
+MinGW-w64 winpthreads (MIT and BSD-style) and zlib (zlib licence)
+  engine\third_party\cafeglsl: https://www.mingw-w64.org/ and https://zlib.net/
+
+FFmpeg 4.4's libavcodec and libavutil, built with only the AAC decoder (GNU LGPL v2.1 or later)
+  engine\toolchain\aac_ppc: https://ffmpeg.org/download.html
+
+The source code of the GPL and LGPL parts, as they ship here, is available on request from whoever gave you this copy.

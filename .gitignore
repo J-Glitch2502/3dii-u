@@ -1,0 +1,44 @@
+# Whitelist. Nothing at the top level is tracked unless it's named here, so a new build or data folder
+# stays out without anyone remembering to add it. Game data, generated C, keys, logs and WUPs live beside
+# the source on a developer's PC and must never be committed: see CONTRIBUTING.md.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/ARCHITECTURE.md
+!/CONTRIBUTING.md
+!/LICENSE*
+!/builder/
+!/port/
+!/tools/
+!/phase0/
+!/third_party/
+!/toolchain/
+
+__pycache__/
+*.pyc
+*.log
+
+# The builder's standalone app and PyInstaller's work folder are build outputs; makerom.exe comes from Project_CTR's releases.
+/builder/dist/
+/builder/build_app/
+/builder/bin/*.exe
+
+# These hold this PC's console address and paths until they take them as arguments.
+/tools/console_*
+
+# phase0's benchmark outputs. Only the title templates' XML files and boot movie are sources.
+/phase0/build/
+/phase0/dist/
+/phase0/results/
+/phase0/title_gpu/
+/phase0/title*/code/*.rpx
+/phase0/title*/meta/*.tga
+
+# Only the recompiler is tracked. The CafeGLSL compilers are downloads, or built by tools/win/build_cafeglsl.ps1.
+/third_party/*
+!/third_party/3dsrecomp/
+
+# Only devkitPro's public signing keys. aac_ppc is built by tools/aac_build.sh.
+/toolchain/*
+!/toolchain/keyring/

@@ -1,0 +1,21 @@
+{
+  "_about": "Games tested on a real Wii U, by 3DS program id. title_id, name, product and slug keep the builds the same as the ones already installed; status and note are shown in the app. Anything not listed builds as untested.",
+  "000400000008C300": {"slug": "tomodachi", "title_id": "0005000010334467", "name": "Tomodachi Life", "product": "WUP-N-TMDF", "folder": "Tomodachi_Life",
+                       "status": "Plays", "note": "About 30 fps, as on a 3DS. Saves on the console."},
+  "000400000007AE00": {"slug": "nsmb2", "title_id": "0005000010334478", "name": "New Super Mario Bros. 2", "product": "WUP-N-MNS2", "folder": "New_Super_Mario_Bros_2",
+                       "status": "Plays", "note": "Played to World 3 on a console with no issues, 30 to 60 fps."},
+  "00040000000A5E00": {"slug": "sticker_star", "title_id": "0005000010334477", "name": "Paper Mario: Sticker Star", "product": "WUP-N-MPSS", "folder": "Paper_Mario_Sticker_Star",
+                       "status": "Plays", "note": "30 fps on a console."},
+  "00040000000D5A00": {"slug": "dream_team", "title_id": "0005000010334479", "name": "Mario & Luigi: Dream Team", "product": "WUP-N-MLDT", "folder": "Mario_Luigi_Dream_Team",
+                       "status": "Plays", "note": "About 30 fps on a console, slower in a few busy places."},
+  "0004000000132700": {"slug": "paper_jam", "title_id": "0005000010334480", "name": "Mario & Luigi: Paper Jam", "product": "WUP-N-MLPJ", "folder": "Mario_Luigi_Paper_Jam",
+                       "status": "Plays", "note": "30 fps on a console."},
+  "00040000001B8F00": {"slug": "superstar_saga", "title_id": "0005000010334483", "name": "Mario & Luigi: Superstar Saga + Bowser's Minions", "product": "WUP-N-MLSS",
+                       "folder": "Mario_Luigi_Superstar_Saga", "status": "Plays", "note": "60 fps on a console."},
+  "00040000001D1400": {"slug": "bowsers_inside", "title_id": "0005000010334484", "name": "Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey", "product": "WUP-N-MLBI",
+                       "folder": "Mario_Luigi_Bowsers_Inside_Story", "status": "Plays", "note": "30 fps on a console. Blowing into the GamePad's mic works, or click the right stick."},
+  "00040000000F2F00": {"slug": "layton_azran", "title_id": "0005000010334485", "name": "Professor Layton and the Azran Legacy", "product": "WUP-N-LTAL", "folder": "Layton_Azran_Legacy",
+                       "status": "Plays", "note": "About 58 fps on a console."},
+  "00040000000A8500": {"slug": "layton_mask", "title_id": "0005000010334486", "name": "Professor Layton and the Miracle Mask", "product": "WUP-N-LTMM", "folder": "Layton_Miracle_Mask",
+                       "status": "Plays", "note": "About 57 fps on a console."}
+}

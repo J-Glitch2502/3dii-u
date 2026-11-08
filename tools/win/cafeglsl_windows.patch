@@ -1,0 +1,77 @@
+diff --git a/cafecompiler/api.cpp b/cafecompiler/api.cpp
+index c3cfcad..b701e95 100644
+--- a/cafecompiler/api.cpp
++++ b/cafecompiler/api.cpp
+@@ -1,4 +1,8 @@
+ #include <cstdlib>
++#ifdef _WIN32
++#define aligned_alloc(alignment, size) malloc(size)
++#endif
++#include <cstdlib>
+ #include <cstdio>
+ #include <cassert>
+ #include <cstring>
+diff --git a/cafecompiler/cafe_glsl_compiler.cpp b/cafecompiler/cafe_glsl_compiler.cpp
+index d73a8f9..04ee5f1 100644
+--- a/cafecompiler/cafe_glsl_compiler.cpp
++++ b/cafecompiler/cafe_glsl_compiler.cpp
+@@ -74,6 +74,7 @@ size_t _strlcpy(char *dst, const char *src, size_t size)
+ #define LATTE_FAMILY_CHIP CHIP_RV730
+ #define LATTE_GFX_LEVEL R700
+ 
++#ifndef _WIN32
+ int posix_memalign(void **memptr, size_t alignment, size_t size)
+ {
+ 	if (alignment % sizeof(void *) != 0 || (alignment & (alignment - 1)) != 0)
+@@ -90,6 +91,7 @@ int posix_memalign(void **memptr, size_t alignment, size_t size)
+ 	*memptr = ptr;
+ 	return 0;
+ }
++#endif
+ 
+ void DebugLogNoFormat(const char* str)
+ {
+diff --git a/src/gallium/drivers/r600/r600_pipe_common.c b/src/gallium/drivers/r600/r600_pipe_common.c
+index f00581b..35a1e5a 100644
+--- a/src/gallium/drivers/r600/r600_pipe_common.c
++++ b/src/gallium/drivers/r600/r600_pipe_common.c
+@@ -39,7 +39,7 @@
+ #include "radeon_video.h"
+ #include <inttypes.h>
+ 
+-#if !defined(__WUT__)
++#if !defined(__WUT__) && !defined(_WIN32)
+ #include <sys/utsname.h>
+ #endif
+ 
+@@ -1213,7 +1213,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
+ 			     struct radeon_winsys *ws)
+ {
+ 	char family_name[32] = {}, kernel_version[128] = {};
+-	#if !defined(__WUT__)
++	#if !defined(__WUT__) && !defined(_WIN32)
+ 	struct utsname uname_data;
+ 	#endif
+ 	const char *chip_name;
+@@ -1223,7 +1223,7 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
+ 
+ 	chip_name = r600_get_family_name(rscreen);
+ 
+-	#if !defined(__WUT__)
++	#if !defined(__WUT__) && !defined(_WIN32)
+ 	if (uname(&uname_data) == 0)
+ 		snprintf(kernel_version, sizeof(kernel_version),
+ 			 " / %s", uname_data.release);
+diff --git a/src/mapi/glapi/glapi.h b/src/mapi/glapi/glapi.h
+index d51ba0f..811dc28 100644
+--- a/src/mapi/glapi/glapi.h
++++ b/src/mapi/glapi/glapi.h
+@@ -54,7 +54,7 @@ extern "C" {
+ #endif
+ 
+ 
+-#ifdef _GLAPI_NO_EXPORTS
++#if defined(_GLAPI_NO_EXPORTS) || defined(_WIN32)
+ #  define _GLAPI_EXPORT
+ #else /* _GLAPI_NO_EXPORTS */
+ #  ifdef _WIN32

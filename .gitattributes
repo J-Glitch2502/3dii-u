@@ -1,0 +1,6 @@
+# Text files are stored and checked out with LF line endings, as the build scripts write them, so a clone on Windows
+# builds the same files as a clone anywhere else.
+* text=auto eol=lf
+*.bin binary
+*.h264 binary
+*.gpg binary
