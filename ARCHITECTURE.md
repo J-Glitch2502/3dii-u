@@ -50,7 +50,12 @@ This project adds an `--abi` mode (the `gen_abi` output). It trusts the ARM call
 s16-s31 survive calls, so they stay in C locals and only argument and return registers go through memory. That makes
 the code about 30% smaller. Hand-written code that breaks the convention (soft-float helpers, video decoders) is
 detected, and its call sites sync every register they need. Games whose code breaks it in ways that can't be detected
-build in the older safe mode (`gen_safe`): every register goes through memory at every call.
+build in the older safe mode (`gen_safe`): every register goes through memory at every call. `tools/win/build3ds.py`
+picks it from the game's own code, the same way for every game:
+- 8 or more of Mobiclip's offset-table jumps: its video decoder keeps values in any register across its own calls.
+- a call to setjmp followed within a few instructions by a call to longjmp: tasks that switch stacks, as Ace Attorney
+  Trilogy's script threads do. Their longjmp lands in a frame the C code has already left. Safe mode has a resume point
+  at every return site, so the dispatcher can carry on there.
 
 **Code the analysis missed.** On a PC, a jump to code that wasn't recompiled is compiled on the spot and recorded in
 `functions.txt`. A console can't do that, so missed code there is a crash. That's why every game goes through these
@@ -205,7 +210,8 @@ with their hash trees. Then it decrypts everything it wrote and compares it with
 - `mods.py` applies Luma-style mods. Its RomFS writer rebuilds each tested game's RomFS byte for byte when nothing
   changes.
 - `shaderlogs.py` swaps the vertex program code in shader logs for fingerprints, because that code is the game's own.
-  A build finds each program again in the user's dump.
+  A build finds each program again in the user's dump. A shader memory no DVLB program starts goes as a recipe instead:
+  where its words lie in the game's code.bin and romfs, checked against the fingerprint when the build lays it out.
 - `make_app.py` builds the standalone app with PyInstaller. The app carries an `engine/` folder: the recompiler and
   runtime sources, the build scripts, devkitPPC and the shader compilers.
 

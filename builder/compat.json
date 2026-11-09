@@ -1,5 +1,17 @@
 {
   "_about": "Games tested on a real Wii U, by 3DS program id. title_id, name, product and slug keep the builds the same as the ones already installed; status and note are shown in the app. Anything not listed builds as untested.",
+  "_cemu": [
+    {"name": "Mario Kart 7", "status": "Cemu", "note": "60 fps in races, with its v1.2 update. From this build, 29 more shaders are built in ahead. No console report yet."},
+    {"name": "The Legend of Zelda: A Link Between Worlds", "status": "Cemu", "note": "57 fps. From this build: its top screen no longer flashes onto the GamePad, and 142 shaders met in longer Cemu runs are built in ahead (its lowest fps there went from 26 to 53), against the stutter seen on a console."},
+    {"name": "Metroid: Samus Returns", "status": "Cemu", "note": "30 fps. Objects vanishing for a moment on a console is fixed from this build."},
+    {"name": "Kirby: Triple Deluxe", "status": "Cemu", "note": "59 fps. From this build, 300 more shaders are built in ahead. No console report yet."},
+    {"name": "Rhythm Heaven Megamix", "status": "Cemu", "note": "60 fps. No console report yet."},
+    {"name": "Phoenix Wright: Ace Attorney Trilogy", "status": "Cemu", "note": "54 fps, from this build on: its script threads switch stacks, and it now builds the way that needs."},
+    {"name": "Animal Crossing: New Leaf", "status": "Cemu", "note": "36 fps with its update. Busy towns are slow on a console."},
+    {"name": "Kid Icarus: Uprising", "status": "Cemu", "note": "30 fps; its cutscene videos play slowly. No console report yet."},
+    {"name": "Super Mario 3D Land", "status": "Cemu", "note": "A tester played it on a Wii U (Nov 9): almost all of it runs without issue, with 3 slow spots in a castle level. In Cemu it runs only in the interpreter (a Cemu bug)."},
+    {"name": "Miitopia", "status": "Cemu", "note": "30 fps. Needs your 3DS system files (the Mii data), which the builder now finds or asks for. From this build, 331 more shaders are built in ahead (18 fps became 30 in Cemu)."}
+  ],
   "000400000008C300": {"slug": "tomodachi", "title_id": "0005000010334467", "name": "Tomodachi Life", "product": "WUP-N-TMDF", "folder": "Tomodachi_Life",
                        "status": "Plays", "note": "About 30 fps, as on a 3DS. Saves on the console."},
   "000400000007AE00": {"slug": "nsmb2", "title_id": "0005000010334478", "name": "New Super Mario Bros. 2", "product": "WUP-N-MNS2", "folder": "New_Super_Mario_Bros_2",

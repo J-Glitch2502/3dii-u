@@ -73,6 +73,37 @@ def shadergen():
     return b3.build_shadergen(types.SimpleNamespace(jobs=4, force=False, extra_flags=None, only=None, opt=None))
 
 
+def bundle_logs(src, dst):
+    """A game's shader logs as the app ships them (shaderlogs.py): fragment records as they are, each vertex record as a fingerprint or a recipe,
+    as its program words are the game's code. dvlb.bin is that code too, and the other_ files are other games' copies: the build makes both again
+    from the dump. Returns (records as recipes, records left out)."""
+    logs, out = os.path.join(src, 'shader_logs'), os.path.join(dst, 'shader_logs')
+    os.makedirs(out, exist_ok=True)
+    dvlb = os.path.join(logs, 'dvlb.bin')
+    progs = shaderlogs.programs(dvlb) if os.path.isfile(dvlb) else set()
+    recipes, shipped = 0, set()
+    for f in [f for f in os.listdir(logs) if f.endswith('.vsr')]:  # made from a dump this repository doesn't keep (shaderlogs.py --recipes)
+        shutil.copy2(os.path.join(logs, f), os.path.join(out, f))
+        with open(os.path.join(logs, f), 'rb') as h:
+            made = list(shaderlogs.recipes(h.read()))
+        shipped |= {fp for _, fp, *_ in made}
+        recipes += len(made)
+    srcs, cache, left = shaderlogs.sources(src), {}, 0  # a tested game's own code.bin and romfs.bin
+    for f in os.listdir(logs):
+        if not f.endswith('.bin') or f == 'dvlb.bin' or f.startswith('other_'):
+            continue
+        with open(os.path.join(logs, f), 'rb') as h:
+            frag, vsf, vsr, missing = shaderlogs.split(h.read(), progs, srcs, cache)
+        recipes += sum(1 for _ in shaderlogs.recipes(vsr))
+        left += sum(1 for code, swz in missing if shaderlogs.fingerprint(code, swz) not in shipped)
+        for name, data in ((f, frag), (f[:-4] + '.vsf', vsf), (f[:-4] + '.vsr', vsr)):
+            if data:
+                with open(os.path.join(out, name), 'wb') as h:
+                    h.write(data)
+    shaderlogs.close(srcs)
+    return recipes, left
+
+
 def bundle_engine(engine):
     """the build engine, in the repository's layout, so the app builds wherever it is"""
     def skip(folder, names):  # caches, links WSL left that Windows can't open (third_party/3dsrecomp/games/*/profile.txt), and the tools
@@ -85,27 +116,16 @@ def bundle_engine(engine):
     for f in ENGINE_FILES:
         os.makedirs(os.path.dirname(os.path.join(engine, f)), exist_ok=True)
         shutil.copy2(os.path.join(ROOT, f), os.path.join(engine, f))
-    left = 0
+    recipes = left = 0
     for g in sorted(os.listdir(os.path.join(ROOT, 'games'))):  # what runs learned: where code starts, the render states they met
         src, dst = os.path.join(ROOT, 'games', g), os.path.join(engine, 'games', g)
         if os.path.isfile(os.path.join(src, 'functions.txt')):
             os.makedirs(dst, exist_ok=True)
             shutil.copy2(os.path.join(src, 'functions.txt'), dst)
-        logs = os.path.join(src, 'shader_logs')
-        if os.path.isdir(logs):
-            os.makedirs(os.path.join(dst, 'shader_logs'), exist_ok=True)
-            dvlb = os.path.join(logs, 'dvlb.bin')
-            progs = shaderlogs.programs(dvlb) if os.path.isfile(dvlb) else set()
-            for f in os.listdir(logs):  # dvlb.bin is the game's own shader code, and the other_ files copies: both made again from the dump
-                if f.endswith('.bin') and f != 'dvlb.bin' and not f.startswith('other_'):
-                    with open(os.path.join(logs, f), 'rb') as h:
-                        frag, vsf, n = shaderlogs.split(h.read(), progs)  # the vertex records' program words are the game's code
-                    left += n
-                    for name, data in ((f, frag), (f[:-4] + '.vsf', vsf)):
-                        if data:
-                            with open(os.path.join(dst, 'shader_logs', name), 'wb') as h:
-                                h.write(data)
-    print(f'shader logs: {left} vertex records left out, their programs not in a dvlb.bin to find them by')
+        if os.path.isdir(os.path.join(src, 'shader_logs')):
+            made, missing = bundle_logs(src, dst)
+            recipes, left = recipes + made, left + missing
+    print(f'shader logs: {recipes} vertex records as recipes, {left} left out, their programs in no file of the dump to find them by')
     # libstdc++'s policy-based data structures: nothing here uses them, and theirs are the deepest paths, past what Windows can copy in a deep folder
     shutil.copytree(DEVKITPRO, os.path.join(engine, 'devkitpro'), ignore=shutil.ignore_patterns('pb_ds'))
     os.makedirs(os.path.join(engine, 'bin'))
@@ -137,6 +157,7 @@ def main():
             '--workpath', WORK, '--specpath', WORK, '--icon', ico, '--paths', HERE,
             '--add-data', f'{os.path.join(HERE, "ui")}{os.pathsep}ui',
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
+            '--add-data', f'{os.path.join(HERE, "icon.png")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "bin", "makerom.exe")}{os.pathsep}bin',
             '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'cia_to_decrypted_3ds']
     for m in SCRIPT_MODULES:

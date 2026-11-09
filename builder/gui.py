@@ -6,12 +6,14 @@ import base64
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QFontDatabase, QIcon, QImage, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QFontDatabase, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -28,6 +30,15 @@ NO_WINDOW = 0x08000000 if WIN else 0  # the build's compilers would each open a 
 DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
+# what the 3DS system files are and where they come from: "What are these?", and when they're missing or a folder has none (a tester asked, Nov 9)
+SYSTEM_HELP = ('A few small files every 3DS keeps in its own memory: the system font many games write their text in, and the parts (faces, eyes, '
+               'hair) Miis are drawn from. Games load them from the console, so a game dump doesn\'t have them. The builder puts them in each game '
+               'it makes and won\'t build without them: Mii games stop without the Mii parts.\n\n'
+               'They come from your own 3DS, either way:\n'
+               '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
+               '•  GodMode9 on your 3DS: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, '
+               'press Y again and choose Copy (not Move). Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD card.\n\n'
+               'The builder copies them once and keeps them for every game after.')
 
 
 # ---- settings, the PC's drives, and words for what was chosen
@@ -49,11 +60,42 @@ def save_settings(s):
 
 
 def emulator_folders():
-    """Azahar or Citra user folders with a NAND, where the system archives (shared font, Mii data) can come from"""
+    """Folders with a 3DS NAND, where the system archives (shared font, Mii data) can come from: Azahar's, Citra's and Lime3DS's user folders,
+    then any folder a few levels down in Downloads, Desktop and Documents, whatever its name: a portable emulator's user folder, or a copy of
+    one. A Miitopia built without them stopped on the console, the files being in such a copy in Downloads (Nov 9)."""
     home = os.path.expanduser('~')
-    roots = [os.path.join(os.environ.get('APPDATA', ''), n) for n in ('Azahar', 'Citra')] if WIN else \
-        [os.path.join(home, '.local', 'share', n) for n in ('azahar-emu', 'citra-emu')]
-    return [r for r in roots if os.path.isdir(os.path.join(r, 'nand'))]
+    base = os.environ.get('APPDATA', '') if WIN else os.path.join(home, '.local', 'share')
+    names = ('Azahar', 'Citra', 'Lime3DS') if WIN else ('azahar-emu', 'citra-emu', 'lime3ds-emu')
+    found = [p for p in (os.path.join(base, n) for n in names) if dumps.nand_titles(p)]
+    places = (QStandardPaths.StandardLocation.DownloadLocation, QStandardPaths.StandardLocation.DesktopLocation,
+              QStandardPaths.StandardLocation.DocumentsLocation)
+    tops = [QStandardPaths.writableLocation(p) for p in places]  # where Windows really keeps them (OneDrive, moved), then where they usually are
+    tops += [os.path.join(home, d) for d in ('Downloads', 'Desktop', 'Documents')]
+    seen = set()
+    for top in tops:
+        if top and os.path.normcase(os.path.abspath(top)) not in seen:
+            seen.add(os.path.normcase(os.path.abspath(top)))
+            found += nands_below(top, 3)  # deeper costs seconds on a big Downloads folder, and these sit near the top
+    return found
+
+
+def nands_below(top, depth):
+    """the folders holding a 3DS NAND up to depth levels below top; one that holds a NAND isn't searched further"""
+    found, level = [], [top]
+    for _ in range(depth):
+        below = []
+        for folder in level:
+            try:
+                subs = [e.path for e in os.scandir(folder) if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                continue
+            for sub in subs:
+                if dumps.nand_titles(sub):
+                    found.append(sub)
+                else:
+                    below.append(sub)
+        level = below
+    return found
 
 
 def sd_cards():
@@ -111,24 +153,9 @@ def icon_url(rows):
 
 
 def draw_icon(size):
-    """the app's icon: a tile in the builder's coral-to-blue, with a 3DS's two screens on it"""
-    img = QImage(size, size, QImage.Format_ARGB32)
-    img.fill(Qt.transparent)
-    p = QPainter(img)
-    p.setRenderHint(QPainter.Antialiasing)
-    g = QLinearGradient(0, 0, size, size)
-    for at, c in ((0, '#ff5a73'), (0.5, '#a07bff'), (1, '#3fd0ff')):
-        g.setColorAt(at, QColor(c))
-    tile = QPainterPath()
-    tile.addRoundedRect(size * 0.04, size * 0.04, size * 0.92, size * 0.92, size * 0.22, size * 0.22)
-    p.fillPath(tile, g)
-    p.setPen(Qt.NoPen)
-    p.setBrush(QColor('#f6f7ff'))
-    p.drawRoundedRect(int(size * 0.22), int(size * 0.17), int(size * 0.56), int(size * 0.30), size * 0.06, size * 0.06)
-    p.setBrush(QColor(255, 255, 255, 215))
-    p.drawRoundedRect(int(size * 0.28), int(size * 0.53), int(size * 0.44), int(size * 0.30), size * 0.06, size * 0.06)
-    p.end()
-    return img
+    """the app's icon, the 3Dii U logo (icon.png, the user's, 2026-11-09), at size x size: the window's, the rail's and the exe's (make_app.py)"""
+    img = QImage(os.path.join(HERE, 'icon.png'))
+    return img.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_ARGB32)
 
 
 def theme():
@@ -153,12 +180,13 @@ class App(QObject):
     updateText, hasUpdate, dlcText, hasDlc = _p(str, 'updateText'), _p(bool, 'hasUpdate'), _p(str, 'dlcText'), _p(bool, 'hasDlc')
     modText, hasMod = _p(str, 'modText'), _p(bool, 'hasMod')
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
+    sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
     target, destText, cards = _p(str, 'target'), _p(str, 'destText'), _p('QVariantList', 'cards')
     canBuild, building, view = _p(bool, 'canBuild'), _p(bool, 'building'), _p(str, 'view')
     stages, stage, failed, progress, detail = _p('QVariantList', 'stages'), _p(int, 'stage'), _p(bool, 'failed'), _p(float, 'progress'), _p(str, 'detail')
     log = _p(str, 'log', logChanged)
     resultText, where, dialog = _p(str, 'resultText'), _p(str, 'where'), _p('QVariant', 'dialog')
-    games, version, rootOk = _p('QVariantList', 'games'), _p(str, 'version'), _p(bool, 'rootOk')
+    games, others, version, rootOk = _p('QVariantList', 'games'), _p('QVariantList', 'others'), _p(str, 'version'), _p(bool, 'rootOk')
     del _p
 
     def __init__(self):
@@ -174,10 +202,11 @@ class App(QObject):
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
                        updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, keysOk=False, keysNeeded=False, keysText='', otpOk=False,
-                       otpText='', target=self.st.get('target', 'card'), destText='', cards=[], canBuild=False, building=False, view='form', stages=[],
+                       otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], canBuild=False, building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
-                       games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')])
+                       games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')],
+                       others=compat.get('_cemu', []))  # shown only: they build as untested games, by their own code
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.refresh_cards()
@@ -376,6 +405,33 @@ class App(QObject):
             self.refresh_files()
 
     @Slot()
+    def chooseSystem(self):
+        p = QFileDialog.getExistingDirectory(None, 'Your 3DS system files: Azahar\'s user folder, or the 0004009b folder GodMode9 copied off your 3DS',
+                                             self.st.get('system', ''))
+        if p:
+            if not self.import_system(p):
+                self.tell('No 3DS system files there', SYSTEM_HELP, 'warn')
+            self.refresh_files()
+
+    @Slot()
+    def explainSystem(self):
+        self.tell('3DS system files', SYSTEM_HELP)
+
+    def import_system(self, folder):
+        """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games"""
+        tmp = tempfile.mkdtemp(prefix='3diiu_sys_')  # for contents that need decrypting first
+        try:
+            got = dumps.import_system_archives(folder, pipeline.ARCHIVES, tmp)
+        except (OSError, dumps.DumpError, decrypt.DecryptError):
+            got = []
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        if got:
+            self.st['system'] = folder
+            save_settings(self.st)
+        return got
+
+    @Slot()
     def chooseOtp(self):
         p = QFileDialog.getOpenFileName(None, 'Your Wii U\'s otp.bin', os.path.dirname(self.st.get('otp', '')), 'otp.bin (otp.bin);;All files (*.*)')[0]
         if p:
@@ -420,6 +476,10 @@ class App(QObject):
         else:
             dest = short(folder, 40) if folder else 'Choose a folder...'
         have = decrypt.have_keys(keys)
+        system = dumps.have_system_archives(pipeline.ARCHIVES)
+        source = f', from {short(self.st["system"], 36)}' if self.st.get('system') else ''
+        self.set(sysOk=system, sysText=f'Ready: the shared font and Mii data{source}' if system else
+                 'Needed: the font and Mii parts games load from the 3DS itself')  # short: the window's first width cuts the line
         self.set(keysOk=have, keysNeeded=needed and not have,
                  keysText=f'Found in {short(keys, 44)}' if have else 'Needed for this encrypted game' if needed else 'Only needed for encrypted dumps',
                  otpOk=otp_ok(otp), otpText=short(otp, 52) if otp_ok(otp) else 'Needed: it comes from your Wii U\'s NAND backup', destText=dest,
@@ -441,11 +501,17 @@ class App(QObject):
         if not dest or not os.path.isdir(dest):
             self.tell('Where should it go?', 'Choose an SD card or a folder for the game.', 'warn')
             return
+        if not dumps.have_system_archives(pipeline.ARCHIVES):
+            for folder in emulator_folders():
+                if self.import_system(folder) and dumps.have_system_archives(pipeline.ARCHIVES):
+                    break
+            self.refresh_files()
+            if not dumps.have_system_archives(pipeline.ARCHIVES):
+                self.tell('The 3DS system files are missing', SYSTEM_HELP, 'warn')
+                return
         save_settings(self.st)
         argv = [sys.executable, '--pipeline'] if FROZEN else [sys.executable.replace('pythonw.exe', 'python.exe'), '-u', os.path.join(HERE, 'pipeline.py')]
         argv += ['--game', self.game.path, '--otp', self.st['otp'], '--card' if self._s['target'] == 'card' else '--out', dest, '--keys', self.st['keys']]
-        if emulator_folders():
-            argv += ['--emulator', emulator_folders()[0]]
         for kind in ('update', 'dlc'):
             if getattr(self, kind):
                 argv += [f'--{kind}', getattr(self, kind).path]
@@ -549,7 +615,7 @@ def create(argv=None):
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('app', state)
     engine.rootContext().setContextProperty('T', theme())
-    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(64)))
+    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(132)))
     engine.load(QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Main.qml')))
     return qt, engine, state
 

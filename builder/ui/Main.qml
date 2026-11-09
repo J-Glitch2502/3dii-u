@@ -201,6 +201,43 @@ ApplicationWindow {
         Row { id: btns; spacing: 8; Layout.alignment: Qt.AlignVCenter }
     }
 
+    // a game on the Games page: its dot, name and a line about it
+    component GameTile: Rectangle {
+        id: tile
+        property string name
+        property string line
+        property color dot: T.amber
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1
+        Layout.fillHeight: true
+        implicitHeight: tileText.implicitHeight + 24
+        radius: 14
+        color: tileArea.containsMouse ? "#232966" : "#1b2050"
+        border.color: tileArea.containsMouse ? "#3a4390" : "#252c66"
+        Behavior on color { ColorAnimation { duration: 140 } }
+        MouseArea { id: tileArea; anchors.fill: parent; hoverEnabled: true }
+        RowLayout {
+            id: tileText
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.margins: 14
+            spacing: 12
+            Rectangle {
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 5
+                implicitWidth: 10; implicitHeight: 10; radius: 5
+                color: tile.dot
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text { text: tile.name; color: T.text; font.pixelSize: 14; font.weight: Font.DemiBold; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                Text { text: tile.line; color: T.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            }
+        }
+    }
+
     component Toggle: Item {
         id: tg
         property var options: []
@@ -755,9 +792,9 @@ ApplicationWindow {
             Rectangle { anchors { top: parent.top; bottom: parent.bottom; right: parent.right } width: 1; color: T.edge }
             Image {
                 source: appIcon
-                width: 46; height: 46
+                width: 66; height: 66  // the 3Dii U logo, wide: smaller and its letters blur
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: 22
+                y: 14
                 smooth: true
                 mipmap: true
             }
@@ -948,6 +985,13 @@ ApplicationWindow {
                                         status: app.otpText
                                         dot: app.otpOk ? T.green : T.amber
                                         Pill { small: true; text: "File..."; onClicked: app.chooseOtp() }
+                                    }
+                                    ItemRow {
+                                        title: "3DS system files"
+                                        status: app.sysText
+                                        dot: app.sysOk ? T.green : T.amber
+                                        Pill { small: true; text: "What are these?"; onClicked: app.explainSystem() }
+                                        Pill { small: true; text: "Folder..."; onClicked: app.chooseSystem() }
                                     }
                                 }
                             }
@@ -1182,37 +1226,18 @@ ApplicationWindow {
                         columnSpacing: 10
                         Repeater {
                             model: app.games
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.preferredWidth: 1
-                                Layout.fillHeight: true
-                                implicitHeight: tileText.implicitHeight + 24
-                                radius: 14
-                                color: tileArea.containsMouse ? "#232966" : "#1b2050"
-                                border.color: tileArea.containsMouse ? "#3a4390" : "#252c66"
-                                Behavior on color { ColorAnimation { duration: 140 } }
-                                MouseArea { id: tileArea; anchors.fill: parent; hoverEnabled: true }
-                                RowLayout {
-                                    id: tileText
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.margins: 14
-                                    spacing: 12
-                                    Rectangle {
-                                        Layout.alignment: Qt.AlignTop
-                                        Layout.topMargin: 5
-                                        implicitWidth: 10; implicitHeight: 10; radius: 5
-                                        color: modelData.status === "Plays" ? T.green : T.amber
-                                    }
-                                    ColumnLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 2
-                                        Text { text: modelData.name; color: T.text; font.pixelSize: 14; font.weight: Font.DemiBold; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                                        Text { text: modelData.status + ": " + modelData.note; color: T.dim; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                                    }
-                                }
-                            }
+                            GameTile { name: modelData.name; line: modelData.status + ": " + modelData.note; dot: modelData.status === "Plays" ? T.green : T.amber }
+                        }
+                    }
+                    CardTitle { title: "Runs in Cemu"; sub: "Built with this builder and played in the Cemu emulator, not yet on a real Wii U." }
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        rowSpacing: 10
+                        columnSpacing: 10
+                        Repeater {
+                            model: app.others
+                            GameTile { name: modelData.name; line: modelData.note }
                         }
                     }
                     Text {
@@ -1235,11 +1260,13 @@ ApplicationWindow {
                 ColumnLayout {
                     width: parent.width
                     spacing: 18
-                    CardTitle { title: "How it works"; sub: "Four things, all your own. Nothing is downloaded, and no game or key comes with the builder." }
+                    CardTitle { title: "How it works"; sub: "Five things, all your own. Nothing is downloaded, and no game or key comes with the builder." }
                     Repeater {
+                        id: steps
                         model: [
                             { title: "Your game", body: "A dump of a 3DS game you own: .3ds, .cci, .cia or .cxi. Encrypted dumps are fine, with your keys." },
                             { title: "Your 3DS keys", body: "boot9.bin and seeddb.bin from your own 3DS (GodMode9 can dump them), in .3ds in your user folder. Only needed for encrypted dumps." },
+                            { title: "Your 3DS system files", body: "Your 3DS's font and Mii parts, which games load from the console itself. Azahar copies them off your 3DS (File > Set Up System Files), or GodMode9 can: the 0004009b folder in [1:] SYSNAND CTRNAND > title. The builder needs them once." },
                             { title: "Your Wii U", body: "otp.bin from your Wii U's NAND backup. The game is packed for your console with it." },
                             { title: "Install", body: "Put the SD card in your Wii U and install with WUP Installer GX2. If an older build of the game is installed, delete that first (System Settings, Data Management). Saves stay with the game on the console." }
                         ]
@@ -1249,7 +1276,7 @@ ApplicationWindow {
                             Rectangle {
                                 Layout.alignment: Qt.AlignTop
                                 implicitWidth: 40; implicitHeight: 40; radius: 20
-                                color: win.brand(index / 3)
+                                color: win.brand(index / Math.max(1, steps.count - 1))
                                 Text { anchors.centerIn: parent; text: index + 1; color: "white"; font.family: T.display; font.pixelSize: 19; font.weight: Font.Bold }
                             }
                             ColumnLayout {

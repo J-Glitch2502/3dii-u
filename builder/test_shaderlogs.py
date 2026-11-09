@@ -1,5 +1,10 @@
-"""Self-check for shaderlogs.py's round trip: python builder/test_shaderlogs.py"""
+"""Self-check for shaderlogs.py's round trips: python builder/test_shaderlogs.py
+- A record whose memory starts with a program of the game's DVLB ships as a fingerprint and comes back with the dump's program.
+- One laid out from the game's code.bin (plain words, and a swizzle table of plain words) and romfs.bin (a program and every other word of a DVLB's
+  table) ships as a recipe and comes back the same from the dump, and not at all from another version of it; one whose words aren't in the dump
+  gets neither. Synthetic files, so it runs anywhere."""
 import os
+import random
 import shutil
 import struct
 import sys
@@ -21,9 +26,9 @@ log = vs(1, prog[0] + [0x99, 0x99], prog[1] + [0x77], tail) + frag + vs(0, *othe
 
 base = tempfile.mkdtemp()
 try:
-    shipped, vsf, left = shaderlogs.split(log, {(struct.pack('<3I', *prog[0]), struct.pack('<2I', *prog[1]))})
+    shipped, vsf, vsr, left = shaderlogs.split(log, {(struct.pack('<3I', *prog[0]), struct.pack('<2I', *prog[1]))})
     assert shipped == frag, 'fragment records ship as they are'
-    assert left == 1 and len(vsf) == shaderlogs.VSF and b'\x11\x00\x00\x00' not in vsf, 'one fingerprint, no code; the unknown program left out'
+    assert len(left) == 1 and not vsr and len(vsf) == shaderlogs.VSF and b'\x11\x00\x00\x00' not in vsf, 'one fingerprint, no code; the unknown program left out'
     with open(os.path.join(base, 'dvlb.bin'), 'wb') as f:
         f.write(vs(1, *prog, bytes(56)))
     with open(os.path.join(base, 'run.vsf'), 'wb') as f:
@@ -32,6 +37,80 @@ try:
     with open(os.path.join(base, 'run_vsf.bin'), 'rb') as f:
         assert f.read() == vs(1, *prog, tail), 'the record comes back with the dump\'s program and its own uniforms and output map'
     assert not os.path.exists(os.path.join(base, 'run.vsf'))
-    print('shaderlogs ok')
 finally:
     shutil.rmtree(base)
+
+rnd = random.Random(9)
+
+
+def words(n):
+    return b''.join(struct.pack('<I', rnd.getrandbits(32)) for _ in range(n))
+
+
+tmp = tempfile.mkdtemp(prefix='shaderlogs_test_')
+try:
+    game = os.path.join(tmp, 'game')
+    os.makedirs(os.path.join(game, 'shader_logs'))
+    first, gap, engine, table = words(1), words(1), words(40), words(6)  # the engine's shader in code.bin: a word, another, then the rest
+    code_bin = bytearray(words(30000))
+    code_bin[40000:40000 + 4 * 42] = first + gap + engine
+    code_bin[40400:40400 + 28] = table[:4] + table[4:]  # its swizzles, plain
+    program, dvle_swz = words(60), words(5)
+    romfs = bytearray(words(250000))
+    romfs[600000:600000 + 240] = program
+    for j in range(5):  # a DVLB's table: each swizzle with a word after it
+        romfs[600400 + 8 * j:600404 + 8 * j] = dvle_swz[4 * j:4 * j + 4]
+    for name, data in (('code.bin', code_bin), ('romfs.bin', romfs)):
+        with open(os.path.join(game, name), 'wb') as f:
+            f.write(data)
+
+    code, swz, tail = first + engine + program, table + dvle_swz, words(14)
+    stranger = words(80)  # another game's memory, in a mixed log
+    log = (b'VS  ' + struct.pack('<III', 3, len(code) // 4, len(swz) // 4) + code + swz + tail
+           + b'VS  ' + struct.pack('<III', 0, 60, 20) + stranger + tail
+           + b'FS  ' + struct.pack('<I', 8) + words(2))
+    srcs = shaderlogs.sources(game)
+    frag, vsf, vsr, left = shaderlogs.split(log, set(), srcs)
+    shaderlogs.close(srcs)
+    got = list(shaderlogs.recipes(vsr))
+    assert left == [(stranger[:240], stranger[240:])] and len(got) == 1 and not vsf and frag.startswith(b'FS  '), (len(left), len(got))
+    entry, fp, t, pc, ps = got[0]
+    assert entry == 3 and t == tail and fp == shaderlogs.fingerprint(code, swz)
+    assert len(pc) <= 4 and len(ps) <= 4, (pc, ps)  # a few runs, not a word at a time
+    assert all(at < 40000 + 4096 or at >= 600000 for _, _, _, at in pc + ps)  # each piece where that part really is
+
+    with open(os.path.join(game, 'shader_logs', 'x.vsr'), 'wb') as f:
+        f.write(vsr)
+    assert shaderlogs.restore(os.path.join(game, 'shader_logs')) == (1, 0)
+    back = open(os.path.join(game, 'shader_logs', 'x_vsr.bin'), 'rb').read()
+    assert back == log[:len(back)] and len(back) == 16 + len(code) + len(swz) + len(tail), 'the record comes back as it was logged'
+
+    code_bin[40000 + 4 * 10] ^= 1  # another version of the game: the record is left out, not made wrong
+    with open(os.path.join(game, 'code.bin'), 'wb') as f:
+        f.write(code_bin)
+    with open(os.path.join(game, 'shader_logs', 'x.vsr'), 'wb') as f:
+        f.write(vsr)
+    assert shaderlogs.restore(os.path.join(game, 'shader_logs')) == (0, 1)
+    assert list(shaderlogs.recipes(vsr[:-3])) == []  # a cut file gives nothing
+
+    # a shader kept in a compressed romfs file (Zelda's SPBD3 in RegionBoot.szs): found unpacked by --recipes, unpacked again by the build
+    packed_prog, packed_swz = words(50), words(6)
+    inner = words(3000) + packed_prog + words(10) + packed_swz + words(100)
+    yaz0 = bytearray(b'Yaz0' + struct.pack('>I', len(inner)) + bytes(8))
+    for j in range(0, len(inner), 8):  # every byte a literal
+        yaz0 += b'\xff' + inner[j:j + 8]
+    head = struct.pack('<10I', 0x28, 0, 0, 0, 0, 0, 0, 0x28, 32, 0x80)
+    entry_meta = struct.pack('<IIQQII', 0, 0xFFFFFFFF, 16, len(yaz0), 0xFFFFFFFF, 0)  # one file, no name, 16 bytes into the data
+    romfs2 = head + entry_meta + bytes(0x80 - 0x28 - 32) + bytes(16) + yaz0
+    game2 = os.path.join(tmp, 'game2')
+    os.makedirs(os.path.join(game2, 'shader_logs'))
+    with open(os.path.join(game2, 'romfs.bin'), 'wb') as f:
+        f.write(romfs2)
+    with open(os.path.join(game2, 'shader_logs', 'run.bin'), 'wb') as f:
+        f.write(b'VS  ' + struct.pack('<III', 0, 50, 6) + packed_prog + packed_swz + tail)
+    assert shaderlogs.write_recipes(game2, os.path.join(game2, 'shader_logs')) == (1, 0)
+    assert shaderlogs.restore(os.path.join(game2, 'shader_logs')) == (1, 0)
+    assert open(os.path.join(game2, 'shader_logs', 'recipes_vsr.bin'), 'rb').read()[16:16 + 224] == packed_prog + packed_swz
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+print('shaderlogs ok: fingerprints and recipes')

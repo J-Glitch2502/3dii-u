@@ -11,7 +11,12 @@ WHAT YOU NEED
 - For encrypted dumps: boot9.bin and seeddb.bin from your own 3DS (GodMode9 can dump both). Put them in C:\Users\<you>\.3ds, or choose their folder in the builder.
 - Your Wii U's otp.bin, from your own console's NAND backup. The game is packed with it. The builder never shows the key and never stores it.
 - A Wii U with Aroma and WUP Installer GX2, and its SD card.
-- For games that use the 3DS's system font or its Mii data: Azahar or Citra on this PC, set up with your own 3DS's system files. The builder copies the font and Mii data from there. Without them, those games show no text.
+- Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in and the
+  parts Miis are drawn from. Games load them from the console, so dumps don't have them, and Mii games stop without them. From your own 3DS, either way:
+  - Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.
+  - GodMode9: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, press Y again and choose Copy (not Move).
+    In the builder, press "Folder..." next to "3DS system files" and choose that 0004009b folder.
+  The builder also looks in Citra's user folder, and in Downloads, Desktop and Documents. It copies them once and keeps them for every game after.
 
 
 GETTING STARTED
@@ -34,6 +39,9 @@ WHICH GAMES WORK
   Tomodachi Life, New Super Mario Bros. 2, Paper Mario: Sticker Star, Mario & Luigi: Dream Team, Mario & Luigi: Paper Jam,
   Mario & Luigi: Superstar Saga + Bowser's Minions, Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey,
   Professor Layton and the Azran Legacy, and Professor Layton and the Miracle Mask. They were tested without updates.
+- "Runs in Cemu" (the Games page): built with this builder and played in the Cemu emulator, not yet on a real Wii U:
+  Mario Kart 7, The Legend of Zelda: A Link Between Worlds, Metroid: Samus Returns, Kirby: Triple Deluxe, Rhythm Heaven Megamix,
+  Phoenix Wright: Ace Attorney Trilogy, Animal Crossing: New Leaf, Kid Icarus: Uprising, Super Mario 3D Land and Miitopia.
 - "Untested": every other game, and any game with a mod. It may play, it may not start, or it may stop partway.
   Reports on these games help the most.
 
@@ -48,7 +56,8 @@ REPORTING A PROBLEM
 WHAT STAYS ON YOUR PC
 
 - The builder works in %LOCALAPPDATA%\3Dii U Builder.
-  It keeps its compiled runtime there for the next game, and deletes each game's work files when the build ends.
+  It keeps its compiled runtime there for the next game, plus up to 2 GB of each game's compiled code, so building a game again
+  (with its update, or with a newer builder) only compiles what changed. It deletes each game's other work files when the build ends.
   Deleting that folder frees the space; the builder makes it again.
 - Your dumps are never changed. Your keys are only read.
 - The games you build are made from your dumps and your keys: don't share them.

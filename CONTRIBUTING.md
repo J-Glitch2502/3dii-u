@@ -120,7 +120,7 @@ These need no game files and run in seconds:
     python builder/selftest.py
 
 `builder/selftest.py` builds a synthetic DLC in memory and runs it through the dump reader. The other two check the
-app's compiled-cache reset and the shader-log fingerprint round trip.
+app's compiled-cache reset and the shader-log fingerprint and recipe round trips.
 
 This one needs your own dumps and Cemu, and checks the ports end to end:
 

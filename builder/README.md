@@ -65,7 +65,14 @@ Windows 10 or 11 for now (Linux is planned):
   - It carries its own Python, Qt, pyctr and makerom.
   - Its `engine` folder holds the rest: the recompiler, the runtime's sources, devkitPro's PowerPC toolchain with wut, the CafeGLSL shader compiler, and a ready-built shader generator.
   - It builds in `%LOCALAPPDATA%\3Dii U Builder`, which keeps the compiled runtime for the next game.
-- The 3DS system archives (its shared font and Mii data) don't come with it: they're your own 3DS's files. The builder copies them from Azahar or Citra when either is on the PC, and keeps them in its work folder.
+  - Beside it, `objcache` keeps up to 2 GB of compiled game code by what went into it (`tools/win/objcache.py`). A game built again by a newer app, or with its update, then compiles only the files whose code changed.
+- The 3DS system archives (its shared font and Mii data) don't come with it: they're your own 3DS's files.
+  - The builder copies them from Azahar's or Citra's user folder, or from any folder holding a 3DS NAND up to three levels down in Downloads, Desktop or Documents, whatever it's called. It keeps them in its work folder.
+  - Off a 3DS, GodMode9 copies `title/0004009b` out of `[1:] SYSNAND CTRNAND`; the user picks that folder (or the one holding it) with "Folder...". Azahar gets them with File > Set Up System Files and the Artic Setup Tool.
+  - The NAND's contents may be NCCH (`<n>.app`, encrypted as on the 3DS or not) or RomFS images already taken out (`<n>.app.romfs`). A folder of `<title id>.romfs` files works too.
+  - "What are these?" next to the row explains all this to testers (`gui.SYSTEM_HELP`).
+  - Without the Mii data and the shared font, the app and `pipeline.py` won't build. A Miitopia built without them stopped on the console with `[err:f] result c8804478`.
+  - If a build ever lacks one, the runtime's error screen names the missing archive.
 - Free disk space of about three times the game's size while it builds. Work files are deleted at the end.
 - From the source: Python 3.10 or newer, `pip install PySide6-Essentials pyctr pycryptodome` once, and the build tools `tools/win/build3ds.py` uses. Install each once:
   - devkitPro's PowerPC toolchain and wut, from `tools/win/install_toolchain.sh`, into `C:\devkitPro`.
@@ -80,7 +87,11 @@ Windows 10 or 11 for now (Linux is planned):
 - `make_app.py` builds the standalone app with PyInstaller (`python builder/make_app.py`, on a PC with the build tools above).
   - It leaves out the parts of Qt the window never loads.
   - It puts the engine beside the app, in this repository's own layout. That includes what runs of the games learned: where their code starts, and the render states they met.
-  - None of the games' code goes in. A run's shader log keeps each vertex record's whole shader memory, which is the game's own code. So `shaderlogs.py` ships each record as a fingerprint of the program of the game's DVLB it ran, beside the log in a `.vsf` file, and a build finds the program in the user's own dump again (dvlb.bin). Checked on the nine games: the shader generator makes the same shaders from these as from the full logs, except that it declares fewer unused inputs. A record whose program the DVLB scan never found is left out, and that vertex shader is drawn the CPU way on the console. NSMB2 keeps 46 of its 63 vertex variants; the other eight games keep 85-100%.
+  - None of the games' code goes in. A run's shader log keeps each vertex record's whole shader memory, which is the game's own code. So `shaderlogs.py` ships each record as a fingerprint of the program of the game's DVLB it ran, beside the log in a `.vsf` file, and a build finds the program in the user's own dump again (dvlb.bin). Checked on the nine games: the shader generator makes the same shaders from these as from the full logs, except that it declares fewer unused inputs.
+  - A memory no DVLB program starts ships as a recipe instead (`.vsr`): where its words lie in the game's own `code.bin` and `romfs.bin`, or in a romfs file once unpacked (Yaz0, LZ10, LZ11). The build lays it out from the user's dump and checks it against the record's fingerprint, so another version of the game just leaves it out. Short runs must lie near long ones, so a recipe can't spell code out of coincidences.
+    - The Mario & Luigi engine keeps a shader as plain words in its `code.bin` and loads a romfs program after it. That's 115 records the app used to leave out, and all of them come back now.
+    - For a game this repository keeps no dump of, `python builder/shaderlogs.py --recipes <extracted game folder> games/g_<code>/shader_logs` writes its `recipes.vsr`, which the app ships.
+  - A record still left out is drawn the CPU way on the console. Most of those are another game's, from a console log that collects every game: NSMB2's 17, for one, which NSMB2 never draws.
   - For an untested game built from the source, the build leaves its `dvlb.bin` where its runs' logs go (`games/g_<code>/shader_logs`), so the next app can fingerprint them. The console tools (`tools/console_*`), with this PC's paths and its console's address, stay out.
   - It ends with `dist/3Dii U Builder <version> beta.zip` for testers: the app folder with `Read me first.txt` (`app_readme.txt`) and `Third-party notices.txt` (`app_notices.txt`). A new build replaces the old zip.
   - It writes how many files the app has to `_internal/files.txt`. Before Qt loads, `app.py` counts them again: a zip unpacked only in part (Windows' Extract All stops at a path too long for it, or an antivirus takes a file) gets a message to unzip again into a short folder, instead of a Python traceback. Only the Basic style of Qt Quick Controls ships, which keeps the deepest path in the zip at 121 characters.

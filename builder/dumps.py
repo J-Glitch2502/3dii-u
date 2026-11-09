@@ -9,6 +9,7 @@ DLC adds dlc_<content index>.romfs per content and the records am:app hands out 
 import hashlib
 import json
 import os
+import shutil
 import struct
 
 import decrypt
@@ -351,12 +352,55 @@ def plain_dlc_sources(dlc, work_dir):
 SYSTEM_ARCHIVES = ('0004009b00010202', '0004009b00010402', '0004009b00014002', '0004009b00014102', '0004009b00014202', '0004009b00014302', '000400db00010302')
 
 
-def import_system_archives(user_dir, out_dir, work_dir):
-    """The shared font, Mii data and the other system archives games read, from an Azahar or Citra user folder's NAND. Returns which came out."""
+ESSENTIAL_ARCHIVES = ('0004009b00010202', '0004009b00014002')  # the Mii data, without which Mii games stop (Miitopia, Nov 9), and the shared font
+NAND_ID = '00000000000000000000000000000000'
+
+
+def have_system_archives(folder):
+    return all(os.path.isfile(p) and is_romfs(p) for p in (os.path.join(folder, t + '.romfs') for t in ESSENTIAL_ARCHIVES))
+
+
+def nand_titles(folder):
+    """The title folder of a 3DS NAND in what the user points at: an emulator's user folder (Azahar's and Citra's user/nand/<32 zeros>/title,
+    or a copy of one by any name), the nand folder in it, the title folder of a NAND dumped from a 3DS, or the 0004009b folder GodMode9 copies
+    off a 3DS (title in CTRNAND) or the folder holding it. None if there's none."""
+    if os.path.basename(os.path.normpath(folder)).lower() == '0004009b':
+        folder = os.path.dirname(os.path.normpath(folder))
+    for sub in (('nand', NAND_ID, 'title'), (NAND_ID, 'title'), ('title',), ('user', 'nand', NAND_ID, 'title'),
+                ('user_directory', 'nand', NAND_ID, 'title'), ()):
+        p = os.path.join(folder, *sub)
+        if os.path.isdir(os.path.join(p, '0004009b')):
+            return p
+    return None
+
+
+def is_romfs(path):
+    """a RomFS level 3 image, as a system archive is kept: its header is 0x28 bytes"""
+    with open(path, 'rb') as f:
+        return os.path.getsize(path) > 0x28 and struct.unpack('<I', f.read(4))[0] == 0x28
+
+
+def import_system_archives(source, out_dir, work_dir):
+    """The shared font, Mii data and the other system archives games read, into out_dir as <title id>.romfs. They come from a 3DS NAND (see
+    nand_titles): as NCCH contents (<n>.app, Azahar and Citra) or as their RomFS already (<n>.app.romfs), or from a folder of
+    <title id>.romfs files, as this builder keeps them. Returns which came out."""
     got = []
+    os.makedirs(out_dir, exist_ok=True)
+    titles = nand_titles(source)
     for tid in SYSTEM_ARCHIVES:
-        content = os.path.join(user_dir, 'nand', '00000000000000000000000000000000', 'title', tid[:8], tid[8:], 'content')
-        for app in sorted(f for f in os.listdir(content) if f.endswith('.app')) if os.path.isdir(content) else []:
+        dst = os.path.join(out_dir, tid + '.romfs')
+        flat = os.path.join(source, tid + '.romfs')
+        content = os.path.join(titles, tid[:8], tid[8:], 'content') if titles else ''
+        names = sorted(os.listdir(content)) if os.path.isdir(content) else []
+        ready = [os.path.join(content, n) for n in names if n.endswith('.app.romfs')] + ([flat] if os.path.isfile(flat) else [])
+        ready = [p for p in ready if is_romfs(p)]
+        if ready:
+            if os.path.abspath(ready[0]) != os.path.abspath(dst):
+                shutil.copyfile(ready[0], dst + '.part')  # whole or not at all: a copy cut short would pass for the archive from then on
+                os.replace(dst + '.part', dst)
+            got.append(tid)
+            continue
+        for app in [n for n in names if n.endswith('.app')]:
             d = Dump(os.path.join(content, app))
             path = d.path if not d.encrypted() else decrypt.to_plain(d.path, os.path.join(work_dir, 'sysarc_' + tid))
             with open(path, 'rb') as f:

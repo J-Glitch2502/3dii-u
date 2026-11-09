@@ -4,19 +4,22 @@
     pipeline.py --game <dump> [--update <dump>] [--dlc <dump>] [--mod <folder or .zip> ...] [--keys <folder>] [--emulator <folder>] --otp <otp.bin> (--card D: | --out <folder>) [--keep] [--jobs N]
 
 --keys: the folder with boot9.bin and seeddb.bin from your own 3DS, ~/.3ds by default; only encrypted dumps need it, and they're decrypted the way
-cia_to_decrypted_3ds.py does it (decrypt.py). --emulator: an Azahar or Citra user folder, for the system archives (shared font, Mii data) if this PC
-has none yet. --otp: your Wii U's otp.bin, for the common key the WUP is packed with.
+cia_to_decrypted_3ds.py does it (decrypt.py). --emulator: a 3DS emulator's user folder (Azahar, Citra) or the 0004009b folder GodMode9 copies off
+your 3DS, for the system archives (shared font, Mii data) if this PC has none yet. --otp: your Wii U's otp.bin, for the common key the WUP is
+packed with.
 Lines starting with @ are for the app: @stage <name>, @progress <0-100>, @done <where it went>, @error <why>.
 
 It builds with tools/win/build3ds.py, in folders of its own (builder_work/, build_win_builder/), so it never touches the nine ports' builds."""
 import argparse
 import filecmp
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import types
 
@@ -68,6 +71,19 @@ class Watch:
                 f = int(m.group(2)) / int(m.group(3))
                 self.progress.at(f * 0.3 if m.group(1) == 'runtime' else 0.3 + f * 0.7)
         return len(s)
+
+    def flush(self):
+        self.out.flush()
+
+
+class Held:
+    """stdout while the shaders are made alongside the code: what that work prints (build3ds.context.tag 'shaders', handed down to its workers)
+    waits here until the Shaders stage, as the app shows one stage at a time"""
+    def __init__(self, out, context):
+        self.out, self.context, self.held = out, context, io.StringIO()
+
+    def write(self, s):
+        return (self.held if getattr(self.context, 'tag', None) == 'shaders' else self.out).write(s)
 
     def flush(self):
         self.out.flush()
@@ -139,7 +155,8 @@ def main():
     ap.add_argument('--dlc')
     ap.add_argument('--mod', action='append', default=[], help="a mod in Luma's layout (luma/titles/<title id>/: romfs, code.ips/.bps/.bin); several go on in order")
     ap.add_argument('--keys', help='boot9.bin and seeddb.bin from your own 3DS (default ~/.3ds)')
-    ap.add_argument('--emulator', help='an Azahar or Citra user folder, for the system archives')
+    ap.add_argument('--emulator', help='a 3DS emulator\'s user folder (Azahar, Citra) or the 0004009b folder GodMode9 copies off your 3DS '
+                                         '(title, in CTRNAND), for the system archives')
     ap.add_argument('--otp', required=True)
     ap.add_argument('--card', help='an SD card: the WUP goes in its install folder')
     ap.add_argument('--out', help='a folder to put the WUP in instead')
@@ -221,17 +238,17 @@ def main():
     for d in plain.values():
         d.f.close()
     shutil.rmtree(tmp, ignore_errors=True)
-    if not os.path.isdir(archives) or not os.listdir(archives):
-        print('No system archives (the 3DS\'s shared font and Mii data): games that use them will show no text. Your emulator\'s user folder has them.', flush=True)
+    if not dumps.have_system_archives(archives):  # a Miitopia built without them stopped on the console with FS "not found" (Nov 9)
+        fail('The 3DS system files are missing: the Mii data, without which Mii games stop, and the shared font. Give --emulator Azahar\'s '
+             'user folder (after its File > Set Up System Files) or the 0004009b folder GodMode9 copies off your 3DS (title, in CTRNAND).')
     # what earlier runs of a game learned (render states it uses; code only static analysis misses) goes with it, if the code is the same.
     # An untested game's live under its own slug (games/g_<code>/shader_logs): a run's shader_misses.bin put there is compiled ahead next time.
-    if True:
-        logs = os.path.join(ROOT, 'games', (known or derived(game))['slug'], 'shader_logs')
-        if os.path.isdir(logs):
-            os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
-            for f in os.listdir(logs):
-                if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
-                    shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
+    logs = os.path.join(ROOT, 'games', (known or derived(game))['slug'], 'shader_logs')
+    if os.path.isdir(logs):
+        os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
+        for f in os.listdir(logs):
+            if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
+                shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
 
     # after the dumps, as it sets the toolchain up as it loads; by path, so the standalone app uses the repository's copy and its paths
     import importlib.util
@@ -277,12 +294,29 @@ def main():
                 fail(f'{tool} failed')
 
     args = types.SimpleNamespace(jobs=a.jobs, force=False, extra_flags=None, only=None, opt=None)
-    sys.stdout = Watch(sys.__stdout__, PROGRESS)
+    sys.stdout = held = Held(Watch(sys.__stdout__, PROGRESS), b3.context)
+    shader_stop = []
+
+    def shaders():  # they need none of the code, so they're made while it compiles (Zelda's took 21 of its 254 s)
+        b3.context.tag = 'shaders'
+        try:
+            b3.build_shaders(g, args)
+        except BaseException as e:  # build3ds stops with SystemExit; anything else keeps its traceback, shown with the stage's output
+            if not isinstance(e, SystemExit):
+                import traceback
+                traceback.print_exc(file=held.held)
+            shader_stop.append(e)
+
+    alongside = threading.Thread(target=shaders, daemon=True)
     try:
         PROGRESS.stage('Recompiling')
+        alongside.start()
         b3.build_code(g, args)
         PROGRESS.stage('Shaders')
-        b3.build_shaders(g, args)
+        alongside.join()
+        print(held.held.getvalue(), end='', flush=True)
+        if shader_stop:
+            raise shader_stop[0] if isinstance(shader_stop[0], SystemExit) else SystemExit(f'shaders: {shader_stop[0]!r}')
     except SystemExit as e:
         sys.stdout = sys.__stdout__
         fail(f'The build stopped: {e}')
