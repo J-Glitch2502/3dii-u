@@ -17,6 +17,7 @@
 #include <set>
 
 #include "loader.h"
+#include "memory_regions.h"
 #include "service.h"
 #include "services/services.h"
 
@@ -474,35 +475,7 @@ static void thread_exit_locked(Thread *t, Lock &lk) {
 }
 
 // ---------------------------------------------------------------- memory bookkeeping
-struct Region {
-    u32 base, size, perm, state;
-};
-static std::map<u32, Region> regions;  // by base
-
-static void add_region(u32 base, u32 size, u32 perm, u32 state) { regions[base] = {base, size, perm, state}; }
-
-static void remove_region(u32 base, u32 size) {
-    // (only exact or splitting removal at region granularity)
-    for (auto it = regions.begin(); it != regions.end();) {
-        Region r = it->second;
-        u32 rend = r.base + r.size, end = base + size;
-        if (rend <= base || r.base >= end) {
-            ++it;
-            continue;
-        }
-        it = regions.erase(it);
-        if (r.base < base) regions[r.base] = {r.base, base - r.base, r.perm, r.state};
-        if (rend > end) regions[end] = {end, rend - end, r.perm, r.state};
-    }
-}
-
-static const Region *find_region(u32 a) {
-    auto it = regions.upper_bound(a);
-    if (it == regions.begin()) return nullptr;
-    --it;
-    if (a < it->second.base + it->second.size) return &it->second;
-    return nullptr;
-}
+static MemoryRegions Regions;
 
 bool guest_busy() {
     Lock lk(kmutex);
@@ -510,16 +483,17 @@ bool guest_busy() {
 }
 
 bool guest_readable(u32 a, u32 size) {
-    if (a >= g_game.text_addr && a + size <= g_game.data_addr + g_game.data_size + g_game.bss_size) return true;
+    if (size && a >= g_game.text_addr && uint64_t(a) + size <= uint64_t(g_game.data_addr) + g_game.data_size + g_game.bss_size)
+        return true;
     Lock lk(kmutex);
-    const Region *r = find_region(a);
-    return r && (r->perm & 1) && a + size <= r->base + r->size;
+    return Regions.Covers(a, size, UINT32_MAX, 1);
 }
 
 // linear heap allocator: first fit over free ranges
 static std::map<u32, u32> linear_free;  // base -> size
 
 static u32 linear_alloc(u32 size) {
+    if (!size || !MemoryRegions::PageAligned(size)) return 0;
     for (auto it = linear_free.begin(); it != linear_free.end(); ++it) {
         if (it->second >= size) {
             u32 a = it->first, s = it->second;
@@ -532,7 +506,10 @@ static u32 linear_alloc(u32 size) {
     return 0;
 }
 
-u32 alloc_linear(u32 size) { return linear_alloc((size + 0xFFF) & ~0xFFFu); }
+u32 alloc_linear(u32 size) {
+    if (!size || uint64_t(size) + 0xFFF > UINT32_MAX) return 0;
+    return linear_alloc((size + 0xFFF) & ~0xFFFu);
+}
 
 static void linear_free_range(u32 a, u32 size) {
     linear_free[a] = size;
@@ -578,72 +555,76 @@ static void wait_on(Thread *t, std::vector<std::shared_ptr<WaitObject>> objs, bo
 }
 
 static u32 svc_control_memory(CPU *c) {
-    u32 op = c->r[0], addr0 = c->r[1], addr1 = c->r[2], size = c->r[3], perm = c->r[4];
-    u32 kind = op & 0xFF;
-    bool linear = op & 0x10000;
-    size = (size + 0xFFF) & ~0xFFFu;
+    const u32 op = c->r[0], addr0 = c->r[1], addr1 = c->r[2], requested = c->r[3], perm = c->r[4];
+    const u32 kind = op & 0xFF;
+    const bool linear = (op & 0x10000) != 0;
+    if (!requested || uint64_t(requested) + 0xFFF > UINT32_MAX) return RES_INVALID_COMBINATION;
+    const u32 size = (requested + 0xFFF) & ~0xFFFu;
+    if (!MemoryRegions::PageAligned(addr0) || !MemoryRegions::PageAligned(addr1)) return RES_INVALID_ADDRESS;
+    if (perm > 3 || perm == 2) return RES_INVALID_COMBINATION;
     VLOG("[svc] ControlMemory op=%x addr0=%08x addr1=%08x size=%x perm=%x\n", op, addr0, addr1, size, perm);
     switch (kind) {
-    case 3: {  // COMMIT
-        u32 a;
+    case 3: {
+        if (!perm || addr1) return RES_INVALID_COMBINATION;
+        u32 address;
         if (linear) {
-            a = linear_alloc(size);
-            if (!a) return RES_OUT_OF_MEMORY;
-        } else {
-            a = addr0;
-            if (a < mem::HEAP_BASE || a + size > mem::STACK_TOP - 0x04000000) {
-                LOG("[svc] ControlMemory: bad heap address %08x\n", a);
+            if (addr0 && !MemoryRegions::InRange(addr0, size, mem::LINEAR_BASE, mem::LINEAR_BASE + mem::LINEAR_SIZE))
+                return RES_INVALID_ADDRESS;
+            address = linear_alloc(size);
+            if (!address) return RES_OUT_OF_MEMORY;
+            if (!Regions.Insert(address, size, perm, 5)) {
+                linear_free_range(address, size);
                 return RES_INVALID_ADDRESS;
             }
+        } else {
+            address = addr0;
+            if (!MemoryRegions::InRange(address, size, mem::HEAP_BASE, mem::STACK_TOP - 0x04000000))
+                return RES_INVALID_ADDRESS;
+            if (!Regions.Insert(address, size, perm, 5)) return RES_INVALID_ADDRESS;
             heap_size += size;
         }
-        memset(gptr(a), 0, size);
-        add_region(a, size, perm, linear ? 5 : 5);
-        c->r[1] = a;
+        memset(gptr(address), 0, size);
+        c->r[1] = address;
         return RES_OK;
     }
-    case 1: {  // FREE
-        if (addr0 >= mem::LINEAR_BASE && addr0 < mem::LINEAR_BASE + mem::LINEAR_SIZE) linear_free_range(addr0, size);
-        else heap_size -= std::min(heap_size, size);
-        remove_region(addr0, size);
+    case 1: {
+        if (!Regions.Remove(addr0, size, 5)) return RES_INVALID_ADDRESS;
+        if (MemoryRegions::InRange(addr0, size, mem::LINEAR_BASE, mem::LINEAR_BASE + mem::LINEAR_SIZE))
+            linear_free_range(addr0, size);
+        else
+            heap_size -= size;
         c->r[1] = addr0;
         return RES_OK;
     }
-    case 4: {  // MAP addr1 -> addr0 (alias)
+    case 4: {
+        if (!perm || !MemoryRegions::InRange(addr0, size, mem::STACK_TOP, mem::LINEAR_BASE) ||
+            !MemoryRegions::InRange(addr1, size, mem::HEAP_BASE, mem::STACK_TOP) ||
+            !Regions.Covers(addr1, size, 5, 3) || !Regions.Insert(addr0, size, perm, 6))
+            return RES_INVALID_ADDRESS;
         LOG("[svc] ControlMemory MAP %08x -> %08x size %x (copying, no alias)\n", addr1, addr0, size);
         memmove(gptr(addr0), gptr(addr1), size);
-        add_region(addr0, size, perm, 6);
         c->r[1] = addr0;
         return RES_OK;
     }
     case 5:
-        remove_region(addr0, size);
+        if (!Regions.Remove(addr0, size, 6)) return RES_INVALID_ADDRESS;
         return RES_OK;
     case 6:
+        if (!Regions.Protect(addr0, size, perm)) return RES_INVALID_ADDRESS;
         return RES_OK;
     }
     LOG("[svc] ControlMemory: unknown op %x\n", op);
-    return 0xE0E01BEE;
+    return RES_INVALID_COMBINATION;
 }
 
 static u32 svc_query_memory(CPU *c) {
     u32 a = c->r[2];
-    const Region *r = find_region(a);
-    if (r) {
-        c->r[1] = r->base;
-        c->r[2] = r->size;
-        c->r[3] = r->perm;
-        c->r[4] = r->state;
-    } else {
-        // free gap: up to the next region
-        auto it = regions.upper_bound(a);
-        u32 base = a & ~0xFFFu;
-        u32 end = it == regions.end() ? 0x40000000u : it->first;
-        c->r[1] = base;
-        c->r[2] = end - base;
-        c->r[3] = 0;
-        c->r[4] = 0;
-    }
+    if (a >= MemoryRegions::Limit) return RES_INVALID_ADDRESS;
+    const MemoryRegion region = Regions.Query(a);
+    c->r[1] = region.Base;
+    c->r[2] = region.Size;
+    c->r[3] = region.Permission;
+    c->r[4] = region.State;
     c->r[5] = 0;
     return RES_OK;
 }
@@ -848,9 +829,20 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         sm->size = c->r[2];
         sm->my_perm = c->r[3];
         sm->other_perm = c->r[0];
+        if (!sm->size || uint64_t(sm->size) + 0xFFF > UINT32_MAX) {
+            c->r[0] = RES_INVALID_COMBINATION;
+            break;
+        }
         if (!sm->backing) {
             sm->backing = linear_alloc((sm->size + 0xFFF) & ~0xFFFu);
+            if (!sm->backing) {
+                c->r[0] = RES_OUT_OF_MEMORY;
+                break;
+            }
             memset(gptr(sm->backing), 0, sm->size);
+        } else if (!MemoryRegions::InRange(sm->backing, sm->size, mem::HEAP_BASE, 0x20000000)) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
         }
         c->r[1] = add_handle(sm);
         c->r[0] = RES_OK;
@@ -860,6 +852,19 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         auto sm = get<SharedMem>(c->r[0]);
         if (!sm) { c->r[0] = RES_INVALID_HANDLE; break; }
         u32 addr = c->r[1];
+        if (!sm->size || uint64_t(sm->size) + 0xFFF > UINT32_MAX || !sm->backing ||
+            !MemoryRegions::InRange(sm->backing, sm->size, mem::HEAP_BASE, 0x20000000) ||
+            (addr && (!MemoryRegions::PageAligned(addr) ||
+                      !MemoryRegions::InRange(addr, (sm->size + 0xFFF) & ~0xFFFu, mem::STACK_TOP, mem::LINEAR_BASE)))) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
+        }
+        const u32 target = addr ? addr : sm->backing;
+        const u32 rounded = (sm->size + 0xFFF) & ~0xFFFu;
+        if (!Regions.Insert(target, rounded, c->r[2], 6) && !Regions.Covers(target, rounded, 6)) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
+        }
         VLOG("[svc] MapMemoryBlock %s at %08x (backing %08x size %x)\n", sm->name.c_str(), addr, sm->backing, sm->size);
         if (addr && sm->backing && addr != sm->backing) {
             // No aliasing: the block moves to where the game maps it.
@@ -869,7 +874,6 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         } else if (addr) {
             sm->backing = addr;
         }
-        add_region(sm->backing, (sm->size + 0xFFF) & ~0xFFFu, c->r[2], 6);
         c->r[0] = RES_OK;
         break;
     }
@@ -1191,8 +1195,8 @@ void dump_memory(const char *prefix) {
         }
     };
     put(g_game.data_addr, g_game.data_size + g_game.bss_size);
-    for (auto &[base, r] : regions)
-        if (r.perm & 1) put(base, r.size);
+    for (auto &[base, r] : Regions.All())
+        if (r.Permission & 1) put(base, r.Size);
 }
 
 bool guest_idle() { return running == nullptr; }
@@ -1221,7 +1225,7 @@ void start(const BootInfo &bi) {
     tq.th = std::thread(timeout_thread);
     tq.th.detach();
     u32 stack_top = mem::STACK_TOP;
-    add_region(stack_top - bi.stack_size, bi.stack_size, 3, 7);
+    Regions.Insert(stack_top - bi.stack_size, bi.stack_size, 3, 7);
     Lock lk(kmutex);
     auto t = create_thread(bi.entry, 0, stack_top, bi.priority, true);
     t->name = "main";
