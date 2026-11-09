@@ -66,8 +66,8 @@ def install_mingw():
     return run([MSYS2 + '/usr/bin/bash.exe', '-lc', 'pacman -S --needed --noconfirm mingw-w64-x86_64-gcc'])
 
 
-def install_toolchain():
-    return run([MSYS2 + '/usr/bin/bash.exe', '--noprofile', '--norc', 'tools/win/install_toolchain.sh'] + TOOLCHAIN, cwd=ROOT)
+def install_toolchain(packages=TOOLCHAIN):
+    return run([MSYS2 + '/usr/bin/bash.exe', '--noprofile', '--norc', 'tools/win/install_toolchain.sh'] + list(packages), cwd=ROOT)
 
 
 def fetch_deps():
@@ -86,6 +86,21 @@ def fetch_deps():
     return True
 
 
+def wut_current():
+    """wut's headers as the port uses them: a thread's entry point takes (int, void *), as in wut 1.9.2. An older wut, left by a devkitPro
+    install this skips, declares (int, const char **), and the port's thread code doesn't compile (a tester's Tomodachi build, Nov 9)."""
+    try:
+        with open(DEVKITPRO + '/wut/include/coreinit/thread.h', encoding='utf-8', errors='replace') as f:
+            return 'OSThreadEntryPointFn)(int argc, void *argv)' in f.read()
+    except OSError:
+        return False
+
+
+def update_wut():
+    """only an install this script made (its own pacman under C:\\devkitPro\\pacman); devkitPro's own installer has its own pacman"""
+    return os.path.exists('C:/devkitPro/pacman/pacman.conf') and install_toolchain(['wut', 'wut-tools'])
+
+
 CHECKS = [  # name, test, what installs it (or None), what to do by hand
     ('Python packages', lambda: not pip_missing(), lambda: run([sys.executable, '-m', 'pip', 'install', *pip_missing()]),
      'python -m pip install ' + ' '.join(PIP.values())),
@@ -95,6 +110,8 @@ CHECKS = [  # name, test, what installs it (or None), what to do by hand
     ('LLVM', lambda: os.path.exists(LLVM + '/bin/clang.exe'), None, 'winget install LLVM.LLVM'),
     ('devkitPPC and wut', lambda: os.path.exists(DEVKITPRO + '/devkitPPC/bin/powerpc-eabi-gcc.exe'), install_toolchain,
      'needs MSYS2 first; see CONTRIBUTING.md'),
+    ('wut 1.9.2 or newer', wut_current, update_wut,
+     'this wut is older than the port needs: in devkitPro\'s MSYS2 shell, run  pacman -Syu wut wut-tools'),
     ('CafeGLSL, the AAC decoder and makerom', lambda: not deps_missing(), fetch_deps,
      f'gh release download {DEPS_TAG} --pattern {DEPS_ZIP}, then unzip it into the repository'),
 ]

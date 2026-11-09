@@ -18,6 +18,7 @@ Game and runtime objects came out byte-identical to the ones WSL's copy of the s
 """
 import argparse
 import ctypes
+import functools
 import glob
 import json
 import os
@@ -30,6 +31,9 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # loaded by path (pipeline.py), so its own folder isn't on the path
+import objcache  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).replace('\\', '/')
 WORK = ROOT + '/build_win'
@@ -70,29 +74,38 @@ def run(argv, **kw):
     return subprocess.run(argv, creationflags=BELOW_NORMAL, **kw)
 
 
+context = threading.local()  # what a thread's output belongs to (pipeline.py makes shaders alongside the code); run_jobs' workers take their caller's
+
+
 def run_jobs(jobs, n, what, timeout=None, fallback=None):
-    """jobs: (label, argv, cwd or None, called on success or None). Returns the labels that failed. Waits for free memory before starting each, unless nothing else is running.
-    A job taking longer than timeout seconds is run again with the fallback flags added."""
+    """jobs: (label, step, cwd or None, called on success or None). A step is a command, or a function that runs the step itself and returns its
+    CompletedProcess (cached_compile). Returns the labels that failed. Waits for free memory before starting each, unless nothing else is running.
+    A command taking longer than timeout seconds is run again with the fallback flags added."""
     if not jobs:
         return []
     lock = threading.Lock()
     state = {'running': 0, 'done': 0}
     failed = []
     t0 = time.time()
+    tag = getattr(context, 'tag', None)
 
     def one(job):
-        label, argv, cwd, after = job
+        context.tag = tag
+        label, step, cwd, after = job
         while True:
             with lock:
                 if state['running'] == 0 or free_mb() > MIN_FREE_MB:
                     state['running'] += 1
                     break
             time.sleep(2)
-        try:
-            r = run(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=timeout)
-        except subprocess.TimeoutExpired:
-            print(f'  {label}: over {timeout} s, trying {" ".join(fallback)}', flush=True)
-            r = run(argv + fallback, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        if callable(step):
+            r = step()
+        else:
+            try:
+                r = run(step, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=timeout)
+            except subprocess.TimeoutExpired:
+                print(f'  {label}: over {timeout} s, trying {" ".join(fallback)}', flush=True)
+                r = run(step + fallback, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
         with lock:
             state['running'] -= 1
             state['done'] += 1
@@ -134,17 +147,48 @@ def stale(obj, src, argv, force):
     return any(not os.path.exists(d) or os.path.getmtime(d) > when for d in deps + [src])
 
 
+def obj_cache():
+    """compiled objects by what went into them (objcache.py), beside the work folder so a new builder engine keeps them"""
+    return os.environ.get('THREEDII_OBJCACHE') or os.path.join(os.path.dirname(WORK), 'objcache')
+
+
+def cached_compile(src, obj, argv, timeout, fallback, hits, force=False):
+    """compiles src unless an object made from the same preprocessed code with the same flags is in the cache (not when forced)"""
+    began = time.time()
+    k = objcache.key(argv, src, obj + '.d')
+    if k and not force and objcache.fetch(obj_cache(), k, obj):
+        hits.append(src)
+        return subprocess.CompletedProcess(argv, 0, '')
+    cmd = argv + ['-c', src, '-o', obj, '-MMD', '-MF', obj + '.d']
+    slow = False
+    try:
+        r = run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f'  {os.path.basename(src)}: over {timeout} s, trying {" ".join(fallback)}', flush=True)
+        r = run(cmd + fallback, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        slow = True  # made with other flags than the key says
+    # kept only if nothing it read changed while it compiled: other sessions edit runtime headers during builds, and an object of the new code
+    # under the old code's key would come back whenever the old code did (ccache's rule)
+    if not r.returncode and k and not slow and all(os.path.exists(d) and os.path.getmtime(d) < began for d in (read_deps(obj + '.d') or []) + [src]):
+        objcache.store(obj_cache(), k, obj)
+    return r
+
+
 def compile_all(items, n, what, force=False, timeout=None, fallback=None):
     """items: (label, source, object, argv without the output or dependency file)"""
-    jobs = []
+    jobs, hits = [], []
     for label, src, obj, argv in items:
         if stale(obj, src, argv, force):
             def remember(r, obj=obj, argv=argv):
                 open(obj + '.cmd', 'w').write(' '.join(argv))
-            jobs.append((label, argv + ['-c', src, '-o', obj, '-MMD', '-MF', obj + '.d'], None, remember))
+            jobs.append((label, lambda src=src, obj=obj, argv=argv: cached_compile(src, obj, argv, timeout, fallback or [], hits, force), None, remember))
     print(f'{what}: {len(items) - len(jobs)} of {len(items)} up to date', flush=True)
     if run_jobs(jobs, n, what, timeout, fallback):
         sys.exit(f'{what}: compile errors above')
+    if hits:  # worded so pipeline.py's progress reader ("<what>: N of M") doesn't take it for progress
+        print(f'{what}: the cache of compiled code had {len(hits)} of them', flush=True)
+    if jobs:
+        objcache.trim(obj_cache())
 
 
 def mobiclip_tables(game_dir):
@@ -170,6 +214,52 @@ def mobiclip_tables(game_dir):
     return n
 
 
+def coroutine_switches(game_dir):
+    """Calls to setjmp followed within a few instructions by a call to longjmp: a switch to another stack, as script tasks built on them do
+    (Ace Attorney Trilogy, 2026-11-09). The longjmp lands in a frame the recompiled code has already left, and only code with a resume point
+    at every return site (not --abi) can go on from there. An error handler's setjmp has no longjmp next to it (Metroid's), and stays --abi."""
+    with open(os.path.join(game_dir, 'exheader.bin'), 'rb') as f:
+        size = struct.unpack_from('<I', f.read(0x40), 0x18)[0]
+    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:
+        code = f.read(size)
+    words = struct.unpack_from('<%dI' % (len(code) // 4), code)
+    base = 0x100000  # where the code is loaded
+
+    def call_target(i):
+        """the function a bl at word i calls, or None"""
+        w = words[i]
+        if (w & 0x0F000000) != 0x0B000000 or w >> 28 == 0xF:
+            return None
+        off = (w & 0xFFFFFF) << 2
+        to = base + i * 4 + 8 + (off - 0x4000000 if off & 0x2000000 else off)
+        return to if base <= to < base + len(code) else None
+
+    def stores_lr(w):  # stmia r0 or r0!, {..., lr}
+        return w >> 28 == 0xE and (w & 0x0FFF0000) in (0x08A00000, 0x08800000) and w & 1 << 14
+
+    @functools.cache
+    def is_setjmp(a):
+        """r0's buffer gets lr, and sp, in the function's first three instructions"""
+        head = words[(a - base) // 4:(a - base) // 4 + 3]
+        return len(head) == 3 and stores_lr(head[0]) and any(w in (0xE480D004, 0xE580D000)  # str sp, [r0], #4 or str sp, [r0]
+                                                            or (stores_lr(w) and w & 1 << 13) for w in head)  # or sp in the stm
+
+    @functools.cache
+    def is_longjmp(a):
+        """sp and lr come back from memory, then bx lr, in the function's first 20 instructions"""
+        body = words[(a - base) // 4:(a - base) // 4 + 20]
+        return (any((w & 0xFFFFFFF0) == 0xE1A0D000 for w in body)  # mov sp, rN
+                and 0xE12FFF1E in body  # bx lr
+                and any((w >> 25) & 7 == 4 and w & 1 << 20 and w & 1 << 14 for w in body))  # ldm {..., lr}
+
+    switches = 0
+    for i in range(len(words)):
+        t = call_target(i)
+        if t is not None and is_setjmp(t) and any((u := call_target(j)) is not None and is_longjmp(u) for j in range(i + 1, min(i + 17, len(words)))):
+            switches += 1
+    return switches
+
+
 class Game:
     """How a game builds. Every game follows the same recipe: what differs comes from the game itself (its code, its program id) or from what
     earlier runs of it learned (functions.txt, shader logs), never from which game it is."""
@@ -187,7 +277,7 @@ class Game:
         self.pipelines = f'{upstream}/pipelines.bin' if os.path.isfile(f'{upstream}/pipelines.bin') else None
         # Hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder) runs right only when every register
         # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
-        safe = mobiclip_tables(self.dir) >= 8
+        safe = mobiclip_tables(self.dir) >= 8 or coroutine_switches(self.dir) > 0
         self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
         self.gen_dir = f'{self.dir}/{self.gen}'
 

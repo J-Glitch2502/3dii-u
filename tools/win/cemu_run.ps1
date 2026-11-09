@@ -46,9 +46,11 @@ while (Get-Process CemuMario -ErrorAction SilentlyContinue) {
 }
 New-Item -ItemType Directory -Force -Path $sd, $Out | Out-Null
 if (Test-Path -LiteralPath "$sd\log.txt") { Remove-Item -LiteralPath "$sd\log.txt" -Force -Confirm:$false }
-# A run is ended with Stop-Process below, sometimes while Cemu writes its Vulkan pipeline cache, and the half-written file crashes the next start in ntdll
-# (heap corruption, Kirby and NSMB2 on 2026-11-08). Cemu rebuilds it from the shader cache, which is kept.
-Remove-Item -LiteralPath "$data\shaderCache\transferable\00050000${Low}_vkpipeline.bin" -Force -Confirm:$false -ErrorAction SilentlyContinue
+# Cemu killed while it writes this title's shader or pipeline cache leaves a half-written file, and the next start crashes in ntdll (heap corruption: Kirby,
+# NSMB2 and both Laytons on 2026-11-08/09; deleting the pipeline cache alone didn't stop it). So a run ends by asking Cemu to close, which lets it finish
+# writing, and any run that ends otherwise (a crash, or no answer) deletes both files, which Cemu then rebuilds.
+$caches = "${Low}_shaders.bin", "${Low}_vkpipeline.bin" | ForEach-Object { "$data\shaderCache\transferable\00050000$_" }
+function Drop-Caches { foreach ($f in $caches) { Remove-Item -LiteralPath $f -Force -Confirm:$false -ErrorAction SilentlyContinue } }
 $shotDir = "$data\screenshots"
 if (Test-Path -LiteralPath $shotDir) { Get-ChildItem -LiteralPath $shotDir -File -Recurse | Remove-Item -Force -Confirm:$false }
 Get-ChildItem -LiteralPath $Out -File -ErrorAction SilentlyContinue | Remove-Item -Force -Confirm:$false
@@ -64,7 +66,20 @@ for ($n = 0; $n -lt $Shots -and -not $p.HasExited; $n++) {
   }
 }
 Start-Sleep -Seconds 3
-if ($p.HasExited) { "Cemu exited by itself, code $($p.ExitCode)" } else { "windows: $(([W3]::Windows([uint32]$p.Id, $false)).Count)"; Stop-Process -Id $p.Id -Force -Confirm:$false -ErrorAction SilentlyContinue }
+if ($p.HasExited) {
+  "Cemu exited by itself, code $($p.ExitCode)"
+  Drop-Caches
+} else {
+  $wins = [W3]::Windows([uint32]$p.Id, $false)
+  "windows: $($wins.Count)"
+  foreach ($h in $wins) { [W3]::PostMessage($h, 0x10, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }  # WM_CLOSE
+  if (-not $p.WaitForExit(15000)) {
+    Stop-Process -Id $p.Id -Force -Confirm:$false -ErrorAction SilentlyContinue
+    $p.WaitForExit(5000) | Out-Null
+    Drop-Caches
+    "Cemu didn't close when asked within 15 s: stopped, and this title's caches deleted"
+  }
+}
 Start-Sleep -Seconds 1
 if (Test-Path -LiteralPath $shotDir) {
   $k = 0
