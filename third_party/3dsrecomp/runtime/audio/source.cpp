@@ -59,6 +59,7 @@ void SourceFilters::process(StereoFrame &f) {
 // ---- source
 
 void Source::enqueue(const Buffer &b) {
+    if (g_verbose >= 3) rt_log("[dsp] src %p queue id=%u paddr=%08x len=%u fmt=%d ch=%u%s enabled=%d\n", (void *)this, b.id, b.paddr, b.length, (int)b.format, b.channels, b.from_queue ? " (queue)" : " (embedded)", (int)st.enabled);
     // Lower buffer ids play first; equal ids keep their insertion order.
     auto it = std::upper_bound(st.queue.begin(), st.queue.end(), b.id,
                                [](u16 id, const Buffer &x) { return id < x.id; });
@@ -165,6 +166,7 @@ bool Source::dequeue() {
     if (st.queue.empty()) return false;
     Buffer b = st.queue.front();
     st.queue.erase(st.queue.begin());
+    if (g_verbose >= 3) rt_log("[dsp] src %p play id=%u\n", (void *)this, b.id);
 
     if (b.adpcm_dirty) {
         st.adpcm.yn1 = (s16)b.adpcm_yn[0];
@@ -243,6 +245,7 @@ void Source::generate() {
     if (!st.have_buffer) {
         if (dequeue()) return;
         // Nothing left to play: the source turns itself off.
+        if (g_verbose >= 3) rt_log("[dsp] src %p empty after id=%u: off\n", (void *)this, st.current_buffer_id);
         st.enabled = false;
         st.buffer_update = true;
         st.last_buffer_id = st.current_buffer_id;
