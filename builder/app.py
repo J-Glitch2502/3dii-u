@@ -119,6 +119,29 @@ def headless(work):
         sys.exit(1)
 
 
+def unpacked_whole():
+    """A zip unpacked only in part (Windows' Extract All stops at a path it finds too long, an antivirus takes a file) makes an app that fails
+    in ways no tester can read. make_app.py writes down how many files the app has; fewer here means some never arrived."""
+    if not FROZEN:
+        return True
+    app = os.path.dirname(os.path.abspath(sys.executable))
+    try:
+        with open(os.path.join(app, '_internal', 'files.txt')) as f:
+            want = int(f.read())
+    except (OSError, ValueError):
+        return False
+    return sum(len(fs) for _, _, fs in os.walk(app)) >= want  # more is fine: the build's scripts may leave caches
+
+
+def cannot_start(why=''):
+    """said before Qt loads, as Qt may be what's missing"""
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(None, 'Some of its files are missing.\n\nUnzip the whole zip again, into a short folder such as C:\\Games: '
+                                     'Windows can\'t unzip into deep folders and skips files there. If it happens again, check whether your '
+                                     'antivirus removed any of them.' + (f'\n\n({why})' if why else ''), '3Dii U Builder can\'t start', 0x10)
+    sys.exit(1)
+
+
 def main():
     while len(sys.argv) > 1 and sys.argv[1] in PYTHON_FLAGS:
         del sys.argv[1]
@@ -135,7 +158,14 @@ def main():
         argv = sys.argv[1:]
         headless(lambda: run_script(argv))
     else:
-        import gui
+        if not unpacked_whole():
+            cannot_start()
+        try:
+            import gui
+        except ImportError as e:  # a file the count can't miss: one an antivirus emptied, say
+            if not FROZEN:
+                raise
+            cannot_start(e)
         sys.exit(gui.run())
 
 

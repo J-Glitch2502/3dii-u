@@ -2,7 +2,7 @@
 # Runs inside the contained environment: builds one Mario game for the Wii U in its own folders, without touching the Tomodachi or Layton
 # builds. At most 4 low-priority compile jobs. Needs a PC trial first (mario_pc_trial.sh), for the shader logs and the code found at run time.
 # mario_wiiu.sh <name under games/> [safe|abi]. safe: the generator's full-sync code, from the PC trial. abi: --abi, faster, trusts the calling convention.
-# Output: build_mario/<name>/<name>.rpx, game.nm and shaders. Then run tools/mario_title.py with Windows Python.
+# Output: build_mario/<name>/<name>.rpx, game.nm and shaders. Then `python tools/win/build3ds.py title <name>` makes its title (tools/make_game_title.py).
 # Cemu's recompiler gets some of gcc's compares wrong at -O1 as well as -O2 (Paper Jam stays on its clear colour), so test with --force-interpreter:
 # that's right, and so is the console. OPT overrides -O2. Changing it needs the game's object folder deleted.
 N=$1

@@ -16,7 +16,8 @@ WHAT YOU NEED
 
 GETTING STARTED
 
-1. Unzip the whole "3Dii U Builder" folder to a short path such as C:\Games or your Desktop. Keep the engine folder next to the exe.
+1. Unzip the whole "3Dii U Builder" folder to a short path such as C:\Games. Keep the engine folder next to the exe, and don't run it from inside the zip.
+   If Windows says a path is too long while unzipping, or the builder says files are missing, unzip it again into a shorter folder.
 2. Open "3Dii U Builder.exe". This beta isn't signed, so Windows may say it "protected your PC": click "More info", then "Run anyway".
 3. Click the empty game card (or press Ctrl+O) and choose your dump. The builder then asks about the game's update, DLC and mods.
 4. Under "Your files", each dot turns green once the builder has that file.

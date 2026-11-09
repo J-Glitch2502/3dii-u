@@ -98,8 +98,8 @@ To work on a game step by step:
 
 The trial plays the game headless on the PC, records code the recompiler missed, and logs the shaders it meets. Its
 screenshots land in `games/<name>/shots/`. A game that loads CRO modules also needs
-`python tools/cro_entries.py games/<name>`, run with `RECOMP_CRO_BASE=0x1C000000` set. New games need an entry with a
-title ID and a name in `tools/mario_title.py`. Moving that into one table of game profiles is planned.
+`python tools/cro_entries.py games/<name>`, run with `RECOMP_CRO_BASE=0x1C000000` set. New games need an entry in
+`builder/compat.json`, the one table of tested games: their slug, title ID, name, product code and WUP folder.
 
 `build3ds.py --help` lists every option. The ones you'll use most are `--jobs N`, `--force`, `--opt -O1`, and
 `--out <folder>`, which keeps a test build apart.

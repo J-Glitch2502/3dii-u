@@ -53,6 +53,10 @@
 extern "C" void *GfxHeapAllocMEM1(uint32_t size, uint32_t alignment) __attribute__((weak));
 extern "C" void GfxHeapFreeMEM1(void *block) __attribute__((weak));
 
+namespace wiiu {
+static void relieve_mem1();  // fast memory found full the first time (beside tv_buffer_to_mem2, which it uses)
+}
+
 namespace gpu {
 namespace {
 
@@ -93,14 +97,6 @@ void ring_next_segment() {
     ring_off = RING_SIZE / 3 * ring_seg;
     ring_end = ring_off + RING_SIZE / 3;
     GX2Invalidate(GX2_INVALIDATE_MODE_ATTRIBUTE_BUFFER, ring, RING_SIZE);  // the GPU may have cached this memory's old contents
-}
-
-// The same for vertices read in place in guest memory. The game only changes them between command lists, so once per list is enough.
-void sync_vertex_cache() {
-    static u64 seen_list = ~0ull;
-    if (seen_list == kernel::gx_stats.cmdlists) return;
-    seen_list = kernel::gx_stats.cmdlists;
-    GX2Invalidate(GX2_INVALIDATE_MODE_ATTRIBUTE_BUFFER, g_mem, 0x20000000);
 }
 
 void *ring_alloc(u32 size, u32 align) {
@@ -183,8 +179,6 @@ GX2PixelShader *load_ps(u32 index) {
     return s;
 }
 
-inline bool layton_game();
-
 void load_shader_tables() {
     static std::vector<u8> idx;
     idx = read_whole("fs:/vol/content/shaders.idx", 0);
@@ -219,9 +213,10 @@ void load_shader_tables() {
     if (uber != ps_table.end()) ps_uber = load_ps(uber->second.index);
     const auto uber_lit = ps_table.find(fnv64(kUberLitKey, strlen(kUberLitKey)));
     if (uber_lit != ps_table.end()) ps_uber_lit = load_ps(uber_lit->second.index);
-    // Not for Tomodachi until they've been seen to run there. Nor Layton: Emmy's materials came through the lit one on a console and she drew see-through, though every draw through it
-    // looks right in Cemu. Why isn't known. The fallback draws a miss solid and only loses its shading, and tools/layton_fs_variants.py leaves few misses. "set uberfb 1" tries them.
-    uber_fallback = !layton_game() && g_game.program_id != 0x000400000008C300ull;
+    // A state with no compiled shader draws through these until the console has compiled its own (shader_compile.cpp, about 24 ms), in every game. In the Laytons, before
+    // that compiler, Emmy's materials came through the lit one see-through on a console, though every draw through it looks right in Cemu, and why was never found: their lit
+    // states are compiled ahead (tools/fs_variants.py), so few draws come here. "set uberfb 0" draws misses solid instead, losing only their shading.
+    uber_fallback = true;
     const auto etc1 = ps_table.find(fnv64(kEtc1Key, strlen(kEtc1Key))), etc1a4 = ps_table.find(fnv64(kEtc1A4Key, strlen(kEtc1A4Key)));
     if (etc1 != ps_table.end() && etc1a4 != ps_table.end()) {
         ps_etc1 = load_ps(etc1->second.index);
@@ -445,9 +440,16 @@ static void *for_gpu_writes(void *p, u32 n) {
     return p;
 }
 
+static bool mem1_relief;  // fast memory has been found full once (wiiu::relieve_mem1)
+
 void *alloc_surface_mem(u32 size, u32 align, bool &mem1, bool want_mem1) {
     if (want_mem1 && GfxHeapAllocMEM1) {
-        if (void *p = GfxHeapAllocMEM1(size, align)) {
+        void *p = GfxHeapAllocMEM1(size, align);
+        if (!p && !mem1_relief) {  // the first time fast memory is full: make room, and try again
+            wiiu::relieve_mem1();
+            p = GfxHeapAllocMEM1(size, align);
+        }
+        if (p) {
             mem1 = true;
             return for_gpu_writes(junk(p, size, 1), size);
         }
@@ -458,21 +460,10 @@ void *alloc_surface_mem(u32 size, u32 align, bool &mem1, bool want_mem1) {
     return for_gpu_writes(junk(p, size, 1), size);
 }
 
-inline bool layton_game() {
-    static const bool yes = g_game.program_id == 0x00040000000A8500ull || g_game.program_id == 0x00040000000F2F00ull;
-    return yes;
-}
-
-// The GPU reads copies of what it needs, so a command list needn't wait for it to finish (see gx2_finish_list). Tomodachi still waits. Proven on the
-// other eight on the console, so it's also the default for games the builder makes.
-inline bool copies_for_gpu() {
-    static const bool yes = g_game.program_id != 0x000400000008C300ull;
-    return yes;
-}
-
-// Fast memory is 32 MB, and the Layton games want more than fits: their 240x400 pair at boot, then a 512x800 pair that used to land in MEM2, where dialog scenes draw nearly
-// everything, at a cost of about 25 ms of a 33 ms frame on a console. The two pairs mostly work in different scenes, and a depth buffer's contents only last from its clear to the
-// end of its pass, so all their depth buffers share one block. A clear waits for the first draw that needs it, which also saves clearing what nothing draws to.
+// Fast memory is 32 MB, and some games want more than fits: the Laytons draw a 240x400 pair at boot, then a 512x800 pair that used to land in MEM2, where dialog scenes draw
+// nearly everything, at a cost of about 25 ms of a 33 ms frame on a console. Once a screen's render target finds fast memory full (relieve_mem1), the screens' depth buffers
+// share one block from then on: the pairs mostly work in different scenes, and a depth buffer's contents only last from its clear to the end of its pass. A clear waits for the
+// first draw that needs it, which also saves clearing what nothing draws to. A game that fits never shares: one that samples a depth buffer as a texture would read another's.
 void *depth_block;
 u32 depth_block_size;
 Surface *depth_owner;  // whose depth values are in the block
@@ -560,7 +551,7 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         s->db.depthClear = 1.0f;
         GX2CalcSurfaceSizeAndAlignment(&f);
         GX2InitDepthBufferRegs(&s->db);
-        if (screen && layton_game() && share_depth_block(f)) s->mem1 = s->shared_depth = s->clear_pending = true;
+        if (screen && mem1_relief && share_depth_block(f)) s->mem1 = s->shared_depth = s->clear_pending = true;
         else f.image = alloc_surface_mem(f.imageSize, f.alignment, s->mem1, screen);
     } else {
         memset(&s->cb, 0, sizeof s->cb);
@@ -913,7 +904,7 @@ void evict_textures() {
 // True when the images were swapped: the one now current lacks what the last upload wrote (lag), and the other now lacks this upload's bytes.
 bool replace_image(Tex &e) {
     GX2Surface &f = e.t.surface;
-    if (!e.changed_before || !copies_for_gpu()) {
+    if (!e.changed_before) {
         e.changed_before = true;
         draw_done();
         return false;
@@ -1829,7 +1820,6 @@ bool gx2_draw(const Gx2Draw &d) {
         if (!draw_count) return true;
     }
     lap(P_KEY);
-    if (!copies_for_gpu()) sync_vertex_cache();
     decode_textures_first(ds);
     bind_targets(ds.rt);
     if (cur_depth && (ds.depth_test || ds.depth_write || ds.stencil)) take_depth_block(ds.rt);
@@ -1963,7 +1953,7 @@ bool gx2_draw(const Gx2Draw &d) {
         s.buffer = buf;
         // Cemu can't fetch one little-endian float: its sprites all got corner 0. Two do the same here, and the mask drops the second.
         s.format = at->elems == 1 ? GX2_ATTRIB_FORMAT_FLOAT_32_32 : attr_format(at->fmt, at->elems);
-        if (copies_for_gpu()) {
+        {
             // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later (see gx2_finish_list).
             const u32 elems = at->elems, stride = (elems == 1 ? 2 : elems) * 4, count = maxv - minv + 1, src_stride = at->stride;
             u32 *copy = (u32 *)ring_alloc(count * stride + 64, 64), *dst = copy;
@@ -1975,13 +1965,6 @@ bool gx2_draw(const Gx2Draw &d) {
             DCFlushRange(copy, count * stride);
             GX2SetAttribBuffer(buf, (maxv + 1) * stride, stride, (const u8 *)copy - minv * stride);
             s.offset = 0;
-        } else {
-            // the buffer starts on a 64 byte boundary, and the stream reaches into it by an offset
-            const u8 *aligned = (const u8 *)((uintptr_t)p & ~(uintptr_t)63);
-            const u32 used_end = (u32)(p - aligned) + at->stride * maxv + 4 * at->elems + 4;
-            DCFlushRange((void *)(p + at->stride * minv), at->stride * (maxv - minv) + 4 * at->elems);
-            GX2SetAttribBuffer(buf, used_end, at->stride, aligned);
-            s.offset = (u32)(p - aligned);
         }
         s.type = GX2_ATTRIB_INDEX_PER_VERTEX;
         s.aluDivisor = 0;
@@ -2000,7 +1983,7 @@ bool gx2_draw(const Gx2Draw &d) {
     if (d.indexed) {
         if (index_u16) {
             void *w = (void *)ip;  // an outline's list is in the ring already
-            if (!d.outline_color && copies_for_gpu()) {
+            if (!d.outline_color) {
                 w = ring_alloc(draw_count * 2 + 64, 64);
                 memcpy(w, ip, draw_count * 2);
             }
@@ -2174,14 +2157,16 @@ void metal_guest_prewrite(u32, u32) {}
 // the last transfer was the top screen's left eye, and a right eye has been seen straight after one (see right_eye_transfer)
 static bool left_done, right_follows_left;
 
-// Both Layton games draw a right eye with 3D off, into framebuffers no screen shows: they clear their targets, draw the scene again, and on the title and
-// save screens read it back and make mipmaps of it too. That's half of each frame's work. Nothing says it's a right eye, but once a top-screen-sized
-// transfer to somewhere not shown has come straight after a left eye, the first clear after a left eye starts another, unless it's the bottom screen's.
-static bool hidden_right_eyes() { return layton_game(); }
+// Some games draw a right eye with 3D off, and that's half of each frame's work. Once a top-screen-sized transfer to the right eye has come straight after a left
+// eye, the next right eye isn't drawn, up to its transfer. Where the right eye went says where its pass starts:
+// - into the right LCD's framebuffer (New Super Mario Bros. 2, Animal Crossing): its pass follows the left eye's transfer at once (right_eye_transfer);
+// - into a framebuffer no screen shows (the Laytons, which clear their targets, draw the scene again, and on the title and save screens read it back and make
+//   mipmaps of it too): it starts with the first clear after the left eye, unless that's the bottom screen's, which those games draw first when there's no right eye.
+static bool right_eye_hidden;
 
 // a fill of a whole render target is a clear
 bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
-    if (left_done && right_follows_left && hidden_right_eyes()) {
+    if (left_done && right_follows_left && right_eye_hidden) {
         const u32 size = end - start;
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
         else gx2_skip_pass = gx2_skip_copies = true;
@@ -2361,7 +2346,7 @@ bool dyn_test;  // a file named "dynres" in the data folder: changes level every
 // At full size, half a second of that goes to the lower level. There, nothing says how much room there is, so it tries full size again after a while, and each try that
 // fails (back below within 20 seconds) makes the next wait twice as long, up to about 3 minutes.
 void dyn_res_update() {
-    if (top_720 || g_game.program_id != 0x00040000000D5A00ull) {  // only for Dream Team when it's drawing at 1080p, as a test run can
+    if (top_720) {  // only at 1080p ("top1080"): 720p targets fit, and draw at full size
         dyn_waited = 0;
         return;
     }
@@ -2742,7 +2727,7 @@ static bool right_eye_transfer(int screen) {
     }
     if (was_skipping) right_follows_left = false;
     left_done = screen == 0;
-    gx2_skip_pass = left_done && right_follows_left && !hidden_right_eyes();
+    gx2_skip_pass = left_done && right_follows_left && !right_eye_hidden;
     return false;
 }
 
@@ -2759,7 +2744,9 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     }
     const bool top_sized = in_w == 240 && in_h == 400 && out_w == 240 && out_h == 400;
     if (gx2_skip_copies && !top_sized && known_screen < 0) return true;  // the mipmaps of a right eye that wasn't drawn
-    if (right_eye_transfer(hidden_right_eyes() && left_done && top_sized && known_screen < 0 ? 2 : known_screen)) return true;
+    const bool hidden_eye = left_done && top_sized && known_screen < 0;  // a top screen no LCD shows, right after a left eye
+    if (hidden_eye || known_screen == 2) right_eye_hidden = hidden_eye;
+    if (right_eye_transfer(hidden_eye ? 2 : known_screen)) return true;
     // New Super Mario Bros. 2's framebuffers are 256 wide, and the LCD shows 240 columns of them
     const u32 shown_w = out_w == 256 && (crop || known_screen >= 0) ? 240 : out_w;
     const u32 shown_h = known_screen == 0 ? 400 : known_screen == 1 ? 320 : out_h;
@@ -2810,19 +2797,9 @@ void gx2_cpu_will_read(u32 paddr, u32 size) {
 // A list's floats and indices are read in place in guest memory, and a real GPU only gets to them some time after they're queued. The game takes the list's
 // interrupt to mean the GPU has finished with them, and may rewrite them at once, so a draw came out with the next frame's data: a Mii's textures on the wrong
 // part, objects drawn over what's in front of them. Cemu takes commands as they're issued, so it never shows there. A 3DS's GPU has finished by then too.
-// The wait means the CPU and GPU never work at the same time, which on a console costs a quarter or more of each frame. So in Layton gx2_draw copies what the GPU reads
-// instead, and the only wait is ring_next_segment's, which stops the CPU getting more than a couple of frames ahead.
-void gx2_finish_list() {
-    const OSTime t = OSGetSystemTime();
-    GX2Flush();
-    if (copies_for_gpu()) return;
-    const OSTime done = GX2GetLastSubmittedTimeStamp();
-    // never for long: a late draw costs a glitch, and a GPU that can't finish mustn't cost the game
-    const OSTime until = t + OSMillisecondsToTicks(200);
-    while (GX2GetRetiredTimeStamp() < done && OSGetSystemTime() < until) OSSleepTicks(OSMicrosecondsToTicks(200));
-    prof[P_SYNC] += (u32)(OSGetSystemTime() - t);
-    st_syncs++;
-}
+// Waiting for the GPU at each list would mean the CPU and GPU never work at the same time, which on a console costs a quarter or more of each frame. So gx2_draw copies
+// what the GPU reads, in every game, and the only wait is ring_next_segment's, which stops the CPU getting more than a couple of frames ahead.
+void gx2_finish_list() { GX2Flush(); }
 
 bool get_display_image_for(u32, u32, u32, const u32 **, int *, int *) { return false; }
 
@@ -2842,11 +2819,11 @@ static void free_whb_depth() {
     }
 }
 
-// The TV's colour buffer only gets one blit per present, so in Layton it gives its 8 MB of fast memory to what's drawn thousands of times (see share_depth_block). WHB keeps no
-// pointer to it, as its depth buffers: it only frees what isn't null, and allocates a new one every time the foreground comes back.
+// The TV's colour buffer only gets one blit per present, so once fast memory has been found full it gives its 8 MB to what's drawn thousands of times (relieve_mem1).
+// WHB keeps no pointer to it, as its depth buffers: it only frees what isn't null, and allocates a new one every time the foreground comes back.
 static void tv_buffer_to_mem2() {
     static GX2ColorBuffer in_mem2;
-    if (!layton_game() || !GfxHeapFreeMEM1) return;
+    if (!mem1_relief || !GfxHeapFreeMEM1) return;
     GX2ColorBuffer *whb = WHBGfxGetTVColourBuffer();
     if (!in_mem2.surface.image) {
         void *p = memalign(whb->surface.alignment, whb->surface.imageSize);
@@ -2858,6 +2835,25 @@ static void tv_buffer_to_mem2() {
     if (whb->surface.image) GfxHeapFreeMEM1(whb->surface.image);
     whb->surface.image = nullptr;
     tv_cb = &in_mem2;
+}
+
+// The first time a screen's render target finds fast memory full: the TV's buffer moves to MEM2, and the screens' depth buffers go into one shared block, those that have
+// fast memory now giving theirs back (share_depth_block). Their contents are lost, so each starts from a clear; the game clears them every frame anyway.
+static void relieve_mem1() {
+    mem1_relief = true;
+    LOG("[gx2] fast memory is full: the TV's buffer goes to MEM2, and the screens' depth buffers share one block\n");
+    GX2DrawDone();  // nothing the GPU still has queued may use what moves
+    tv_buffer_to_mem2();
+    depth_owner = nullptr;
+    for (auto &s : surfaces) {
+        GX2Surface &f = s->db.surface;
+        // only screens' targets have fast memory; none means its memory is being made (gfx_reacquire), so it goes where that puts it
+        if (!s->depth || !s->mem1 || s->shared_depth || !f.image) continue;
+        GfxHeapFreeMEM1(f.image);
+        if (share_depth_block(f)) s->shared_depth = s->clear_pending = true;
+        else f.image = alloc_surface_mem(f.imageSize, f.alignment, s->mem1, false);
+        if (cur_depth == s.get()) GX2SetDepthBuffer(&s->db);
+    }
 }
 
 void gfx_thread_init() {
@@ -3198,6 +3194,8 @@ void gfx_reacquire() {
     tv_buffer_to_mem2();
     depth_block = nullptr;
     depth_owner = nullptr;
+    for (auto &s : surfaces)  // what they pointed at is the system's now
+        if (s->mem1) (s->depth ? s->db.surface : s->cb.surface).image = nullptr;
     for (auto &s : surfaces) {
         set_surface_scale(*s, 0);  // the block it gets back has to hold full size
         if (!s->mem1) continue;

@@ -2,7 +2,7 @@
 # Runs inside the contained environment: builds one full-sync game (no --abi) for the Wii U in its own folders, without touching
 # Tomodachi's build or the shared scripts. At most 4 low-priority compile jobs.
 # layton_wiiu.sh <name under games/>. Needs a PC trial first (pc_try_game.sh), for the generated code and the shader logs.
-# Output: build_layton/<name>/<name>.rpx and build_layton/<name>/shaders. Then run tools/layton_title.py with Windows Python.
+# Output: build_layton/<name>/<name>.rpx and build_layton/<name>/shaders. Then `python tools/win/build3ds.py title <name>` makes its title (tools/make_game_title.py).
 N=$1
 G=/project/games/$N
 OUT=/project/build_layton/$N

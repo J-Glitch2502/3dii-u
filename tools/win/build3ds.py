@@ -19,6 +19,7 @@ Game and runtime objects came out byte-identical to the ones WSL's copy of the s
 import argparse
 import ctypes
 import glob
+import json
 import os
 import re
 import shlex
@@ -42,7 +43,8 @@ MINGW = 'C:/msys64/mingw64'
 GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0, the compiler the console has run: tools/win/build_cafeglsl.ps1
 CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'  # the same compiler as a library for the console: port/wiiu/shader_compile.cpp. Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
 HOST_CXX = [LLVM + 'clang++.exe', '--target=x86_64-w64-mingw32', '--sysroot=' + MINGW, '-fuse-ld=lld']
-TOMODACHI_ID = '000400000008c300'
+CRO_BASE = '0x1C000000'  # the slots CRO modules' code gets (tools/recomp/cro.py), in the part of the address space the Wii U port leaves free
+FRAGMENT_VARIANTS = 2000  # how many lit-state combinations a game may get compiled ahead (prepare_logs): more and the build and the shader file grow too big
 BELOW_NORMAL = 0x4000
 MIN_FREE_MB = 2500
 
@@ -145,60 +147,86 @@ def compile_all(items, n, what, force=False, timeout=None, fallback=None):
         sys.exit(f'{what}: compile errors above')
 
 
+def mobiclip_tables(game_dir):
+    """Offset-table jumps (`sub rB, pc, #n` ... `add pc, rX, rB`) in the game's code. Mobiclip's hand-written video decoder is made of them
+    (168 in Mario Kart 7, the Laytons and Paper Jam): it keeps values in any register across its own calls, which only code generated
+    without --abi follows. Mario Kart 7's menu videos stopped the game otherwise."""
+    with open(os.path.join(game_dir, 'exheader.bin'), 'rb') as f:
+        size = struct.unpack_from('<I', f.read(0x40), 0x18)[0]
+    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:
+        code = f.read(size)
+    words = struct.unpack_from('<%dI' % (len(code) // 4), code)
+    n = 0
+    for i, w in enumerate(words):
+        if w >> 28 != 0xE or (w & 0x0FEF0000) != 0x024F0000:  # sub/add rB, pc, #n
+            continue
+        rb = (w >> 12) & 15
+        for x in words[i + 1:i + 16]:
+            if (x & 0xFFF0FFF0) == 0xE080F000 and rb in ((x >> 16) & 15, x & 15):  # add pc, rX, rB
+                n += 1
+                break
+            if (x >> 26) & 3 == 0 and (x >> 12) & 15 == rb:  # rB written again first
+                break
+    return n
+
+
 class Game:
-    def __init__(self, name):
+    """How a game builds. Every game follows the same recipe: what differs comes from the game itself (its code, its program id) or from what
+    earlier runs of it learned (functions.txt, shader logs), never from which game it is."""
+    def __init__(self, name, game_dir=None):
         self.name = name
-        self.dir = f'{ROOT}/games/{name}'
-        self.cro_base = None
-        self.keep_gen = False
-        self.no_uber = False
-        self.pipelines = None
-        self.extra_functions = f'{self.dir}/functions.txt'
-        self.opt = []
-        # the decoder behind the DSP's AAC pipe; without it those tracks are silent. Games nobody has checked (the builder's) get it: it costs only size
-        self.aac = name not in ('sticker_star', 'nsmb2', 'dream_team', 'paper_jam', 'layton_azran', 'layton_mask', 'tomodachi')
-        if name == 'tomodachi':
-            self.family, self.gen, self.mode = 'tomo', 'gen_abi', 'abi'
-            self.out, self.rpx, self.nm, self.shaders = ROOT + '/build', ROOT + '/build/tomodachi.rpx', ROOT + '/build/game.nm', ROOT + '/build/shaders'
-            self.keep_gen = self.no_uber = True
-            self.extra_functions = f'{ROOT}/third_party/3dsrecomp/games/{TOMODACHI_ID}/functions.txt'
-            self.pipelines = f'{ROOT}/third_party/3dsrecomp/games/{TOMODACHI_ID}/pipelines.bin'
-        elif name.startswith('layton_'):
-            self.family, self.gen, self.mode = 'layton', 'gen_safe', 'safe'
-            self.out = f'{ROOT}/build_layton/{name}'
-            self.keep_gen = True
-            # -O1: at -O2 gcc reuses a compare across a jump, which the console runs and Cemu's recompiler gets wrong: see tools/layton_wiiu.sh
-            self.opt = ['-O1']
-        else:
-            self.family, self.gen, self.mode = 'mario', 'gen_abi', 'abi'
-            self.out = f'{ROOT}/build_mario/{name}'
-            self.cro_base = '0x1C000000'
-        if self.family != 'tomo':
-            self.rpx, self.nm, self.shaders = f'{self.out}/{name}.rpx', f'{self.out}/game.nm', f'{self.out}/shaders'
+        self.dir = (game_dir or f'{ROOT}/games/{name}').replace('\\', '/')
+        # where the build goes: the folders the first ports were built in, which tools/check_ports.py and tools/ship_card.py look in
+        self.out = f'{ROOT}/build' if name == 'tomodachi' else f'{ROOT}/build_layton/{name}' if name.startswith('layton_') else f'{ROOT}/build_mario/{name}'
+        self.rpx, self.nm, self.shaders = f'{self.out}/{name}.rpx', f'{self.out}/game.nm', f'{self.out}/shaders'
+        self.extra_functions = f'{self.dir}/functions.txt'  # what runs of the game found that static analysis missed
+        # what the 3dsrecomp project's own runs of this game learned: its functions and the render states it uses
+        with open(f'{self.dir}/info.json', encoding='utf-8') as f:
+            upstream = f'{ROOT}/third_party/3dsrecomp/games/{json.load(f)["program_id"].lower()}'
+        self.upstream_functions = f'{upstream}/functions.txt' if os.path.isfile(f'{upstream}/functions.txt') else None
+        self.pipelines = f'{upstream}/pipelines.bin' if os.path.isfile(f'{upstream}/pipelines.bin') else None
+        # Hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder) runs right only when every register
+        # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
+        safe = mobiclip_tables(self.dir) >= 8
+        self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
         self.gen_dir = f'{self.dir}/{self.gen}'
 
 
 # ---------------------------------------------------------------- recompiling the game's ARM code to C
+def recompiler_sources():
+    return glob.glob(f'{ROOT}/third_party/3dsrecomp/tools/recomp/*.py')
+
+
+def functions_list(g):
+    """The recompiler's --extra: the entries this game's runs found, and the 3dsrecomp project's runs of it if it has any.
+    A merged list is written only when it changes, so its date says when the entries did."""
+    lists = [p for p in (g.extra_functions, g.upstream_functions) if p and os.path.isfile(p) and os.path.getsize(p)]
+    if len(lists) == 1:
+        return lists[0]
+    merged = f'{WORK}/functions_{g.name}.txt'
+    text = ''.join(open(p, encoding='utf-8').read().strip() + '\n' for p in lists)
+    if not os.path.isfile(merged) or open(merged, encoding='utf-8').read() != text:
+        os.makedirs(WORK, exist_ok=True)
+        with open(merged, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(text)
+    return merged
+
+
 def need_gen(g):
+    """the C is made again whenever the recompiler or the game's entries are newer than it, for every game"""
     table = f'{g.gen_dir}/table.c'
     if not os.path.exists(table):
         return True
-    if g.keep_gen:
-        return False
     t = os.path.getmtime(table)
-    tools = [f'{ROOT}/third_party/3dsrecomp/tools/recomp/{f}.py' for f in ('gen', 'cro')]
-    return any(os.path.exists(f) and os.path.getmtime(f) > t for f in tools + [g.extra_functions])
+    return any(os.path.getmtime(f) > t for f in recompiler_sources() + [functions_list(g)])
 
 
 def game_env(g):
-    env = dict(os.environ)
-    if g.cro_base:
-        env['RECOMP_CRO_BASE'] = g.cro_base
-    return env
+    return dict(os.environ, RECOMP_CRO_BASE=CRO_BASE)
 
 
 def do_gen(g, args, gen_dir=None, abi=None):
-    argv = [sys.executable, ROOT + '/tools/win/gen_lf.py', g.dir, gen_dir or g.gen_dir, '--extra', g.extra_functions]
+    argv = [sys.executable, ROOT + '/tools/win/gen_lf.py', g.dir, gen_dir or g.gen_dir, '--extra', functions_list(g)]
     if g.mode == 'abi' if abi is None else abi:
         argv.append('--abi')
     r = run(argv, cwd=ROOT + '/third_party/3dsrecomp', env=game_env(g), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
@@ -228,7 +256,7 @@ def runtime_flags(extra):
     return ['-std=c++20', '-O2', '-g0', '-w', '-mcpu=750', '-meabi', '-mhard-float', '-ffunction-sections', '-fno-strict-aliasing', '-fno-exceptions', '-fno-if-conversion',
             '-fno-if-conversion2', '-D__WIIU__', '-D__WUT__', '-DESPRESSO', f'-I{PORT}/wiiu', f'-I{PORT}', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu', f'-I{RT}/services',
             f'-I{CAFEGLSL_PPC}/include',
-            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h', '-DRECOMP_GAME="tomodachi"'] + extra
+            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h'] + extra
 
 
 def obj_name(src):
@@ -236,7 +264,8 @@ def obj_name(src):
 
 
 def build_runtime(g, args):
-    obj_dir = f'{WORK}/rt_{"tomo" if g.family == "tomo" else "std"}'
+    """the runtime every game links: one build of it serves them all"""
+    obj_dir = f'{WORK}/rt_std'
     os.makedirs(obj_dir, exist_ok=True)
     skip = {'frontend.cpp', 'main.cpp', 'host_sdl.cpp', 'watch.cpp', 'profile.cpp'}  # shadergen.cpp runs on the console too, for shader_compile.cpp
     sources = []
@@ -249,16 +278,7 @@ def build_runtime(g, args):
         base = os.path.basename(s)
         name = base
         flags = runtime_flags(extra)
-        real = s
-        if g.family == 'tomo':
-            # no microphone: see build/tomo_shared.sh
-            if base == 'mic_wiiu.cpp':
-                continue
-            if base == 'frontend_wiiu.cpp':
-                real = f'{obj_dir}/frontend_wiiu.cpp'
-                text = ''.join(line for line in open(s, encoding='utf-8', newline='') if 'wiiu::mic_blow' not in line)
-                if not os.path.exists(real) or open(real, encoding='utf-8', newline='').read() != text:
-                    open(real, 'w', encoding='utf-8', newline='').write(text)
+        real = s  # (mic_wiiu.cpp loads mic.rpl when a game first asks for the mic, so no game imports it: importing it hung a big build before main)
         obj = f'{obj_dir}/{obj_name(s)}'
         if only and base not in only and os.path.exists(obj):
             continue
@@ -308,17 +328,14 @@ def link_game(g, rt, code):
             return os.path.relpath(p, WORK).replace('\\', '/')
         except ValueError:
             return p.replace('\\', '/')
-    aac = []
-    if g.aac:
-        a = ROOT + '/toolchain/aac_ppc'
-        o = f'{WORK}/link/aac_ffmpeg.o'
-        r = run([BIN + 'g++.exe', '-mcpu=750', '-meabi', '-mhard-float', '-O2', '-std=c++20', '-D__WIIU__', f'-I{a}/include', '-c', PORT + '/aac/aac_ffmpeg.cpp', '-o', o])
-        if r.returncode:
-            sys.exit('aac_ffmpeg did not compile')
-        aac = [rel(o), rel(a + '/lib/libavcodec.a'), rel(a + '/lib/libavutil.a')]
+    # the decoder behind the DSP's AAC pipe, in every game: a game that streams AAC is silent without it, and one that doesn't only pays its size
+    a = ROOT + '/toolchain/aac_ppc'
+    o = f'{WORK}/link/aac_ffmpeg.o'
+    r = run([BIN + 'g++.exe', '-mcpu=750', '-meabi', '-mhard-float', '-O2', '-std=c++20', '-D__WIIU__', f'-I{a}/include', '-c', PORT + '/aac/aac_ffmpeg.cpp', '-o', o])
+    if r.returncode:
+        sys.exit('aac_ffmpeg did not compile')
+    aac = [rel(o), rel(a + '/lib/libavcodec.a'), rel(a + '/lib/libavutil.a')]
     objects = sorted(glob.glob(rt + '/*.o'))
-    if g.family == 'tomo':
-        objects = [o for o in objects if not o.replace('\\', '/').endswith(obj_name(PORT + '/wiiu/mic_wiiu.cpp'))]
     rsp = f'{WORK}/link/{g.name}.rsp'
     # the runtime goes first, so that its calls into the C library stay near
     open(rsp, 'w', newline='\n').write('\n'.join(rel(o) for o in objects))
@@ -481,23 +498,34 @@ def prepare_logs(g):
     print(r.stdout[-300:].strip())
     if r.returncode:
         sys.exit('tev_to_log failed')
-    if g.family == 'tomo':
-        return
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('fs_variants', ROOT + '/tools/fs_variants.py')
+    fsv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fsv)
+    own_logs = [f for f in glob.glob(logs + '/*.bin') if not os.path.basename(f).startswith('other_') and os.path.basename(f) not in ('dvlb.bin', 'variants.bin')]
+    own = {k for f in own_logs for k in fsv.keys(f)}
+    near = []  # the logs of games whose states this one shares: an engine's
     for other in sorted(glob.glob(ROOT + '/games/*/')):
         other = other.rstrip('/\\').replace('\\', '/')
         name = os.path.basename(other)
-        if other == g.dir or (g.family == 'layton' and not name.startswith('layton_')):
+        if other == g.dir:
             continue
-        if os.path.exists(f'{other}/shader_logs/fs_log.bin'):
-            shutil.copyfile(f'{other}/shader_logs/fs_log.bin', f'{logs}/other_{name}.bin')
-        if g.family == 'mario':
-            for f in glob.glob(f'{other}/shader_logs/*_fs.bin'):
-                if not os.path.basename(f).startswith('other_') and os.path.basename(f) != 'models_fs.bin':  # that game's own copies of these: taking them nested the names without end; its models are its own
-                    shutil.copyfile(f, f'{logs}/other_{name}_{os.path.basename(f)}')
-    if g.family == 'layton':
-        known = [f for f in glob.glob(logs + '/*.bin') if os.path.basename(f) not in ('dvlb.bin', 'vs_log.bin', 'variants.bin')]
-        r = run([sys.executable, ROOT + '/tools/layton_fs_variants.py', logs + '/variants.bin'] + known, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
-        print(r.stdout[-300:].strip())
+        # fs_log.bin and the *_fs.bin files hold fragment states alone; the other_ ones are that game's own copies (taking them nested the names without
+        # end), and its models are its own
+        theirs = [f for f in glob.glob(f'{other}/shader_logs/*.bin') if (os.path.basename(f) == 'fs_log.bin' or f.endswith('_fs.bin'))
+                  and not os.path.basename(f).startswith('other_') and os.path.basename(f) != 'models_fs.bin']
+        copied = []
+        for f in theirs:
+            to = f'{logs}/other_{name}.bin' if os.path.basename(f) == 'fs_log.bin' else f'{logs}/other_{name}_{os.path.basename(f)}'
+            shutil.copyfile(f, to)
+            copied.append(to)
+        states = {k for f in theirs for k in fsv.keys(f)}
+        if states and len(states & own) >= 0.05 * len(states):  # 7% and more within an engine, 3% and less across them (the nine, 2026-11)
+            near += copied
+    # combinations of the lit parts runs met, made from this game's states and its engine's: another engine's parts only multiply them
+    r = run([sys.executable, ROOT + '/tools/fs_variants.py', logs + '/variants.bin', '--max', str(FRAGMENT_VARIANTS)] + own_logs + near,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    print(r.stdout[-300:].strip())
 
 
 def build_shaders(g, args):
@@ -506,21 +534,14 @@ def build_shaders(g, args):
     exe = build_shadergen(args)
     prepare_logs(g)
     os.makedirs(g.shaders, exist_ok=True)
-    pipelines = g.pipelines
-    if not pipelines and g.family == 'mario':
-        import json
-        tid = json.load(open(g.dir + '/info.json'))['program_id'].lower()
-        p = f'{ROOT}/third_party/3dsrecomp/games/{tid}/pipelines.bin'
-        pipelines = p if os.path.exists(p) else None
     empty = WORK + '/shadergen/no_pipelines.bin'
     open(empty, 'wb').close()
-    r = run([exe, pipelines or empty, g.dir + '/shader_logs', g.shaders, '-'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    r = run([exe, g.pipelines or empty, g.dir + '/shader_logs', g.shaders, '-'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
     print(r.stdout[-600:].strip())
     if r.returncode:
         sys.exit('shadergen failed')
     compile_shaders(g.shaders, args.jobs)
-    if g.family != 'tomo':
-        shutil.rmtree(g.shaders + '/glsl', ignore_errors=True)
+    shutil.rmtree(g.shaders + '/glsl', ignore_errors=True)  # compiled into shaders.gsh; nothing reads the GLSL after
 
 
 # ---------------------------------------------------------------- the PC trial: the game on this PC, headless, with the software renderer. It finds code static analysis missed and logs the shaders used.
@@ -545,8 +566,7 @@ def host_build(g, args):
     gen_dir = f'{g.dir}/{args.gen or "gen_safe"}'
     abi = gen_dir.endswith('gen_abi')
     table = f'{gen_dir}/table.c'
-    tools = [f'{ROOT}/third_party/3dsrecomp/tools/recomp/{f}.py' for f in ('gen', 'cro')] + [g.extra_functions]
-    if not os.path.exists(table) or (not g.keep_gen and any(os.path.exists(f) and os.path.getmtime(f) > os.path.getmtime(table) for f in tools)):
+    if not os.path.exists(table) or any(os.path.getmtime(f) > os.path.getmtime(table) for f in recompiler_sources() + [functions_list(g)]):
         print('recompiling the game to C')
         do_gen(g, args, gen_dir, abi)
     rt = host_runtime(args)
@@ -652,23 +672,28 @@ def trial(g, args):
 
 
 # ---------------------------------------------------------------- title and WUP
+def known_game(name):
+    """a tested game's identity on the Wii U (title id, Menu name, product code, WUP folder), from builder/compat.json, the one list of them"""
+    import json
+    with open(ROOT + '/builder/compat.json', encoding='utf-8') as f:
+        for entry in json.load(f).values():
+            if isinstance(entry, dict) and entry.get('slug') == name:
+                return entry
+    sys.exit(f"{name} isn't in builder/compat.json")
+
+
 def build_title(g, args):
-    if g.family == 'tomo':
-        argv = [sys.executable, ROOT + '/tools/make_game_title.py']
-    elif g.family == 'layton':
-        argv = [sys.executable, ROOT + '/tools/layton_title.py', g.name]
-    else:
-        argv = [sys.executable, ROOT + '/tools/mario_title.py', g.name]
-    if run(argv, cwd=ROOT).returncode:
-        sys.exit('the title script failed')
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('make_game_title', ROOT + '/tools/make_game_title.py')
+    titles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(titles)
+    info = known_game(g.name)
+    titles.make_title(g.out + '/title', g.dir, g.rpx, g.shaders, info['title_id'], info['name'], info['product'])
 
 
 def pack(g, otp):
     title = g.out + '/title'
-    if g.family == 'tomo':
-        target = ROOT + '/dist/Tomodachi_Life'
-    else:
-        target = f'{ROOT}/dist/{g.name}'
+    target = f'{ROOT}/dist/{known_game(g.name)["folder"]}'  # as tools/ship_card.py names them
     r = subprocess.run([sys.executable, ROOT + '/tools/pack_game_wup.py', otp, title, target], cwd=ROOT)
     if r.returncode:
         sys.exit('packing failed')

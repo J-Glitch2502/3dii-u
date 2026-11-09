@@ -15,7 +15,6 @@ import json
 import os
 import re
 import shutil
-import struct
 import subprocess
 import sys
 import time
@@ -92,49 +91,14 @@ def derived(dump):
             'folder': folder, 'status': 'Untested', 'note': 'Not tested on a console yet: it may not start, or stop partway.'}
 
 
-def mobiclip_tables(game_dir):
-    """Offset-table jumps (`sub rB, pc, #n` ... `add pc, rX, rB`) in the game's code. Mobiclip's hand-written video decoder is made of them
-    (168 in Mario Kart 7, the Laytons and Paper Jam): it keeps values in any register across its own calls, which only code generated
-    without --abi follows. Mario Kart 7's menu videos stopped the game otherwise."""
-    with open(os.path.join(game_dir, 'exheader.bin'), 'rb') as f:
-        size = struct.unpack_from('<I', f.read(0x40), 0x18)[0]
-    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:
-        code = f.read(size)
-    words = struct.unpack_from('<%dI' % (len(code) // 4), code)
-    n = 0
-    for i, w in enumerate(words):
-        if w >> 28 != 0xE or (w & 0x0FEF0000) != 0x024F0000:  # sub/add rB, pc, #n
-            continue
-        rb = (w >> 12) & 15
-        for x in words[i + 1:i + 16]:
-            if (x & 0xFFF0FFF0) == 0xE080F000 and rb in ((x >> 16) & 15, x & 15):  # add pc, rX, rB
-                n += 1
-                break
-            if (x >> 26) & 3 == 0 and (x >> 12) & 15 == rb:  # rB written again first
-                break
-    return n
-
-
 def make_title(game_dir, out, info):
-    """tools/make_game_title.py with this game's names, as tools/mario_title.py does, then the update's and DLC's files beside the game's"""
-    source = open(os.path.join(ROOT, 'tools', 'make_game_title.py'), encoding='utf-8', newline='').read()
-    name = info['name'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
-    rpx_name = info['slug'] + '.rpx'
-    for pattern, replacement in [
-        (r"^TITLE = .*$", f"TITLE = {os.path.join(out, 'title')!r}"),
-        (r"^GAME = .*$", f"GAME = {game_dir!r}"),
-        (r"^TITLE_ID = .*$", f"TITLE_ID = {info['title_id']!r}"),
-        (r"^RPX_NAME = .*$", f"RPX_NAME = {rpx_name!r}"),
-        (r"^rpx = .*$", f"rpx = {os.path.join(out, rpx_name)!r}"),
-        (r"\.replace\('3DS Recomp Code Test', '[^']*'\)", f".replace('3DS Recomp Code Test', {name!r})"),
-        (r"'WUP-N-[A-Z0-9]{4}'", repr(info['product'])),
-        (r"os\.path\.join\(ROOT, 'build', 'shaders', f\)", f"os.path.join({os.path.join(out, 'shaders')!r}, f)"),
-        (r"^ARCHIVES = .*$", f"ARCHIVES = {ARCHIVES!r}"),
-    ]:
-        source, count = re.subn(pattern, lambda m: replacement, source, count=1, flags=re.M)
-        if count != 1:
-            fail(f'tools/make_game_title.py has changed: no match for {pattern}')
-    exec(compile(source, 'make_game_title.py', 'exec'), {'__file__': os.path.join(ROOT, 'tools', 'make_game_title.py'), '__name__': '__main__'})
+    """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('make_game_title', os.path.join(ROOT, 'tools', 'make_game_title.py'))
+    titles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(titles)
+    titles.make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
+                      info['title_id'], info['name'], info['product'], ARCHIVES)
     content = os.path.join(out, 'title', 'content')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')):
@@ -286,34 +250,25 @@ def main():
     b3.prepare_logs = with_vertex_programs
     if not os.path.exists(b3.BIN + 'gcc.exe'):
         fail('The build tools aren\'t installed: see builder/README.md.')
-    g = b3.Game(known['slug'] if known else info['slug'])
-    g.name = info['slug']
-    g.dir = game_dir.replace('\\', '/')
-    if not known and mobiclip_tables(game_dir) >= 8:
-        # built the way the Layton ports run the same decoder: every register through memory at calls, -O1 (see build3ds.py's Layton family)
-        g.gen, g.mode, g.opt = 'gen_safe', 'safe', ['-O1']
-        print('a hand-written video decoder (Mobiclip): built the way the Layton ports are', flush=True)
-    g.gen_dir = f'{g.dir}/{g.gen}'
+    g = b3.Game(info['slug'], game_dir)  # the recipe every game gets, read from this game's own code (build3ds.py)
+    if g.mode == 'safe':
+        print('hand-written code that keeps values in any register across its calls (Mobiclip\'s video decoder): every register goes through memory', flush=True)
+    if update:
+        g.upstream_functions = None  # the 3dsrecomp project's lists are of the base game's code, which the update replaces
     out = os.path.join(game_dir, 'out')
     g.out, g.rpx, g.nm, g.shaders = out, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'game.nm'), os.path.join(out, 'shaders')
     os.makedirs(out, exist_ok=True)
 
     PROGRESS.stage('Finding the game\'s code')
+    # What earlier runs reached stays, and the finders add to it: a tested game's list (its base code's alone), or an untested game's own
+    # games/g_<code>[_v<update>]/functions.txt, the entries its runs found missing (Kirby: Triple Deluxe's first call at 0x232670, 2026-11-08)
+    learned = os.path.join(ROOT, 'games', known['slug'] if known else info['slug'], 'functions.txt')
+    if not (known and update) and os.path.isfile(learned):
+        shutil.copyfile(learned, g.extra_functions)
     if known and not update and not any(m.changes_code() for m in mod_list):
-        print('code entries: what this game\'s tested builds found', flush=True)  # g.extra_functions as build3ds has it
+        print('code entries: what this game\'s tested builds found', flush=True)
     else:
-        # What earlier runs reached stays and the finders add to it: a tested game's list (its base code only), or an untested game's own
-        # games/g_<code>[_v<update>]/functions.txt, the entries its runs found missing (Kirby: Triple Deluxe's first call at 0x232670, 2026-11-08)
-        if not (known and update) and os.path.isfile(g.extra_functions):
-            shutil.copyfile(g.extra_functions, f'{g.dir}/functions.txt')
-        g.extra_functions = f'{g.dir}/functions.txt'
-        # and what the upstream project's own runs of this game found (third_party/3dsrecomp/games/<title id>): Metroid: Samus Returns' one
-        # entry there, 0x1010bb, was the call it stopped at without it (2026-11-08)
-        upstream = os.path.join(ROOT, 'third_party', '3dsrecomp', 'games', '%016x' % game.title_id, 'functions.txt')
-        if not update and os.path.isfile(upstream):
-            with open(g.extra_functions, 'a', encoding='utf-8') as o:
-                o.write('\n' + open(upstream, encoding='utf-8').read().strip() + '\n')
-        env = dict(os.environ, RECOMP_CRO_BASE=g.cro_base or '0x1C000000')
+        env = dict(os.environ, RECOMP_CRO_BASE=b3.CRO_BASE)
         for tool in ('find_entries.py', 'cro_entries.py'):
             r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', tool), g.dir] + (['--write'] if tool == 'find_entries.py' else []), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')

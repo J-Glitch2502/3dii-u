@@ -185,8 +185,8 @@ Games come in three families, which differ in a few switches (`Game` in `build3d
   archives, and `shaders.gsh` and `shaders.idx`. An update's or DLC's RomFS goes here too.
 - `meta/`: `meta.xml` (title ID, names, save sizes), the icons and boot images it draws itself, and `bootMovie.h264`.
 
-The templates are in `phase0/title_code/`. `tools/mario_title.py` and `tools/layton_title.py` run the same script with
-other names and title IDs. Tested games keep the IDs in `builder/compat.json`. Untested games get
+The templates are in `phase0/title_code/`, and `tools/make_game_title.py` makes every game's title from them. Tested
+games keep their title IDs and names in `builder/compat.json`. Untested games get
 `000500003Dxxxxxx`, which is kept clear of real Wii U titles.
 
 `tools/pack_game_wup.py` reads the Wii U common key from your `otp.bin` and hands it to `phase0/tools/pack_wup.py`

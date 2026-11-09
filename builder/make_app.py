@@ -53,7 +53,9 @@ def prune(qt):
         if os.path.isfile(p) and name.startswith(DROP_QT):
             freed += os.path.getsize(p)
             os.remove(p)
-    for d in ('translations', 'resources'):
+    # ui/Main.qml uses the Basic style alone, and FluentWinUI3's images have the app's deepest paths, past what Extract All unzips in deep folders
+    for d in ('translations', 'resources', *(os.path.join('qml', 'QtQuick', 'Controls', s) for s in
+                                             ('FluentWinUI3', 'Fusion', 'Imagine', 'Material', 'Native', 'Universal', 'Windows', 'designer'))):
         p = os.path.join(qt, d)
         if os.path.isdir(p):
             freed += sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(p) for f in fs)
@@ -153,9 +155,12 @@ def main():
     with open(os.path.join(app, 'Read me first.txt'), 'w', encoding='utf-8') as f:
         f.write(readme)
     shutil.copyfile(os.path.join(HERE, 'app_notices.txt'), os.path.join(app, 'Third-party notices.txt'))
+    files = sum(len(fs) for _, _, fs in os.walk(app)) + 1  # and files.txt, which app.py checks by that a tester unzipped the whole app
+    with open(os.path.join(app, '_internal', 'files.txt'), 'w') as f:
+        f.write(str(files))
     for old in glob.glob(os.path.join(OUT, '*.zip')):  # one zip, this build's
         os.remove(old)
-    z = shutil.make_archive(os.path.join(OUT, f'{NAME} {gui.VERSION} beta {time.strftime("%Y-%m-%d")}'), 'zip', OUT, NAME)
+    z = shutil.make_archive(os.path.join(OUT, f'{NAME} {gui.VERSION} beta'), 'zip', OUT, NAME)
     print(f'for testers: {z} ({os.path.getsize(z) >> 20} MB)')
 
 
