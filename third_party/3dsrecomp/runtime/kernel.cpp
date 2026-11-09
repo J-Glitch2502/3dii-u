@@ -402,15 +402,15 @@ struct GuestHost {
 };
 static char guest_names[64][12];
 
-static int guest_entry(int, void *t) {
-    thread_main(t);
+static int guest_entry(int, const char **argv) {
+    thread_main((void *)argv);
     return 0;
 }
 
 static void start_guest_host(Thread *t) {
     auto *host = (GuestHost *)memalign(16, sizeof(GuestHost));
     if (!host) FATAL("no memory for a guest thread\n");
-    if (!OSCreateThread(&host->os, guest_entry, 0, t, host->stack + sizeof host->stack, sizeof host->stack, 16, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
+    if (!OSCreateThread(&host->os, guest_entry, 0, (char *)t, host->stack + sizeof host->stack, sizeof host->stack, 16, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
         FATAL("cannot create a guest thread\n");
     char *name = guest_names[t->id % 64];
     snprintf(name, sizeof guest_names[0], "guest %u", t->id);
@@ -588,7 +588,8 @@ static u32 svc_control_memory(CPU *c) {
         return RES_OK;
     }
     case 1: {
-        if (!Regions.Remove(addr0, size, 5)) return RES_INVALID_ADDRESS;
+        if (!Regions.Covers(addr0, size, 5) || GuestAliasSourceInUse(addr0, size) ||
+            !Regions.Remove(addr0, size, 5)) return RES_INVALID_ADDRESS;
         if (MemoryRegions::InRange(addr0, size, mem::LINEAR_BASE, mem::LINEAR_BASE + mem::LINEAR_SIZE))
             linear_free_range(addr0, size);
         else
@@ -599,16 +600,22 @@ static u32 svc_control_memory(CPU *c) {
     case 4: {
         if (!perm || !MemoryRegions::InRange(addr0, size, mem::STACK_TOP, mem::LINEAR_BASE) ||
             !MemoryRegions::InRange(addr1, size, mem::HEAP_BASE, mem::STACK_TOP) ||
-            !Regions.Covers(addr1, size, 5, 3) || !Regions.Insert(addr0, size, perm, 6))
+            !Regions.Covers(addr1, size, 5, perm) || !Regions.Insert(addr0, size, perm, 6))
             return RES_INVALID_ADDRESS;
-        LOG("[svc] ControlMemory MAP %08x -> %08x size %x (copying, no alias)\n", addr1, addr0, size);
-        memmove(gptr(addr0), gptr(addr1), size);
+        if (!GuestAliasMap(addr0, addr1, size, GuestAliasControl)) {
+            Regions.Remove(addr0, size, 6);
+            return RES_INVALID_ADDRESS;
+        }
         c->r[1] = addr0;
         return RES_OK;
     }
-    case 5:
-        if (!Regions.Remove(addr0, size, 6)) return RES_INVALID_ADDRESS;
+    case 5: {
+        const u32 backing = GuestAliasSource(addr0, GuestAliasControl);
+        if (!backing || (addr1 && addr1 != backing) || !Regions.Covers(addr0, size, 6) ||
+            !GuestAliasUnmap(addr0, backing, size, GuestAliasControl)) return RES_INVALID_ADDRESS;
+        Regions.Remove(addr0, size, 6);
         return RES_OK;
+    }
     case 6:
         if (!Regions.Protect(addr0, size, perm)) return RES_INVALID_ADDRESS;
         return RES_OK;
@@ -848,10 +855,10 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         c->r[0] = RES_OK;
         break;
     }
-    case 0x1F: {  // MapMemoryBlock(handle, addr, perm, other)
+    case 0x1F: {
         auto sm = get<SharedMem>(c->r[0]);
         if (!sm) { c->r[0] = RES_INVALID_HANDLE; break; }
-        u32 addr = c->r[1];
+        const u32 addr = c->r[1];
         if (!sm->size || uint64_t(sm->size) + 0xFFF > UINT32_MAX || !sm->backing ||
             !MemoryRegions::InRange(sm->backing, sm->size, mem::HEAP_BASE, 0x20000000) ||
             (addr && (!MemoryRegions::PageAligned(addr) ||
@@ -861,25 +868,56 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         }
         const u32 target = addr ? addr : sm->backing;
         const u32 rounded = (sm->size + 0xFFF) & ~0xFFFu;
-        if (!Regions.Insert(target, rounded, c->r[2], 6) && !Regions.Covers(target, rounded, 6)) {
+        if (std::find(sm->MappedAddresses.begin(), sm->MappedAddresses.end(), target) != sm->MappedAddresses.end()) {
+            c->r[0] = RES_OK;
+            break;
+        }
+        if (target == sm->backing && Regions.Covers(target, rounded, 5)) {
+            sm->MappedAddresses.push_back(target);
+            c->r[0] = RES_OK;
+            break;
+        }
+        if (!Regions.Insert(target, rounded, c->r[2], 6)) {
             c->r[0] = RES_INVALID_ADDRESS;
             break;
         }
-        VLOG("[svc] MapMemoryBlock %s at %08x (backing %08x size %x)\n", sm->name.c_str(), addr, sm->backing, sm->size);
-        if (addr && sm->backing && addr != sm->backing) {
-            // No aliasing: the block moves to where the game maps it.
-            memmove(gptr(addr), gptr(sm->backing), sm->size);
-            sm->backing = addr;
-            if (sm->on_move) sm->on_move(addr);
-        } else if (addr) {
-            sm->backing = addr;
+        if (target != sm->backing && !GuestAliasMap(target, sm->backing, rounded, GuestAliasShared)) {
+            Regions.Remove(target, rounded, 6);
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
         }
+        sm->MappedAddresses.push_back(target);
+        if (target != sm->backing && sm->OnMap) sm->OnMap(target);
         c->r[0] = RES_OK;
         break;
     }
-    case 0x20:
+    case 0x20: {
+        auto sm = get<SharedMem>(c->r[0]);
+        if (!sm) { c->r[0] = RES_INVALID_HANDLE; break; }
+        const u32 target = c->r[1] ? c->r[1] : sm->backing;
+        auto it = std::find(sm->MappedAddresses.begin(), sm->MappedAddresses.end(), target);
+        if (it == sm->MappedAddresses.end()) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
+        }
+        if (target == sm->backing && Regions.Covers(target, (sm->size + 0xFFF) & ~0xFFFu, 5)) {
+            sm->MappedAddresses.erase(it);
+            c->r[0] = RES_OK;
+            break;
+        }
+        if (!Regions.Covers(target, (sm->size + 0xFFF) & ~0xFFFu, 6)) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
+        }
+        if (target != sm->backing && !GuestAliasUnmap(target, sm->backing, (sm->size + 0xFFF) & ~0xFFFu, GuestAliasShared)) {
+            c->r[0] = RES_INVALID_ADDRESS;
+            break;
+        }
+        Regions.Remove(target, (sm->size + 0xFFF) & ~0xFFFu, 6);
+        sm->MappedAddresses.erase(it);
         c->r[0] = RES_OK;
         break;
+    }
     case 0x21: {
         c->r[1] = add_handle(std::make_shared<Arbiter>());
         c->r[0] = RES_OK;

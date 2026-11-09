@@ -159,7 +159,7 @@ void rt_fatal(const char *fmt, ...) {
 std::string read_cstr(u32 a, size_t max) {
     std::string s;
     for (size_t i = 0; i < max; i++) {
-        char ch = (char)g_mem[a + i];
+        char ch = (char)*GuestMemoryPointer(a + i);
         if (!ch) break;
         s += ch;
     }
@@ -202,6 +202,7 @@ u8 *paddr_ptr(u32 pa) {
 }
 
 u32 vaddr_to_paddr(u32 va) {
+    if (va >= GUEST_ALIAS_BASE && va < GUEST_ALIAS_LIMIT) va = (u32)(GuestMemoryPointer(va) - g_mem);
     if (va >= LINEAR_BASE && va < LINEAR_BASE + LINEAR_SIZE) return va - LINEAR_BASE + FCRAM_PADDR;
     if (va >= VRAM_BASE && va < VRAM_BASE + VRAM_SIZE) return va - VRAM_BASE + VRAM_PADDR;
     if (va >= DSP_BASE && va < DSP_BASE + DSP_SIZE) return va - DSP_BASE + DSP_PADDR;

@@ -2,6 +2,7 @@
 #pragma once
 #include <math.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 
 #ifdef __cplusplus
@@ -47,19 +48,41 @@ typedef struct GuestCro {  // named: gcc refuses a weak definition of an anonymo
     u32 base, size;
 } GuestCro;
 
-extern u8 *g_mem;  // 4 GiB host reservation mirroring the guest address space
+extern u8 *g_mem;
 #define MEMBASE g_mem
+
+#define GUEST_ALIAS_BASE 0x10000000u
+#define GUEST_ALIAS_LIMIT 0x14000000u
+#define GUEST_ALIAS_PAGE_SIZE 0x1000u
+#define GUEST_ALIAS_PAGE_COUNT ((GUEST_ALIAS_LIMIT - GUEST_ALIAS_BASE) / GUEST_ALIAS_PAGE_SIZE)
+
+enum GuestAliasKind { GuestAliasControl = 1, GuestAliasShared = 2 };
+
+extern int32_t GuestAliasOffsets[GUEST_ALIAS_PAGE_COUNT];
+
+bool GuestAliasMap(u32 target, u32 backing, u32 size, enum GuestAliasKind kind);
+bool GuestAliasUnmap(u32 target, u32 backing, u32 size, enum GuestAliasKind kind);
+bool GuestAliasSourceInUse(u32 backing, u32 size);
+u32 GuestAliasSource(u32 target, enum GuestAliasKind kind);
+
+static inline u8 *GuestMemoryPointer(u32 address) {
+    if (address >= GUEST_ALIAS_BASE && address < GUEST_ALIAS_LIMIT) {
+        int32_t delta = __atomic_load_n(&GuestAliasOffsets[(address - GUEST_ALIAS_BASE) / GUEST_ALIAS_PAGE_SIZE], __ATOMIC_ACQUIRE);
+        return g_mem + (u32)(address + delta);
+    }
+    return g_mem + address;
+}
 
 typedef u16 __attribute__((aligned(1), may_alias)) u16_u;
 typedef u32 __attribute__((aligned(1), may_alias)) u32_u;
 typedef u64 __attribute__((aligned(1), may_alias)) u64_u;
 
-#define RD8(a) (*(u8 *)(M + (u32)(a)))
-#define RD16(a) (*(u16_u *)(M + (u32)(a)))
-#define RD32(a) (*(u32_u *)(M + (u32)(a)))
-#define WR8(a, v) (*(u8 *)(M + (u32)(a)) = (u8)(v))
-#define WR16(a, v) (*(u16_u *)(M + (u32)(a)) = (u16)(v))
-#define WR32(a, v) (*(u32_u *)(M + (u32)(a)) = (u32)(v))
+#define RD8(a) (*(u8 *)GuestMemoryPointer((u32)(a)))
+#define RD16(a) (*(u16_u *)GuestMemoryPointer((u32)(a)))
+#define RD32(a) (*(u32_u *)GuestMemoryPointer((u32)(a)))
+#define WR8(a, v) (*(u8 *)GuestMemoryPointer((u32)(a)) = (u8)(v))
+#define WR16(a, v) (*(u16_u *)GuestMemoryPointer((u32)(a)) = (u16)(v))
+#define WR32(a, v) (*(u32_u *)GuestMemoryPointer((u32)(a)) = (u32)(v))
 
 void rt_dispatch(CPU *c, u32 unused);
 void rt_svc(CPU *c, u32 imm);

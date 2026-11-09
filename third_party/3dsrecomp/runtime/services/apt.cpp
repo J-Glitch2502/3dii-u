@@ -452,7 +452,7 @@ struct AptService : Service {
             return;
         }
         ipc.ok(2, 2);
-        ipc.set(2, apt.font->backing);
+        ipc.set(2, apt.font->GuestAddress());
         ipc.handles(3, {apt.font});
     }
 };

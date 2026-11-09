@@ -764,7 +764,7 @@ std::shared_ptr<SharedMem> load_shared_font() {
     w32(sm->backing + 4, 1);
     w32(sm->backing + 8, (u32)font.size());
     relocate_shared_font(sm->backing);
-    sm->on_move = relocate_shared_font;
+    sm->OnMap = relocate_shared_font;
     LOG("[apt] shared font: %zu bytes at %08x\n", font.size(), sm->backing);
     return sm;
 }

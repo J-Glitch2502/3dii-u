@@ -136,7 +136,13 @@ struct SharedMem : Object {
     u32 backing = 0;  // guest address of the memory
     u32 size = 0;
     u32 my_perm = 0, other_perm = 0;
-    void (*on_move)(u32 addr) = nullptr;  // fix up contents after MapMemoryBlock moved the block
+    std::vector<u32> MappedAddresses;
+    void (*OnMap)(u32 addr) = nullptr;
+    u32 GuestAddress() const {
+        for (auto it = MappedAddresses.rbegin(); it != MappedAddresses.rend(); ++it)
+            if (*it != backing) return *it;
+        return backing;
+    }
     Type type() const override { return Type::SharedMem; }
 };
 
