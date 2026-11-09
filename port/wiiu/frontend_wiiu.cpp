@@ -158,11 +158,12 @@ static int gpu_thread(int, void *) {
             if (gpu_tripped) LOG("[home] the GPU thread was still drawing when GX2 went away\n");
             else wiiu::gfx_shutdown();
             gpu_tripped = false;
-            wiiu::procui::SetGpuParked(true);
+            wiiu::procui::MarkGpuParked();
             while (wiiu::procui::IsPauseRequested() && !quitting) OSSleepTicks(OSMillisecondsToTicks(2));
             if (quitting) break;
+            wiiu::procui::MarkGpuResuming();
             wiiu::gfx_reacquire();
-            wiiu::procui::SetGpuParked(false);
+            wiiu::procui::MarkGpuRunning();
             continue;
         }
         OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
@@ -172,7 +173,7 @@ static int gpu_thread(int, void *) {
         wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
     if (!wiiu::procui::IsGpuParked()) wiiu::gfx_shutdown();
-    wiiu::procui::SetGpuParked(true);
+    wiiu::procui::MarkGpuParked();
     // GX2 has to close on the core it started on, once the system has taken the foreground back
     while (!gfx_may_close) OSSleepTicks(OSMillisecondsToTicks(2));
     WHBGfxShutdown();
@@ -498,7 +499,10 @@ void frontend_run() {
         // While the HOME Menu is up nothing may touch GX2, and with no VBlanks the game waits. WHBProcIsRunning blocks until we're back.
         if (wiiu::procui::IsPauseRequested()) {
             if (!wiiu::procui::IsForegroundBack()) continue;
-            wiiu::procui::ResumeGpu();
+            if (!wiiu::procui::ResumeGpu()) {
+                OSFatal("3Dii U: GPU failed to resume after HOME Menu.");
+                __builtin_trap();
+            }
         }
         GX2WaitForVsync();  // the guest's VBlank is the TV's, so frames line up with its refresh
         kernel::timers_poke();  // a timer whose wake-up went missing, whatever the reason, costs a frame rather than the game: frames carry on even when everything else waits
