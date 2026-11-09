@@ -24,6 +24,7 @@ struct Dsp {
     std::array<Source, kNumSources> backup_sources;
     Mixer backup_mixer;
     u64 frames = 0;
+    u16 last_counter = 0;  // the game's newest frame counter at the last frame
 };
 
 Dsp &dsp() {
@@ -115,11 +116,16 @@ StereoFrame generate_frame(Dsp &d) {
     SharedMemory &rd = region(ri);
     SharedMemory &wr = region(ri ^ 1);
 
+    // has the game submitted a frame since the last one (and so read the status that one wrote)?
+    const u16 counter = frame_counter(ri);
+    const bool seen = counter != d.last_counter;
+    d.last_counter = counter;
+
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
-        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs);
+        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen);
         memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
     }

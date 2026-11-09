@@ -281,13 +281,20 @@ void Source::generate() {
     st.filters.process(frame);
 }
 
-SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16]) {
+SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen) {
     parse_config(cfg, coeffs);
     if (st.enabled) generate();
 
     SourceStatus s;
     s.is_enabled = st.enabled;
-    s.current_buffer_id_dirty = st.buffer_update ? 1 : 0;
+    // A buffer change stays reported until the game has read it. The game only acts on a status whose "current buffer changed" flag
+    // is set, and a frame that comes before it reads the last one would clear it: Luigi's Mansion: Dark Moon, on a stream that ran
+    // dry, then saw the voice off with its last buffers never finished, queued them again while they were still in its list, and
+    // walked that list (now a loop) forever. A real DSP never runs ahead of the game like this; reporting it twice is harmless, as
+    // the game marks the buffers before the current one finished.
+    const bool dirty = st.buffer_update || (st.update_unseen && !seen);
+    s.current_buffer_id_dirty = dirty ? 1 : 0;
+    st.update_unseen = dirty;
     st.buffer_update = false;
     s.sync_count = st.sync_count;
     s.buffer_position.set(st.pos);
