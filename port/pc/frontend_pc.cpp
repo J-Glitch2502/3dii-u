@@ -280,6 +280,10 @@ void frontend_run() {
             LOG("[pc] frame %llu: gx lists %llu, transfers %llu\n", (unsigned long long)frames,
                 (unsigned long long)kernel::gx_stats.cmdlists, (unsigned long long)kernel::gx_stats.transfers);
         }
+        // RECOMP_MEMDUMP="f1,f2,...": guest memory snapshots (mem_<frame>_<address>.bin), as the SDL frontend's
+        static const char *memdump = getenv("RECOMP_MEMDUMP");
+        if (memdump && (std::string(",") + memdump + ",").find("," + std::to_string(frames) + ",") != std::string::npos)
+            kernel::dump_memory(("mem_" + std::to_string(frames)).c_str());
         if (max_frames && frames >= max_frames) {
             kernel::dump_threads();
             fflush(nullptr);
