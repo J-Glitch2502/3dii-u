@@ -27,6 +27,17 @@ void watch_report();
 
 u64 g_frame;
 
+#ifdef __WIIU__
+extern "C" [[noreturn]] void GuestMemoryFault(u32 address, u32 size, bool write) {
+    if (kernel::Thread *thread = kernel::current_thread()) {
+        const CPU &cpu = thread->cpu;
+        FATAL("[memory] guest %s outside backing: %08x + %x (limit %08x), thread %u, last guest pc %08x lr %08x sp %08x, r0-r3 %08x %08x %08x %08x\n",
+              write ? "write" : "read", address, size, 0x20010000u, thread->id, cpu.pc, cpu.r[14], cpu.r[13], cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3]);
+    }
+    FATAL("[memory] guest %s outside backing: %08x + %x (limit %08x)\n", write ? "write" : "read", address, size, 0x20010000u);
+}
+#endif
+
 static std::string log_path;
 
 #ifdef __WIIU__

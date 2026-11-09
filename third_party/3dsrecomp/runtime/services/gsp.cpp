@@ -238,7 +238,7 @@ void gsp_process_gx() {
         }
         switch (c[0] & 0xFF) {
         case 0x00:  // RequestDma(src, dst, size)
-            memmove(gptr(c[2]), gptr(c[1]), c[3]);
+            if (!GuestMove(c[2], c[1], c[3])) FATAL("[gsp] DMA guest memory move failed: %08x -> %08x (%x bytes)\n", c[1], c[2], c[3]);
             if (u32 pa = va2pa(c[2])) gpu::dma_written(pa, c[3]);
             irqs.push_back(DMA);
             break;

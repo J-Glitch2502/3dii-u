@@ -373,7 +373,7 @@ struct Loaded {
 std::map<u32, Loaded> g_mods;
 void sync_buffers() {
     for (auto &[addr, l] : g_mods)
-        if (addr != l.buf) memmove(gptr(l.buf), gptr(addr), l.size);
+        if (addr != l.buf && !GuestMove(l.buf, addr, l.size)) FATAL("[ldr:ro] cannot sync module buffer %08x -> %08x (%x bytes)\n", addr, l.buf, l.size);
 }
 
 struct Ro : Service {
@@ -382,7 +382,7 @@ struct Ro : Service {
         switch (ipc.cmd()) {
         case 0x0001: {  // Initialize(crs buffer, size, address, process)
             u32 buf = ipc[1], size = ipc[2], addr = ipc[3];
-            if (addr != buf) memmove(gptr(addr), gptr(buf), size);
+            if (addr != buf && !GuestMove(addr, buf, size)) FATAL("[ldr:ro] cannot copy module buffer %08x -> %08x (%x bytes)\n", buf, addr, size);
             g_crs = addr;
             Cro crs(addr);
             crs.set(H_NEXT, 0);
@@ -417,7 +417,7 @@ struct Ro : Service {
             c.rebase_tables(-1);
             c.rebase_header(-1);
             sync_buffers();
-            if (addr != buf) memmove(gptr(buf), gptr(addr), g_mods.count(addr) ? g_mods[addr].size : 0);
+            if (addr != buf && !GuestMove(buf, addr, g_mods.count(addr) ? g_mods[addr].size : 0)) FATAL("[ldr:ro] cannot restore module buffer %08x -> %08x\n", addr, buf);
             g_mods.erase(addr);
             LOG("[ldr:ro] unloaded %s from %08x\n", name.c_str(), addr);
             ipc.ok();
@@ -448,7 +448,7 @@ struct Ro : Service {
     void load(IPC &ipc) {
         u32 buf = ipc[1], addr = ipc[2], size = ipc[3], data = ipc[4], data_size = ipc[6], bss = ipc[7],
             bss_size = ipc[8], auto_link = ipc[9] & 0xFF, level = ipc[10];
-        if (addr != buf) memmove(gptr(addr), gptr(buf), size);
+        if (addr != buf && !GuestMove(addr, buf, size)) FATAL("[ldr:ro] cannot copy module buffer %08x -> %08x (%x bytes)\n", buf, addr, size);
         Cro c(addr);
         std::string name = read_cstr(addr + c.f(H_MODULE_NAME), c.f(H_MODULE_NAME_SIZE) + 1);
         if (!g_crs || c.f(H_MAGIC) != MAGIC_CRO0 || c.next() || c.prev()) {
@@ -461,7 +461,7 @@ struct Ro : Service {
         const GuestCro *slot = slot_of(name);
         if (slot && size <= slot->size) {
             code_base = slot->base;
-            memcpy(gptr(code_base), gptr(addr), size);
+            if (!GuestMove(code_base, addr, size)) FATAL("[ldr:ro] cannot copy module code %08x -> %08x (%x bytes)\n", addr, code_base, size);
         } else {
             LOG("[ldr:ro] %s has no recompiled code slot: its code will be missing\n", name.c_str());
         }
@@ -481,10 +481,10 @@ struct Ro : Service {
         // (nn::ro's __aeabi_atexit takes __dso_handle to the control object): there it found the file's raw header, not the loaded one,
         // and Animal Crossing's first module wrote through a garbage pointer, which only the PC's 4 GB of mapped guest memory
         // survived (2026-11-08). The slot starts with the loaded header too.
-        if (code_base != addr) memcpy(gptr(code_base), gptr(addr), H_END);
+        if (code_base != addr && !GuestMove(code_base, addr, H_END)) FATAL("[ldr:ro] cannot copy module header %08x -> %08x\n", addr, code_base);
         // the game copies the relocated .data from its buffer into the .data block itself, then frees what the
         // module no longer needs
-        if (addr != buf) memmove(gptr(buf), gptr(addr), size);
+        if (addr != buf && !GuestMove(buf, addr, size)) FATAL("[ldr:ro] cannot restore module buffer %08x -> %08x (%x bytes)\n", addr, buf, size);
         g_mods[addr] = {buf, fixed, code_base};
         sync_buffers();
         LOG("[ldr:ro] loaded %s at %08x (buffer %08x, %x bytes, code at %08x, data %08x+%x, bss %08x+%x, auto link %u, "

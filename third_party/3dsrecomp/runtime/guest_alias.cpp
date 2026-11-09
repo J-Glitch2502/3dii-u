@@ -1,6 +1,8 @@
 #include "cpu.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 int32_t GuestAliasOffsets[GUEST_ALIAS_PAGE_COUNT];
 static uint8_t GuestAliasOwners[GUEST_ALIAS_PAGE_COUNT];
@@ -112,6 +114,7 @@ extern "C" bool GuestMemoryRangeCheck(u32 address, size_t size) {
 
 extern "C" void GuestCopyFrom(void *destination, u32 source, size_t size) {
     if (!size) return;
+    GuestMemoryCheck(source, (u32)size, false);
     if (GuestMemoryRangeContiguous(source, size)) {
         memcpy(destination, GuestMemoryPointer(source), size);
         return;
@@ -130,6 +133,7 @@ extern "C" void GuestCopyFrom(void *destination, u32 source, size_t size) {
 
 extern "C" void GuestCopyTo(u32 destination, const void *source, size_t size) {
     if (!size) return;
+    GuestMemoryCheck(destination, (u32)size, true);
     if (GuestMemoryRangeContiguous(destination, size)) {
         memcpy(GuestMemoryPointer(destination), source, size);
         return;
@@ -146,8 +150,91 @@ extern "C" void GuestCopyTo(u32 destination, const void *source, size_t size) {
     }
 }
 
+struct GuestSpan {
+    uintptr_t begin;
+    uintptr_t end;
+};
+
+static size_t GuestSpanCount(u32 address, size_t size) {
+    return (size + (address & (GUEST_ALIAS_PAGE_SIZE - 1)) + GUEST_ALIAS_PAGE_SIZE - 1) / GUEST_ALIAS_PAGE_SIZE;
+}
+
+static void GuestBuildSpans(GuestSpan *spans, u32 address, size_t size) {
+    size_t index = 0;
+    while (size) {
+        const size_t run = std::min<size_t>(size, GUEST_ALIAS_PAGE_SIZE - (address & (GUEST_ALIAS_PAGE_SIZE - 1)));
+        const uintptr_t begin = (uintptr_t)GuestMemoryPointer(address);
+        spans[index++] = {begin, begin + run};
+        address += (u32)run;
+        size -= run;
+    }
+}
+
+static bool GuestSpansOverlap(GuestSpan *source, size_t sourceCount, GuestSpan *destination, size_t destinationCount) {
+    auto byAddress = [](const GuestSpan &a, const GuestSpan &b) { return a.begin < b.begin; };
+    std::sort(source, source + sourceCount, byAddress);
+    std::sort(destination, destination + destinationCount, byAddress);
+    size_t sourceIndex = 0, destinationIndex = 0;
+    while (sourceIndex < sourceCount && destinationIndex < destinationCount) {
+        const GuestSpan &a = source[sourceIndex];
+        const GuestSpan &b = destination[destinationIndex];
+        if (a.begin < b.end && b.begin < a.end) return true;
+        if (a.end <= b.begin)
+            ++sourceIndex;
+        else
+            ++destinationIndex;
+    }
+    return false;
+}
+
+extern "C" bool GuestMove(u32 destination, u32 source, size_t size) {
+    if (!size) return true;
+    GuestMemoryCheck(source, (u32)size, false);
+    GuestMemoryCheck(destination, (u32)size, true);
+    if ((u64)source + size > GUEST_MEMORY_LIMIT || (u64)destination + size > GUEST_MEMORY_LIMIT) return false;
+    if (destination == source) return true;
+    if (GuestMemoryRangeContiguous(source, size) && GuestMemoryRangeContiguous(destination, size)) {
+        memmove(GuestMemoryPointer(destination), GuestMemoryPointer(source), size);
+        return true;
+    }
+    const size_t sourceCount = GuestSpanCount(source, size);
+    const size_t destinationCount = GuestSpanCount(destination, size);
+    if (sourceCount > SIZE_MAX / sizeof(GuestSpan) || destinationCount > SIZE_MAX / sizeof(GuestSpan)) return false;
+    GuestSpan *sourceSpans = (GuestSpan *)malloc(sourceCount * sizeof(GuestSpan));
+    GuestSpan *destinationSpans = (GuestSpan *)malloc(destinationCount * sizeof(GuestSpan));
+    if (!sourceSpans || !destinationSpans) {
+        free(sourceSpans);
+        free(destinationSpans);
+        return false;
+    }
+    GuestBuildSpans(sourceSpans, source, size);
+    GuestBuildSpans(destinationSpans, destination, size);
+    const bool overlap = GuestSpansOverlap(sourceSpans, sourceCount, destinationSpans, destinationCount);
+    free(sourceSpans);
+    free(destinationSpans);
+    if (overlap) {
+        u8 *staging = (u8 *)malloc(size);
+        if (!staging) return false;
+        GuestCopyFrom(staging, source, size);
+        GuestCopyTo(destination, staging, size);
+        free(staging);
+        return true;
+    }
+    u8 staging[GUEST_ALIAS_PAGE_SIZE];
+    while (size) {
+        const size_t run = std::min<size_t>(size, sizeof(staging));
+        GuestCopyFrom(staging, source, run);
+        GuestCopyTo(destination, staging, run);
+        source += (u32)run;
+        destination += (u32)run;
+        size -= run;
+    }
+    return true;
+}
+
 extern "C" void GuestFill(u32 destination, u8 value, size_t size) {
     if (!size) return;
+    GuestMemoryCheck(destination, (u32)size, true);
     if (GuestMemoryRangeContiguous(destination, size)) {
         memset(GuestMemoryPointer(destination), value, size);
         return;

@@ -55,6 +55,11 @@ extern u8 *g_mem;
 #define GUEST_ALIAS_LIMIT 0x14000000u
 #define GUEST_ALIAS_PAGE_SIZE 0x1000u
 #define GUEST_ALIAS_PAGE_COUNT ((GUEST_ALIAS_LIMIT - GUEST_ALIAS_BASE) / GUEST_ALIAS_PAGE_SIZE)
+#ifdef __WIIU__
+#define GUEST_MEMORY_LIMIT 0x20010000ull
+#else
+#define GUEST_MEMORY_LIMIT 0x100000000ull
+#endif
 
 enum GuestAliasKind { GuestAliasControl = 1, GuestAliasShared = 2 };
 
@@ -86,11 +91,25 @@ void GuestWriteCross64(u32 address, u64 value);
 bool GuestMemoryRangeCheck(u32 address, size_t size);
 void GuestCopyFrom(void *destination, u32 source, size_t size);
 void GuestCopyTo(u32 destination, const void *source, size_t size);
+bool GuestMove(u32 destination, u32 source, size_t size);
 void GuestFill(u32 destination, u8 value, size_t size);
+#ifdef __WIIU__
+void GuestMemoryFault(u32 address, u32 size, bool write) __attribute__((noreturn));
+#endif
+
+static inline void GuestMemoryCheck(u32 address, u32 size, bool write) {
+#ifdef __WIIU__
+    if (size && (u64)address + size > GUEST_MEMORY_LIMIT) GuestMemoryFault(address, size, write);
+#else
+    (void)address;
+    (void)size;
+    (void)write;
+#endif
+}
 
 static inline bool GuestMemoryRangeContiguous(u32 address, size_t size) {
     if (!size) return true;
-    if ((u64)address + size > 0x20010000ull) return false;
+    if ((u64)address + size > GUEST_MEMORY_LIMIT) return false;
     if ((u64)address + size <= GUEST_ALIAS_BASE || address >= GUEST_ALIAS_LIMIT) return true;
     if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) + size <= GUEST_ALIAS_PAGE_SIZE) return true;
     return GuestMemoryRangeCheck(address, size);
@@ -131,10 +150,10 @@ static inline u32 GuestWrite32(u32 address, u32 value) {
     return GuestWriteCross32(address, value);
 }
 
-#define RD8(a) (*GuestMemoryPointer((u32)(a)))
+#define RD8(a) (*(u8 *)GuestMemoryPointer((u32)(a)))
 #define RD16(a) GuestRead16((u32)(a))
 #define RD32(a) GuestRead32((u32)(a))
-#define WR8(a, v) (*GuestMemoryPointer((u32)(a)) = (u8)(v))
+#define WR8(a, v) (*(u8 *)GuestMemoryPointer((u32)(a)) = (u8)(v))
 #define WR16(a, v) GuestWrite16((u32)(a), (u16)(v))
 #define WR32(a, v) GuestWrite32((u32)(a), (u32)(v))
 

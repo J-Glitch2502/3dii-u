@@ -48,7 +48,7 @@ void rt_log_sync();
 static volatile bool want_log_sync, want_dump, want_report, crash_pending;
 static volatile u32 want_hang_dump, card_passes;  // want_hang_dump: seconds without drawing, plus one
 static volatile u32 idle_samples, all_samples;
-static char crash_msg[512];
+static char crash_msg[1536];
 
 // How start-up went, in the log: only memory until the PC or the end of the game takes it
 static OSTime trace_start;
@@ -567,7 +567,7 @@ void frontend_run() {
 
 // a crash shows what happened on the screen, so it can be reported: the addresses can be looked up against build/game.nm
 static BOOL on_exception(OSContext *ctx, const char *what) {
-    static char msg[512];
+    static char msg[1536];
     const u32 *sp = (const u32 *)ctx->gpr[1];
     u32 lr1 = 0, lr2 = 0;
     if ((uintptr_t)sp > 0x10000000 && (uintptr_t)sp < 0x50000000) {
@@ -586,7 +586,21 @@ static BOOL on_exception(OSContext *ctx, const char *what) {
         ctx->srr0 = (u32)gpu_trip;
         return TRUE;
     }
-    snprintf(msg, sizeof msg, "The game crashed: %s\npc %08x lr %08x\ncalled from %08x %08x\ndar %08x sp %08x\nframe %llu\n", what, ctx->srr0, ctx->lr, lr1, lr2, ctx->dar, ctx->gpr[1], (unsigned long long)g_frame);
+    int used = snprintf(msg, sizeof msg,
+                        "The game crashed: %s\nhost pc %08x lr %08x\ncalled from %08x %08x\ndar %08x dsisr %08x srr1 %08x sp %08x\nframe %llu\n",
+                        what, ctx->srr0, ctx->lr, lr1, lr2, ctx->dar, ctx->dsisr, ctx->srr1, ctx->gpr[1], (unsigned long long)g_frame);
+    if (kernel::Thread *thread = kernel::current_thread(); thread && used > 0 && (size_t)used < sizeof msg) {
+        const CPU &cpu = thread->cpu;
+        used += snprintf(msg + used, sizeof msg - (size_t)used,
+                         "guest thread %u last pc %08x lr %08x sp %08x\nr0-r7 %08x %08x %08x %08x %08x %08x %08x %08x\nr8-r15 %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                         thread->id, cpu.pc, cpu.r[14], cpu.r[13], cpu.r[0], cpu.r[1], cpu.r[2], cpu.r[3], cpu.r[4], cpu.r[5], cpu.r[6], cpu.r[7],
+                         cpu.r[8], cpu.r[9], cpu.r[10], cpu.r[11], cpu.r[12], cpu.r[13], cpu.r[14], cpu.r[15]);
+    }
+    if (g_mem && ctx->dar >= (uintptr_t)g_mem && (uintptr_t)ctx->dar - (uintptr_t)g_mem < GUEST_MEMORY_LIMIT &&
+        used > 0 && (size_t)used < sizeof msg) {
+        const u32 backing = (u32)((uintptr_t)ctx->dar - (uintptr_t)g_mem);
+        used += snprintf(msg + used, sizeof msg - (size_t)used, "guest backing offset %08x\n", backing);
+    }
     // the watchdog thread logs it: the exception's own stack is small, and this thread may hold the log's lock
     memcpy(crash_msg, msg, sizeof crash_msg);
     crash_pending = true;
