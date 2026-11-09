@@ -272,8 +272,10 @@ class Analyzer:
         """The permanently undefined instruction compilers emit for __builtin_trap (GCC: `udf #0`, 0xE7F000F0):
         a deliberate stop inside real code, not a sign that the bytes are data."""
         if i.thumb:
-            return (i.word & 0xFF00) == 0xDE00
-        return (i.word & 0xFFF000F0) == 0xE7F000F0
+            return (i.word & 0xFF00) in (0xDE00, 0xBE00)  # udf, bkpt
+        # bkpt, with any condition: armcc's assert checks end in one (Luigi's Mansion: Dark Moon, `cmp r0, r3; bkpthi`),
+        # so a function holding it is still code
+        return (i.word & 0xFFF000F0) == 0xE7F000F0 or (i.word & 0x0FF000F0) == 0x01200070
 
     def writes(self, a, r):
         """Does the ARM instruction at a (possibly) write register r?"""
