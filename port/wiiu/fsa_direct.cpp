@@ -3,12 +3,11 @@
 // thread held it (ftpiiu, a game thread, the shader compiler), FTP on or off. The hook is on the functions, not on IOS, so these make the request a function would have made and send
 // it to IOS themselves. The linker points all callers here, the C library's file functions too (--wrap, tools/win/build3ds.py), so nothing can forget to.
 // Once, at the first call: the same file through both routes has to agree, or everything stays on the system's functions. Once more when the save storage is up, for writing.
-#include <coreinit/cache.h>
 #include <coreinit/filesystem_fsa.h>
-#include <coreinit/ios.h>
 
 #include <cstring>
 
+#include "fsa_transport.hpp"
 #include "rt.h"
 #include "wiiu.h"
 
@@ -36,50 +35,16 @@ const char *const PROBE_FILE = "/vol/content/shaders.idx";  // in every title of
 enum { UNKNOWN, DIRECT, SYSTEM } route;
 const char *why = "not tried";
 
-// IOS answers in the same numbers as FSError, which is what the system's functions hand back
-FSError ask(FSAClientHandle c, FSACommand command, FSAShimBuffer &s) {
-    DCFlushRange(&s.request, sizeof s.request);
-    DCFlushRange(&s.response, sizeof s.response);
-    const int r = IOS_Ioctl(c, command, &s.request, sizeof s.request, &s.response, sizeof s.response);
-    DCInvalidateRange(&s.response, sizeof s.response);
-    return (FSError)r;
-}
-
-void put_path(char *to, const char *path) {
-    strncpy(to, path, FS_MAX_PATH);
-    to[FS_MAX_PATH] = 0;
-}
-
-// Read and write have the data in a vector of its own. The range is flushed, not invalidated, so that the rest of a last line that isn't all the file's survives: on a line the
-// CPU hasn't written since, flushing does what invalidating would.
-FSError transfer(FSAClientHandle c, FSACommand command, void *data, u32 bytes, FSAShimBuffer &s) {
-    IOSVec *const v = s.ioctlvVec;
-    v[0].vaddr = &s.request;
-    v[0].len = sizeof s.request;
-    v[1].vaddr = data;
-    v[1].len = bytes;
-    v[2].vaddr = &s.response;
-    v[2].len = sizeof s.response;
-    DCFlushRange(&s.request, sizeof s.request);
-    DCFlushRange(&s.response, sizeof s.response);
-    DCFlushRange(v, 3 * sizeof(IOSVec));
-    DCFlushRange(data, bytes);
-    const bool reading = command == FSA_COMMAND_READ_FILE;
-    const int r = IOS_Ioctlv(c, command, reading ? 1 : 2, reading ? 2 : 1, v);
-    if (reading) DCFlushRange(data, bytes);
-    return (FSError)r;
-}
-
 FSError d_open(FSAClientHandle c, const char *path, const char *mode, FSMode create, FSOpenFileFlags flags, uint32_t prealloc, FSAFileHandle *out) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.openFile.path, path);
+    wiiu::fsa::PutPath(s.request.openFile.path, path);
     strncpy(s.request.openFile.mode, mode, FS_MODE_LENGTH - 1);
     s.request.openFile.unk0x290 = create;
     s.request.openFile.unk0x294 = flags;
     s.request.openFile.unk0x298 = prealloc;
     s.response.openFile.handle = (FSAFileHandle)-1;
-    const FSError r = ask(c, FSA_COMMAND_OPEN_FILE, s);
+    const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_OPEN_FILE, s);
     *out = r == FS_ERROR_OK ? s.response.openFile.handle : (FSAFileHandle)-1;
     return r;
 }
@@ -93,7 +58,7 @@ FSError d_read(FSAClientHandle c, void *to, uint32_t size, uint32_t count, FSAFi
     s.request.readFile.count = count;
     s.request.readFile.handle = file;
     s.request.readFile.readFlags = (FSAReadFlag)(flags & ~FSA_READ_FLAG_READ_WITH_POS);
-    return transfer(c, FSA_COMMAND_READ_FILE, to, size * count, s);
+    return wiiu::fsa::Transfer(c, FSA_COMMAND_READ_FILE, to, size * count, s);
 }
 
 FSError d_write(FSAClientHandle c, const void *from, uint32_t size, uint32_t count, FSAFileHandle file, FSAWriteFlag flags) {
@@ -105,14 +70,14 @@ FSError d_write(FSAClientHandle c, const void *from, uint32_t size, uint32_t cou
     s.request.writeFile.count = count;
     s.request.writeFile.handle = file;
     s.request.writeFile.writeFlags = (FSAWriteFlag)(flags & ~FSA_WRITE_FLAG_READ_WITH_POS);
-    return transfer(c, FSA_COMMAND_WRITE_FILE, (void *)from, size * count, s);
+    return wiiu::fsa::Transfer(c, FSA_COMMAND_WRITE_FILE, (void *)from, size * count, s);
 }
 
 FSError d_close(FSAClientHandle c, FSAFileHandle file) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.closeFile.handle = file;
-    return ask(c, FSA_COMMAND_CLOSE_FILE, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_CLOSE_FILE, s);
 }
 
 FSError d_seek(FSAClientHandle c, FSAFileHandle file, FSAFilePosition pos) {
@@ -120,14 +85,14 @@ FSError d_seek(FSAClientHandle c, FSAFileHandle file, FSAFilePosition pos) {
     memset(&s, 0, sizeof s);
     s.request.setPosFile.handle = file;
     s.request.setPosFile.pos = pos;
-    return ask(c, FSA_COMMAND_SET_POS_FILE, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_SET_POS_FILE, s);
 }
 
 FSError d_statfile(FSAClientHandle c, FSAFileHandle file, FSAStat *out) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.statFile.handle = file;
-    const FSError r = ask(c, FSA_COMMAND_STAT_FILE, s);
+    const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_STAT_FILE, s);
     if (r == FS_ERROR_OK) memcpy((void *)out, (const void *)&s.response.statFile.stat, sizeof *out);
     return r;
 }
@@ -135,9 +100,9 @@ FSError d_statfile(FSAClientHandle c, FSAFileHandle file, FSAStat *out) {
 FSError d_stat(FSAClientHandle c, const char *path, FSAStat *out) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.getInfoByQuery.path, path);
+    wiiu::fsa::PutPath(s.request.getInfoByQuery.path, path);
     s.request.getInfoByQuery.type = FSA_QUERY_INFO_STAT;
-    const FSError r = ask(c, FSA_COMMAND_GET_INFO_BY_QUERY, s);
+    const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_GET_INFO_BY_QUERY, s);
     if (r == FS_ERROR_OK) memcpy((void *)out, (const void *)&s.response.getInfoByQuery.stat, sizeof *out);
     return r;
 }
@@ -196,45 +161,45 @@ FSError __wrap_FSAFlushFile(FSAClientHandle c, FSAFileHandle file) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.flushFile.handle = file;
-    return ask(c, FSA_COMMAND_FLUSH_FILE, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_FLUSH_FILE, s);
 }
 FSError __wrap_FSATruncateFile(FSAClientHandle c, FSAFileHandle file) {
     if (!direct(c)) return __real_FSATruncateFile(c, file);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.truncateFile.handle = file;
-    return ask(c, FSA_COMMAND_TRUNCATE_FILE, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_TRUNCATE_FILE, s);
 }
 FSError __wrap_FSARemove(FSAClientHandle c, const char *path) {
     if (!direct(c)) return __real_FSARemove(c, path);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.remove.path, path);
-    return ask(c, FSA_COMMAND_REMOVE, s);
+    wiiu::fsa::PutPath(s.request.remove.path, path);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_REMOVE, s);
 }
 FSError __wrap_FSAMakeDir(FSAClientHandle c, const char *path, FSMode mode) {
     if (!direct(c)) return __real_FSAMakeDir(c, path, mode);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.makeDir.path, path);
+    wiiu::fsa::PutPath(s.request.makeDir.path, path);
     s.request.makeDir.permission = mode;
-    return ask(c, FSA_COMMAND_MAKE_DIR, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_MAKE_DIR, s);
 }
 FSError __wrap_FSARename(FSAClientHandle c, const char *from, const char *to) {
     if (!direct(c)) return __real_FSARename(c, from, to);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.rename.oldPath, from);
-    put_path(s.request.rename.newPath, to);
-    return ask(c, FSA_COMMAND_RENAME, s);
+    wiiu::fsa::PutPath(s.request.rename.oldPath, from);
+    wiiu::fsa::PutPath(s.request.rename.newPath, to);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_RENAME, s);
 }
 FSError __wrap_FSAOpenDir(FSAClientHandle c, const char *path, FSADirectoryHandle *out) {
     if (!direct(c)) return __real_FSAOpenDir(c, path, out);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.openDir.path, path);
+    wiiu::fsa::PutPath(s.request.openDir.path, path);
     s.response.openDir.handle = (FSADirectoryHandle)-1;
-    const FSError r = ask(c, FSA_COMMAND_OPEN_DIR, s);
+    const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_OPEN_DIR, s);
     *out = r == FS_ERROR_OK ? s.response.openDir.handle : (FSADirectoryHandle)-1;
     return r;
 }
@@ -243,7 +208,7 @@ FSError __wrap_FSAReadDir(FSAClientHandle c, FSADirectoryHandle dir, FSADirector
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.readDir.handle = dir;
-    const FSError r = ask(c, FSA_COMMAND_READ_DIR, s);
+    const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_READ_DIR, s);
     if (r == FS_ERROR_OK) memcpy((void *)out, (const void *)&s.response.readDir.entry, sizeof *out);
     return r;
 }
@@ -252,14 +217,14 @@ FSError __wrap_FSARewindDir(FSAClientHandle c, FSADirectoryHandle dir) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.rewindDir.handle = dir;
-    return ask(c, FSA_COMMAND_REWIND_DIR, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_REWIND_DIR, s);
 }
 FSError __wrap_FSACloseDir(FSAClientHandle c, FSADirectoryHandle dir) {
     if (!direct(c)) return __real_FSACloseDir(c, dir);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.closeDir.handle = dir;
-    return ask(c, FSA_COMMAND_CLOSE_DIR, s);
+    return wiiu::fsa::Ask(c, FSA_COMMAND_CLOSE_DIR, s);
 }
 }
 
@@ -290,8 +255,8 @@ void fsa_direct_check_writes() {
     }
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.remove.path, name);
-    const FSError removed = ask(c, FSA_COMMAND_REMOVE, s);
+    wiiu::fsa::PutPath(s.request.remove.path, name);
+    const FSError removed = wiiu::fsa::Ask(c, FSA_COMMAND_REMOVE, s);
     if (!wrong && (removed != FS_ERROR_OK || __real_FSAGetStat(c, name, &st) == FS_ERROR_OK)) wrong = "removing failed";
     if (wrong) {
         __real_FSARemove(c, name);
@@ -312,7 +277,7 @@ bool fsa_direct_flush_quota(const char *path) {
     if (client < 0) return false;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    put_path(s.request.flushQuota.path, path);
-    return ask(client, FSA_COMMAND_FLUSH_QUOTA, s) == FS_ERROR_OK;
+    wiiu::fsa::PutPath(s.request.flushQuota.path, path);
+    return wiiu::fsa::Ask(client, FSA_COMMAND_FLUSH_QUOTA, s) == FS_ERROR_OK;
 }
 }  // namespace wiiu
