@@ -57,14 +57,16 @@ FSError __wrap_FSARemove(FSAClientHandle c, const char *path) {
     if (!wiiu::fsa::UseDirect(c)) return __real_FSARemove(c, path);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.remove.path, path);
+    const FSError pathResult = wiiu::fsa::PutPath(s.request.remove.path, path);
+    if (pathResult != FS_ERROR_OK) return pathResult;
     return wiiu::fsa::Ask(c, FSA_COMMAND_REMOVE, s);
 }
 FSError __wrap_FSAMakeDir(FSAClientHandle c, const char *path, FSMode mode) {
     if (!wiiu::fsa::UseDirect(c)) return __real_FSAMakeDir(c, path, mode);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.makeDir.path, path);
+    const FSError pathResult = wiiu::fsa::PutPath(s.request.makeDir.path, path);
+    if (pathResult != FS_ERROR_OK) return pathResult;
     s.request.makeDir.permission = mode;
     return wiiu::fsa::Ask(c, FSA_COMMAND_MAKE_DIR, s);
 }
@@ -72,22 +74,29 @@ FSError __wrap_FSARename(FSAClientHandle c, const char *from, const char *to) {
     if (!wiiu::fsa::UseDirect(c)) return __real_FSARename(c, from, to);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.rename.oldPath, from);
-    wiiu::fsa::PutPath(s.request.rename.newPath, to);
+    const FSError firstPathResult = wiiu::fsa::PutPath(s.request.rename.oldPath, from);
+    if (firstPathResult != FS_ERROR_OK) return firstPathResult;
+    const FSError secondPathResult = wiiu::fsa::PutPath(s.request.rename.newPath, to);
+    if (secondPathResult != FS_ERROR_OK) return secondPathResult;
     return wiiu::fsa::Ask(c, FSA_COMMAND_RENAME, s);
 }
 FSError __wrap_FSAOpenDir(FSAClientHandle c, const char *path, FSADirectoryHandle *out) {
     if (!wiiu::fsa::UseDirect(c)) return __real_FSAOpenDir(c, path, out);
+    if (!out) return FS_ERROR_INVALID_PARAM;
+    *out = (FSADirectoryHandle)-1;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.openDir.path, path);
+    const FSError pathResult = wiiu::fsa::PutPath(s.request.openDir.path, path);
+    if (pathResult != FS_ERROR_OK) return pathResult;
     s.response.openDir.handle = (FSADirectoryHandle)-1;
     const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_OPEN_DIR, s);
+    if (r == FS_ERROR_OK && s.response.openDir.handle == (FSADirectoryHandle)-1) return FS_ERROR_INVALID_DIRHANDLE;
     *out = r == FS_ERROR_OK ? s.response.openDir.handle : (FSADirectoryHandle)-1;
     return r;
 }
 FSError __wrap_FSAReadDir(FSAClientHandle c, FSADirectoryHandle dir, FSADirectoryEntry *out) {
     if (!wiiu::fsa::UseDirect(c)) return __real_FSAReadDir(c, dir, out);
+    if (!out) return FS_ERROR_INVALID_BUFFER;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.readDir.handle = dir;

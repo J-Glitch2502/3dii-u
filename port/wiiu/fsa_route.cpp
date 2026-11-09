@@ -55,6 +55,10 @@ const char *Probe(FSAClientHandle c) {
     return reason;
 }
 
+bool IsDirectRoute() {
+    return Routing.IsDirect();
+}
+
 bool UseDirect(FSAClientHandle c) {
     const RouteKind route = Routing.GetRoute();
     if (route == RouteKind::Direct) return true;
@@ -127,7 +131,7 @@ bool fsa_direct_flush_quota(const char *path) {
     if (client < 0) return false;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.flushQuota.path, path);
+    if (fsa::PutPath(s.request.flushQuota.path, path) != FS_ERROR_OK) return false;
     return wiiu::fsa::Ask(client, FSA_COMMAND_FLUSH_QUOTA, s) == FS_ERROR_OK;
 }
 } // namespace wiiu

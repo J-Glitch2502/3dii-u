@@ -4,4 +4,5 @@
 
 namespace wiiu::fsa {
 bool UseDirect(FSAClientHandle client);
-}
+bool IsDirectRoute();
+} // namespace wiiu::fsa

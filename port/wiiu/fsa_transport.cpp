@@ -14,12 +14,29 @@ FSError Ask(FSAClientHandle c, FSACommand command, FSAShimBuffer &s) {
     return (FSError)r;
 }
 
-void PutPath(char *to, const char *path) {
-    strncpy(to, path, FS_MAX_PATH);
-    to[FS_MAX_PATH] = 0;
+FSError PutPath(char *to, const char *path) {
+    if (!ValidString(path, FS_MAX_PATH)) return FS_ERROR_INVALID_PATH;
+    strcpy(to, path);
+    return FS_ERROR_OK;
+}
+
+FSError CheckBuffer(const void *data, uint32_t size, uint32_t count) {
+    switch (ValidateBuffer(data, size, count)) {
+        case BufferValidation::InvalidBuffer:
+            return FS_ERROR_INVALID_BUFFER;
+        case BufferValidation::InvalidAlignment:
+            return FS_ERROR_INVALID_ALIGNMENT;
+        case BufferValidation::OutOfRange:
+            return FS_ERROR_OUT_OF_RANGE;
+        default:
+            return FS_ERROR_OK;
+    }
 }
 
 FSError Transfer(FSAClientHandle c, FSACommand command, void *data, uint32_t bytes, FSAShimBuffer &s) {
+    const FSError valid = CheckBuffer(data, bytes, 1);
+    if (valid != FS_ERROR_OK) return valid;
+    if (bytes == 0) return FS_ERROR_OK;
     IOSVec *const v = s.ioctlvVec;
     v[0].vaddr = &s.request;
     v[0].len = sizeof s.request;
@@ -38,6 +55,10 @@ FSError Transfer(FSAClientHandle c, FSACommand command, void *data, uint32_t byt
 }
 
 FSError ReadAt(FSAClientHandle client, FSAFileHandle file, FSAShimBuffer &shim, void *data, uint32_t bytes, uint32_t position) {
+    if (!ValidRange(position, bytes)) return FS_ERROR_OUT_OF_RANGE;
+    const FSError valid = CheckBuffer(data, bytes, 1);
+    if (valid != FS_ERROR_OK) return valid;
+    if (!bytes) return FS_ERROR_OK;
     memset(&shim.request, 0, sizeof shim.request);
     shim.request.readFile.buffer = (uint8_t *)data;
     shim.request.readFile.size = 1;

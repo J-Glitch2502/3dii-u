@@ -8,19 +8,26 @@ FSError Open(FSAClientHandle c, const char *path, const char *mode, FSMode creat
              FSAFileHandle *out) {
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.openFile.path, path);
-    strncpy(s.request.openFile.mode, mode, FS_MODE_LENGTH - 1);
+    if (!out) return FS_ERROR_INVALID_PARAM;
+    *out = (FSAFileHandle)-1;
+    const FSError pathResult = PutPath(s.request.openFile.path, path);
+    if (pathResult != FS_ERROR_OK) return pathResult;
+    if (!ValidString(mode, FS_MODE_LENGTH - 1)) return FS_ERROR_INVALID_PARAM;
+    strcpy(s.request.openFile.mode, mode);
     s.request.openFile.unk0x290 = create;
     s.request.openFile.unk0x294 = flags;
     s.request.openFile.unk0x298 = prealloc;
     s.response.openFile.handle = (FSAFileHandle)-1;
     const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_OPEN_FILE, s);
+    if (r == FS_ERROR_OK && s.response.openFile.handle == (FSAFileHandle)-1) return FS_ERROR_INVALID_FILEHANDLE;
     *out = r == FS_ERROR_OK ? s.response.openFile.handle : (FSAFileHandle)-1;
     return r;
 }
 
 FSError Read(FSAClientHandle c, void *to, uint32_t size, uint32_t count, FSAFileHandle file, FSAReadFlag flags) {
-    if ((uintptr_t)to & 0x3F) return FS_ERROR_INVALID_ALIGNMENT;
+    const FSError valid = CheckBuffer(to, size, count);
+    if (valid != FS_ERROR_OK) return valid;
+    if (!size || !count) return FS_ERROR_OK;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.readFile.buffer = (uint8_t *)to;
@@ -32,7 +39,9 @@ FSError Read(FSAClientHandle c, void *to, uint32_t size, uint32_t count, FSAFile
 }
 
 FSError Write(FSAClientHandle c, const void *from, uint32_t size, uint32_t count, FSAFileHandle file, FSAWriteFlag flags) {
-    if ((uintptr_t)from & 0x3F) return FS_ERROR_INVALID_ALIGNMENT;
+    const FSError valid = CheckBuffer(from, size, count);
+    if (valid != FS_ERROR_OK) return valid;
+    if (!size || !count) return FS_ERROR_OK;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.writeFile.buffer = (const uint8_t *)from;
@@ -59,6 +68,7 @@ FSError Seek(FSAClientHandle c, FSAFileHandle file, FSAFilePosition pos) {
 }
 
 FSError StatFile(FSAClientHandle c, FSAFileHandle file, FSAStat *out) {
+    if (!out) return FS_ERROR_INVALID_BUFFER;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     s.request.statFile.handle = file;
@@ -68,9 +78,11 @@ FSError StatFile(FSAClientHandle c, FSAFileHandle file, FSAStat *out) {
 }
 
 FSError Stat(FSAClientHandle c, const char *path, FSAStat *out) {
+    if (!out) return FS_ERROR_INVALID_BUFFER;
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
-    wiiu::fsa::PutPath(s.request.getInfoByQuery.path, path);
+    const FSError pathResult = PutPath(s.request.getInfoByQuery.path, path);
+    if (pathResult != FS_ERROR_OK) return pathResult;
     s.request.getInfoByQuery.type = FSA_QUERY_INFO_STAT;
     const FSError r = wiiu::fsa::Ask(c, FSA_COMMAND_GET_INFO_BY_QUERY, s);
     if (r == FS_ERROR_OK) memcpy((void *)out, (const void *)&s.response.getInfoByQuery.stat, sizeof *out);
