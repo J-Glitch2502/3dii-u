@@ -106,6 +106,12 @@ void wakeup(Dsp &d) {
 
 StereoFrame generate_frame(Dsp &d) {
     const int ri = read_region_index();
+    if (g_verbose >= 3) {  // which region the game submitted, and both frame counters, when that changes
+        static u32 last = ~0u;
+        const u32 now = (u32)ri << 31 | (u32)frame_counter(0) << 16 | frame_counter(1);
+        if (now != last) rt_log("[dsp] frame %u: reading region %d, counters %u %u\n", (unsigned)d.frames, ri, frame_counter(0), frame_counter(1));
+        last = now;
+    }
     SharedMemory &rd = region(ri);
     SharedMemory &wr = region(ri ^ 1);
 
