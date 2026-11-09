@@ -37,4 +37,28 @@ FSError Transfer(FSAClientHandle c, FSACommand command, void *data, uint32_t byt
     return (FSError)r;
 }
 
+FSError ReadAt(FSAClientHandle client, FSAFileHandle file, FSAShimBuffer &shim, void *data, uint32_t bytes, uint32_t position) {
+    memset(&shim.request, 0, sizeof shim.request);
+    shim.request.readFile.buffer = (uint8_t *)data;
+    shim.request.readFile.size = 1;
+    shim.request.readFile.count = bytes;
+    shim.request.readFile.pos = position;
+    shim.request.readFile.handle = file;
+    shim.request.readFile.readFlags = FSA_READ_FLAG_READ_WITH_POS;
+    IOSVec *v = shim.ioctlvVec;
+    v[0].vaddr = &shim.request;
+    v[0].len = sizeof(FSARequest);
+    v[1].vaddr = data;
+    v[1].len = bytes;
+    v[2].vaddr = &shim.response;
+    v[2].len = sizeof(FSAResponse);
+    DCFlushRange(&shim.request, sizeof(FSARequest));
+    DCFlushRange(v, 3 * sizeof(IOSVec));
+    DCInvalidateRange(data, bytes);
+    DCInvalidateRange(&shim.response, sizeof(FSAResponse));
+    const int got = IOS_Ioctlv(client, FSA_COMMAND_READ_FILE, 1, 2, v);
+    DCInvalidateRange(data, bytes);
+    return (FSError)got;
+}
+
 } // namespace wiiu::fsa
