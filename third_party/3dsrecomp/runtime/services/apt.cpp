@@ -308,7 +308,8 @@ struct AptService : Service {
         case 0x001F: {  // StartSystemApplet(id, size, handle, buffer): absent, see system_applet_receive
             u32 id = ipc[1], size = ipc[2], src = ipc[6];
             LOG("[apt] Start%sApplet %x size %x\n", ipc.cmd() == 0x1F ? "System" : "Library", id, size);
-            std::vector<u8> buf(gptr(src), gptr(src) + size);
+            std::vector<u8> buf(size);
+            GuestCopyFrom(buf.data(), src, size);
             if (ipc.cmd() != 0x1F) applet_run(id, buf, get_object(ipc[4]));
             ipc.ok();
             break;
@@ -332,7 +333,7 @@ struct AptService : Service {
             ipc.set(4, n);
             ipc.handles(5, {p.object}, true);
             u32 dst = ipc.static_buffer(0);
-            if (n) memcpy(gptr(dst), p.buffer.data(), n);
+            if (n) GuestCopyTo(dst, p.buffer.data(), n);
             ipc.static_desc(7, 0, n);
             break;
         }
@@ -359,7 +360,7 @@ struct AptService : Service {
         case 0x004B: {  // AppletUtility(cmd, in_size, out_size, in static buffer)
             u32 out_size = ipc[3];
             u32 dst = ipc.static_buffer(0);
-            if (out_size) memset(gptr(dst), 0, out_size);
+            if (out_size) GuestFill(dst, 0, out_size);
             if (ipc[1] == 6 && out_size) w8(dst, 1);  // TryLockTransition: allowed
             ipc.ok(2, 2);
             ipc.set(2, 0);
@@ -377,7 +378,7 @@ struct AptService : Service {
         case 0x004D: {  // GetStartupArgument(size, type)
             u32 size = ipc[1];
             u32 dst = ipc.static_buffer(0);
-            if (size) memset(gptr(dst), 0, std::min<u32>(size, 0x1000));
+            if (size) GuestFill(dst, 0, std::min<u32>(size, 0x1000));
             ipc.ok(2, 2);
             ipc.set(2, 0);
             ipc.static_desc(3, 0, std::min<u32>(size, 0x1000));

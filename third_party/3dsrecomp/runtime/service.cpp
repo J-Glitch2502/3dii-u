@@ -87,7 +87,7 @@ struct Srv : Service {
             break;
         case 0x0005: {  // GetServiceHandle(name[8], len, flags)
             char nm[9] = {};
-            memcpy(nm, gptr(ipc.buf + 4), 8);
+            GuestCopyFrom(nm, ipc.buf + 4, 8);
             u32 len = std::min<u32>(ipc[3], 8);
             std::string name(nm, len);
             auto svc = find_service(name);

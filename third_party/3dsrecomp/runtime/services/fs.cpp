@@ -148,7 +148,7 @@ struct LowPath {
 static LowPath read_path(u32 type, u32 size, u32 ptr) {
     LowPath p;
     p.type = type;
-    if (size && ptr) p.data.assign(gptr(ptr), gptr(ptr) + size);
+    if (size && ptr) { p.data.resize(size); GuestCopyFrom(p.data.data(), ptr, size); }
     return p;
 }
 
@@ -468,6 +468,12 @@ struct FileSession : Service {
             u64 off = (u64)ipc[1] | ((u64)ipc[2] << 32);
             u32 len = ipc[3];
             u32 dst = ipc[5];
+            std::vector<u8> mappedRead;
+            void *readTarget = gptr(dst);
+            if (len && !GuestMemoryRangeContiguous(dst, len)) {
+                mappedRead.resize(len);
+                readTarget = mappedRead.data();
+            }
             s64 n;
             // Storage can take a long time to answer, and VBlanks and timers need the kernel lock meanwhile. Only the running thread gets here, and it
             // keeps the CPU until it next enters the kernel, so nothing else in the guest can run into this file.
@@ -477,27 +483,29 @@ struct FileSession : Service {
                 log_romfs_read(base + off);
                 if (off >= size) n = 0;
 #ifdef __WIIU__
-                else if (wiiu::direct_read(gptr(dst), (u32)std::min<u64>(len, size - off), base + off)) n = (s64)std::min<u64>(len, size - off);
+                else if (wiiu::direct_read(readTarget, (u32)std::min<u64>(len, size - off), base + off)) n = (s64)std::min<u64>(len, size - off);
 #endif
-                else n = pread(romfs_fd, gptr(dst), (size_t)std::min<u64>(len, size - off), (off_t)(base + off));
+                else n = pread(romfs_fd, readTarget, (size_t)std::min<u64>(len, size - off), (off_t)(base + off));
                 for (auto &x : romfs_extra)
                     if (base + off >= x.off && base + off < x.off + x.size)
-                        n = pread(x.fd, gptr(dst), (size_t)std::min<u64>(len, x.off + x.size - base - off),
+                        n = pread(x.fd, readTarget, (size_t)std::min<u64>(len, x.off + x.size - base - off),
                                   (off_t)(base + off - x.off));
+                if (n > 0 && !mappedRead.empty()) GuestCopyTo(dst, mappedRead.data(), std::min<size_t>((size_t)n, mappedRead.size()));
                 for (auto &p : romfs_patches)
                     for (u32 i = 0; i < 16; i++)
                         if (p.at + i >= base + off && p.at + i < base + off + (u64)std::max<s64>(n, 0))
                             w8(dst + (u32)(p.at + i - base - off), p.bytes[i]);
             } else {
 #ifdef __WIIU__
-                if (held) n = wiiu::save_file_read(*held, gptr(dst), len, off);
+                if (held) n = wiiu::save_file_read(*held, readTarget, len, off);
                 else
 #endif
                 {
                     FsIo io(gamedata ? 0x0802 : 0x1802);
-                    n = pread(fd, gptr(dst), len, (off_t)off);
+                    n = pread(fd, readTarget, len, (off_t)off);
                 }
             }
+            if (n > 0 && !mappedRead.empty() && !romfs) GuestCopyTo(dst, mappedRead.data(), std::min<size_t>((size_t)n, mappedRead.size()));
             ipc.lk->lock();
             if (n < 0) n = 0;
             if (g_verbose >= 2) LOG("[fs] read %s off %llx len %x -> %lld\n", romfs ? "romfs" : path.c_str(), (unsigned long long)off, len, (long long)n);
@@ -512,17 +520,24 @@ struct FileSession : Service {
             u64 off = (u64)ipc[1] | ((u64)ipc[2] << 32);
             u32 len = ipc[3];
             u32 src = ipc[6];
+            std::vector<u8> mappedWrite;
+            const void *writeSource = gptr(src);
+            if (len && !GuestMemoryRangeContiguous(src, len)) {
+                mappedWrite.resize(len);
+                GuestCopyFrom(mappedWrite.data(), src, len);
+                writeSource = mappedWrite.data();
+            }
             ipc.lk->unlock();  // as for a read
             FS_NOTE("save: writing %x bytes to %s", len, path.c_str());
             save_lock();
             s64 n;
 #ifdef __WIIU__
-            if (held) n = wiiu::save_file_write(*held, gptr(src), len, off);
+            if (held) n = wiiu::save_file_write(*held, writeSource, len, off);
             else
 #endif
             {
                 FsIo io(0x0803);
-                n = romfs ? 0 : save_write(fd, gptr(src), len, off);
+                n = romfs ? 0 : save_write(fd, writeSource, len, off);
             }
             save_unlock();
             FS_NOTE("save: written, %d", (int)n);
@@ -598,7 +613,7 @@ struct DirSession : Service {
             while (n < count && pos < entries.size()) {
                 auto &e = entries[pos++];
                 u32 a = dst + n * 0x228;
-                memset(gptr(a), 0, 0x228);
+                GuestFill(a, 0, 0x228);
                 std::string name = e.path().filename().string();
                 for (size_t i = 0; i < name.size() && i < 0x105; i++) w16(a + 2 * (u32)i, (u8)name[i]);
                 std::string stem = e.path().stem().string(), ext = e.path().extension().string();
@@ -1011,7 +1026,7 @@ struct FsUser : Service {
             break;
         case 0x082E:  // GetProductInfo(process id)
             ipc.ok(6);
-            memset(gptr(ipc.buf + 8), 0, 16);
+            GuestFill(ipc.buf + 8, 0, 16);
             break;
         case 0x082F:  // GetProgramLaunchInfo
             ipc.ok(5);

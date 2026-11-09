@@ -18,7 +18,7 @@ GameInfo g_game;
 
 static void init_config_mem() {
     u32 c = mem::CONFIG_MEM;
-    memset(gptr(c), 0, 0x1000);
+    GuestFill(c, 0, 0x1000);
     w8(c + 0x01, 0);       // kernel version revision
     w8(c + 0x02, 0x34);    // kernel version minor
     w8(c + 0x03, 0x02);    // kernel version major
@@ -64,16 +64,16 @@ void update_shared_page_time() {
 
 static void init_shared_page() {
     u32 sp = mem::SHARED_PAGE;
-    memset(gptr(sp), 0, 0x1000);
+    GuestFill(sp, 0, 0x1000);
     w8(sp + 0x04, 1);  // running hw: product
     w8(sp + 0x05, 0);  // mcu hw info
     update_shared_page_time();
     u8 mac[6] = {0x40, 0xF4, 0x07, 0x12, 0x34, 0x56};
-    memcpy(gptr(sp + 0x60), mac, 6);
+    GuestCopyTo(sp + 0x60, mac, 6);
     w8(sp + 0x66, 0);   // wifi link level
     w8(sp + 0x67, 7);   // network state: not connected
     float slider = 0.0f;
-    memcpy(gptr(sp + 0x80), &slider, 4);
+    GuestCopyTo(sp + 0x80, &slider, 4);
     w8(sp + 0x84, 0);
     w8(sp + 0x85, 0x1E);  // battery: charging, full, adapter
     w64(sp + 0xA0, 0x0004003000008F02ull);  // home menu
@@ -154,12 +154,12 @@ void load_game(const std::string &dir) {
     auto copy = [&](u32 addr, u32 size) {
         u32 off = addr - base;
         if (off + size > code.size()) size = (u32)code.size() - off;
-        memcpy(gptr(addr), &code[off], size);
+        GuestCopyTo(addr, &code[off], size);
     };
     copy(g_game.text_addr, g_game.text_size);
     copy(g_game.ro_addr, g_game.ro_size);
     copy(g_game.data_addr, g_game.data_size);
-    memset(gptr(g_game.data_addr + g_game.data_size), 0, g_game.bss_size);
+    GuestFill(g_game.data_addr + g_game.data_size, 0, g_game.bss_size);
     init_config_mem();
     init_shared_page();
     LOG("[loader] %s (%016llx): text %08x+%x ro %08x+%x data %08x+%x bss %x stack %x prio %d\n", g_game.title.c_str(),

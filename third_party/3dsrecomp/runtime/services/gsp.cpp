@@ -349,7 +349,7 @@ struct GspGpu : Service {
         case 0x0004: {  // ReadHWRegs(reg, size) -> static buffer 0
             u32 size = ipc[2];
             u32 dst = ipc.static_buffer(0);
-            memset(gptr(dst), 0, size);
+            GuestFill(dst, 0, size);
             ipc.ok(1, 2);
             ipc.static_desc(2, 0, size);
             break;

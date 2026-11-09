@@ -100,7 +100,7 @@ struct Ptm : Service {
             break;
         case 0x000B: {  // GetStepHistory(hours, start time u64, mapped buffer)
             u32 n = ipc[1];
-            memset(gptr(ipc[5]), 0, n * 2);
+            GuestFill(ipc[5], 0, n * 2);
             ipc.ok(1, 2);
             ipc.set(2, ((n * 2) << 4) | 0xC);
             ipc.set(3, ipc[5]);
@@ -129,7 +129,7 @@ struct Ac : Service {
         switch (ipc.cmd()) {
         case 0x0001: {  // CreateDefaultConfig -> static buffer 0x200
             u32 dst = ipc.static_buffer(0);
-            memset(gptr(dst), 0, 0x200);
+            GuestFill(dst, 0, 0x200);
             ipc.ok(1, 2);
             ipc.static_desc(2, 0, 0x200);
             break;
@@ -186,7 +186,7 @@ struct Frd : Service {
             break;
         case 0x0008: {  // GetMyPresence -> static buffer
             u32 dst = ipc.static_buffer(0);
-            memset(gptr(dst), 0, 0x12C);
+            GuestFill(dst, 0, 0x12C);
             ipc.ok(1, 2);
             ipc.static_desc(2, 0, 0x12C);
             break;
@@ -194,14 +194,14 @@ struct Frd : Service {
         case 0x0009: {  // GetMyScreenName: the player's Mii's name
             const auto mii = player_mii();
             ipc.ok(7);
-            memset(gptr(ipc.buf + 8), 0, 24);
+            GuestFill(ipc.buf + 8, 0, 24);
             for (u32 i = 0; i < 10; i++) w16(ipc.buf + 8 + 2 * i, (u16)(mii[0x1A + 2 * i] | mii[0x1B + 2 * i] << 8));
             break;
         }
         case 0x000A: {  // GetMyMii: the player's Mii, 0x60 bytes with its checksum
             const auto mii = player_mii();
             ipc.ok(0x19);
-            memcpy(gptr(ipc.buf + 8), mii.data(), 0x60);
+            GuestCopyTo(ipc.buf + 8, mii.data(), 0x60);
             break;
         }
         case 0x000B:  // GetMyLocalAccountId
@@ -555,7 +555,7 @@ struct Am : Service {
     }
     static u32 put(const std::vector<u8> &r, u32 start, u32 count, u32 dst) {
         u32 n = 0;
-        for (size_t i = start; i < r.size() / 0x18 && n < count; i++, n++) memcpy(gptr(dst + n * 0x18), &r[i * 0x18], 0x18);
+        for (size_t i = start; i < r.size() / 0x18 && n < count; i++, n++) GuestCopyTo(dst + n * 0x18, &r[i * 0x18], 0x18);
         return n;
     }
     // Nothing installed answers "not found", and a count of none: "success" with nothing written would leave the request's own words where the
@@ -582,7 +582,7 @@ struct Am : Service {
             const u32 count = ipc[4], ids = ipc[6], dst = ipc[8];
             for (u32 i = 0; i < count; i++)
                 for (size_t k = 0; k < r.size() / 0x18; k++)
-                    if ((r[k * 0x18] | r[k * 0x18 + 1] << 8) == r16(ids + 2 * i)) memcpy(gptr(dst + i * 0x18), &r[k * 0x18], 0x18);
+                    if ((r[k * 0x18] | r[k * 0x18 + 1] << 8) == r16(ids + 2 * i)) GuestCopyTo(dst + i * 0x18, &r[k * 0x18], 0x18);
             ipc.ok(1, 4);
             ipc.set(2, ipc[5]);
             ipc.set(3, ids);
@@ -610,7 +610,7 @@ struct Am : Service {
             u32 res = r.empty() ? not_found : 0;
             for (u32 i = 0; i < count && !res; i++) {
                 const u64 tid = (u64)r32(ids + 8 * i) | (u64)r32(ids + 8 * i + 4) << 32;
-                if (tid_of(r) == tid) memcpy(gptr(dst + i * 0x18), r.data(), 0x18);
+                if (tid_of(r) == tid) GuestCopyTo(dst + i * 0x18, r.data(), 0x18);
                 else res = not_found;
             }
             if (res) {
@@ -723,7 +723,7 @@ static std::vector<u8> lz11(const std::vector<u8> &d) {
 static void relocate_shared_font(u32 addr) {
     u32 cfnt = addr + 0x80;
     if (memcmp(gptr(cfnt), "CFNT", 4) && memcmp(gptr(cfnt), "CFNU", 4)) return;
-    memcpy(gptr(cfnt), "CFNU", 4);
+    GuestCopyTo(cfnt, "CFNU", 4);
     u32 nblocks = r32(cfnt + 0x10), first = cfnt + r16(cfnt + 6);
     u32 cmap = 0, cmap_ptr = 0, at = first;
     for (u32 i = 0; i < nblocks; i++, at += r32(at + 4)) {
@@ -758,8 +758,8 @@ std::shared_ptr<SharedMem> load_shared_font() {
         LOG("[apt] shared font: no linear memory left\n");
         return nullptr;
     }
-    memset(gptr(sm->backing), 0, size);
-    memcpy(gptr(sm->backing + 0x80), font.data(), font.size());
+    GuestFill(sm->backing, 0, size);
+    GuestCopyTo(sm->backing + 0x80, font.data(), font.size());
     w32(sm->backing, 2);  // loaded
     w32(sm->backing + 4, 1);
     w32(sm->backing + 8, (u32)font.size());

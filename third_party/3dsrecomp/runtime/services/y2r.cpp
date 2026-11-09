@@ -28,7 +28,7 @@ struct DmaReader {
             }
             const u32 run = std::min(n - got, left / step);
             if (step == 1) {
-                memcpy(out + got, gptr(at), run);
+                GuestCopyFrom(out + got, at, run);
             } else {
                 for (u32 i = 0; i < run; i++) out[got + i] = *gptr(at + i * step);
             }
@@ -47,7 +47,7 @@ struct DmaWriter {
     u32 at, left, unit, gap;
     explicit DmaWriter(const Dma &d) : at(d.addr), left(d.unit), unit(d.unit), gap(d.gap) {}
     void put(const u8 *p, u32 n) {
-        memcpy(gptr(at), p, n);
+        GuestCopyTo(at, p, n);
         at += n;
         if (!unit) return;
         left -= std::min(left, n);

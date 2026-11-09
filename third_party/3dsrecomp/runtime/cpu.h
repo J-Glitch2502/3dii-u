@@ -77,12 +77,66 @@ typedef u16 __attribute__((aligned(1), may_alias)) u16_u;
 typedef u32 __attribute__((aligned(1), may_alias)) u32_u;
 typedef u64 __attribute__((aligned(1), may_alias)) u64_u;
 
-#define RD8(a) (*(u8 *)GuestMemoryPointer((u32)(a)))
-#define RD16(a) (*(u16_u *)GuestMemoryPointer((u32)(a)))
-#define RD32(a) (*(u32_u *)GuestMemoryPointer((u32)(a)))
-#define WR8(a, v) (*(u8 *)GuestMemoryPointer((u32)(a)) = (u8)(v))
-#define WR16(a, v) (*(u16_u *)GuestMemoryPointer((u32)(a)) = (u16)(v))
-#define WR32(a, v) (*(u32_u *)GuestMemoryPointer((u32)(a)) = (u32)(v))
+u16 GuestReadCross16(u32 address);
+u32 GuestReadCross32(u32 address);
+u64 GuestReadCross64(u32 address);
+u16 GuestWriteCross16(u32 address, u16 value);
+u32 GuestWriteCross32(u32 address, u32 value);
+void GuestWriteCross64(u32 address, u64 value);
+bool GuestMemoryRangeCheck(u32 address, size_t size);
+void GuestCopyFrom(void *destination, u32 source, size_t size);
+void GuestCopyTo(u32 destination, const void *source, size_t size);
+void GuestFill(u32 destination, u8 value, size_t size);
+
+static inline bool GuestMemoryRangeContiguous(u32 address, size_t size) {
+    if (!size) return true;
+    if ((u64)address + size > 0x20010000ull) return false;
+    if ((u64)address + size <= GUEST_ALIAS_BASE || address >= GUEST_ALIAS_LIMIT) return true;
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) + size <= GUEST_ALIAS_PAGE_SIZE) return true;
+    return GuestMemoryRangeCheck(address, size);
+}
+
+static inline bool GuestMemoryContiguous(u32 address, u32 size) {
+    if (!size || size > GUEST_ALIAS_PAGE_SIZE) return false;
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) + size <= GUEST_ALIAS_PAGE_SIZE) return true;
+    if ((u64)address + size > UINT32_MAX) return false;
+    return GuestMemoryPointer(address) + size - 1 == GuestMemoryPointer(address + size - 1);
+}
+
+static inline u16 GuestRead16(u32 address) {
+    if (address < GUEST_ALIAS_BASE - 1 || address >= GUEST_ALIAS_LIMIT) return *(u16_u *)(g_mem + address);
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) <= GUEST_ALIAS_PAGE_SIZE - 2)
+        return *(u16_u *)GuestMemoryPointer(address);
+    return GuestReadCross16(address);
+}
+
+static inline u32 GuestRead32(u32 address) {
+    if (address < GUEST_ALIAS_BASE - 3 || address >= GUEST_ALIAS_LIMIT) return *(u32_u *)(g_mem + address);
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) <= GUEST_ALIAS_PAGE_SIZE - 4)
+        return *(u32_u *)GuestMemoryPointer(address);
+    return GuestReadCross32(address);
+}
+
+static inline u16 GuestWrite16(u32 address, u16 value) {
+    if (address < GUEST_ALIAS_BASE - 1 || address >= GUEST_ALIAS_LIMIT) return *(u16_u *)(g_mem + address) = value;
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) <= GUEST_ALIAS_PAGE_SIZE - 2)
+        return *(u16_u *)GuestMemoryPointer(address) = value;
+    return GuestWriteCross16(address, value);
+}
+
+static inline u32 GuestWrite32(u32 address, u32 value) {
+    if (address < GUEST_ALIAS_BASE - 3 || address >= GUEST_ALIAS_LIMIT) return *(u32_u *)(g_mem + address) = value;
+    if ((address & (GUEST_ALIAS_PAGE_SIZE - 1)) <= GUEST_ALIAS_PAGE_SIZE - 4)
+        return *(u32_u *)GuestMemoryPointer(address) = value;
+    return GuestWriteCross32(address, value);
+}
+
+#define RD8(a) (*GuestMemoryPointer((u32)(a)))
+#define RD16(a) GuestRead16((u32)(a))
+#define RD32(a) GuestRead32((u32)(a))
+#define WR8(a, v) (*GuestMemoryPointer((u32)(a)) = (u8)(v))
+#define WR16(a, v) GuestWrite16((u32)(a), (u16)(v))
+#define WR32(a, v) GuestWrite32((u32)(a), (u32)(v))
 
 void rt_dispatch(CPU *c, u32 unused);
 void rt_svc(CPU *c, u32 imm);

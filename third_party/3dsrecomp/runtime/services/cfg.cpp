@@ -31,7 +31,7 @@ static Country cfg_country() {
 }
 
 static void fill_block(u32 id, u32 dst, u32 size) {
-    memset(gptr(dst), 0, size);
+    GuestFill(dst, 0, size);
     auto put_utf16 = [&](u32 at, const char *s, u32 max) {
         for (u32 i = 0; s[i] && i < max; i++) w16(at + 2 * i, (u8)s[i]);
     };

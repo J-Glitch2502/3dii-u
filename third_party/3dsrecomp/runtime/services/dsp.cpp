@@ -77,7 +77,7 @@ struct Dsp : Service {
                  data.size() >= 4 ? (" first " + std::to_string(data[0] | (data[1] << 8)) + "," + std::to_string(data[2] | (data[3] << 8))).c_str() : "");
             u32 bsz = 0;
             u32 dst = ipc.static_buffer(0, &bsz);
-            if (!data.empty()) memcpy(gptr(dst), data.data(), data.size());
+            if (!data.empty()) GuestCopyTo(dst, data.data(), data.size());
             if (ipc.cmd() == 0x0010) {
                 ipc.ok(2, 2);
                 ipc.set(2, (u32)data.size());
