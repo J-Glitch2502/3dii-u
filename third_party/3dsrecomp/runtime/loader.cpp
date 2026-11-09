@@ -76,6 +76,7 @@ static void init_shared_page() {
     memcpy(gptr(sp + 0x80), &slider, 4);
     w8(sp + 0x84, 0);
     w8(sp + 0x85, 0x1E);  // battery: charging, full, adapter
+    w8(sp + 0x86, 1);     // bit 0: set on a real 3DS; Luigi's Mansion: Dark Moon sleeps at startup until it is
     w64(sp + 0xA0, 0x0004003000008F02ull);  // home menu
 }
 
