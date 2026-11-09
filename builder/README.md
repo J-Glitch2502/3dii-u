@@ -60,7 +60,7 @@ Mods made for Luma3DS on a 3DS work as they come: a `.zip` or a folder with `lum
 
 ## What it needs on the PC
 
-Windows 10 or 11 for now (Linux is planned):
+Windows 10 or 11 for the standalone release. Linux can build from source (see below):
 - **The standalone app needs nothing else.**
   - It carries its own Python, Qt, pyctr and makerom.
   - Its `engine` folder holds the rest: the recompiler, the runtime's sources, devkitPro's PowerPC toolchain with wut, the CafeGLSL shader compiler, and a ready-built shader generator.
@@ -72,6 +72,24 @@ Windows 10 or 11 for now (Linux is planned):
   - LLVM, in `C:\Program Files\LLVM`.
   - MSYS2's `mingw-w64-x86_64-gcc`, in `C:\msys64`.
   - The CafeGLSL shader compiler, from `tools/win/build_cafeglsl.ps1`.
+
+## Linux (from source)
+
+The Qt desktop builder and Wii U build pipeline work natively on Linux without Wine or WSL. Linux standalone packages are not provided yet; `builder/make_app.py` still packages the Windows release.
+
+Install Python 3.10+, `PySide6-Essentials`, `pyctr`, `pycryptodome`, `cryptography`, a C++ compiler such as Clang, and devkitPro's devkitPPC, wut and `elf2rpl`. On Linux the SDK is normally at `/opt/devkitpro` (override with `THREEDII_DEVKITPRO` or `DEVKITPRO`). Encrypted CIA conversion also needs a native `makerom` in `PATH` or `builder/bin/makerom`. The keys are your own `~/.3ds/boot9.bin` and optional `seeddb.bin`.
+
+You also need CafeGLSL v0.2.0's **Linux** `glslcompiler.elf` for offline shader compilation. Build it using `tools/linux/build_cafeglsl.sh`, or set `THREEDII_GLSLC` to an existing native binary. To link the Wii U title, install CafeGLSL v1.0.0-rc1's Wii U PowerPC library with its headers under `third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc`, or set `THREEDII_CAFEGLSL_PPC`. Titles needing the AAC decoder also require Wii U `libavcodec.a` and `libavutil.a` in `toolchain/aac_ppc` (see `tools/aac_build.sh`). These binary dependencies aren't in the source repository. The project release's `deps-1` dependency archive contains the Wii U static libraries, which are architecture-independent archives of PowerPC objects and can be extracted on Linux as well; use a native Linux shader compiler instead of the included Windows `.exe`.
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install PySide6-Essentials pyctr pycryptodome cryptography
+python tools/build3ds.py doctor
+python builder/app.py
+```
+
+For a terminal build, use `python builder/pipeline.py --game /path/to/game.3ds --otp /path/to/otp.bin --out /path/to/output`. Or build a previously extracted game with `python tools/build3ds.py all <game>`. The Linux builder caches objects in `build_linux/` or `build_linux_builder/` and never reuses Windows objects. Native Linux **host trials** (`trial` and `lazy`) are not supported by this builder yet, but generating Wii U RPX/shaders/title/WUPs is.
 
 ## How it works
 

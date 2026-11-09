@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gets a Windows PC ready to build 3Dii U: python tools/setup.py [--check]
+"""Checks 3Dii U builder dependencies on Windows and Linux: python tools/setup.py [--check]
 
 Checks every tool the build needs, installs what it can, and says how to get the rest. Run it again after installing
 anything: it skips what's already there. --check only reports, and changes nothing.
@@ -115,13 +115,44 @@ def pack():
           f'  gh release create {DEPS_TAG} "{out}" --title "Build dependencies" --notes "Unpacked by tools/setup.py"')
 
 
+def linux_setup(check):
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'win'))
+    import build3ds
+
+    found = []
+    if not shutil.which('clang++') and not shutil.which('g++'):
+        found.append('C++ compiler: install clang++ or g++')
+    if not pip_missing():
+        print('ok       Python packages')
+    else:
+        found.append('Python packages: ' + ' '.join(pip_missing()))
+        print('MISSING  Python packages: ' + ' '.join(pip_missing()))
+    missing = build3ds.missing_tools(code=True, shaders=True)
+    for item in missing:
+        print('MISSING  ' + item)
+        found.append(item)
+    makerom = os.path.join(ROOT, 'builder', 'bin', 'makerom')
+    if not (shutil.which('makerom') or os.path.isfile(makerom)):
+        print('OPTIONAL native makerom missing: encrypted base-game CIA conversion needs it')
+    if not (os.path.isfile(ROOT + '/toolchain/aac_ppc/lib/libavcodec.a') and
+            os.path.isfile(ROOT + '/toolchain/aac_ppc/lib/libavutil.a')):
+        print('OPTIONAL AAC decoder libraries missing: untested and AAC-using games need them')
+    if found:
+        print('\nInstall dependencies listed in builder/README.md. Use tools/linux/build_cafeglsl.sh for the native shader compiler.')
+        return 1
+    print('\nLinux build tools ready. Run python builder/app.py or python builder/pipeline.py --help.')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--check', action='store_true', help='only report, change nothing')
     ap.add_argument('--pack', action='store_true', help='maintainers: write the dependencies zip from this PC')
     a = ap.parse_args()
     if os.name != 'nt':
-        sys.exit('The build runs on Windows only for now.')
+        if a.pack:
+            sys.exit('--pack produces the Windows dependency archive. Use Windows for release packaging.')
+        return linux_setup(a.check)
     if sys.version_info < (3, 10):
         sys.exit('Python 3.10 or newer is needed: https://www.python.org/')
     if a.pack:

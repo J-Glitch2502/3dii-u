@@ -27,8 +27,8 @@ never in the code.
 
 ## Setting up
 
-This repository is private. To get access, ask the maintainer for an invite. You need Windows 10 or 11 and
-[Python](https://www.python.org/) 3.10 or newer. Then:
+This repository is private. To get access, ask the maintainer for an invite. For the standalone app you need Windows 10 or 11. Linux source builds are supported too (see
+[builder/README.md](builder/README.md)). On Windows, install [Python](https://www.python.org/) 3.10 or newer, then:
 
 1. Install the GitHub CLI and sign in: `winget install GitHub.cli`, then `gh auth login`.
 2. Get the code: `gh repo clone josiahg2502-glitch/3dii-u`
@@ -42,7 +42,7 @@ The setup script checks every tool the build needs, and installs what it can:
 - a zip of prebuilt dependencies from this repository's releases
 
 MSYS2 and LLVM have their own installers, so for those it tells you what to install. Run it again afterwards.
-`--check` only reports.
+`--check` only reports. Linux setup and native builds are covered in [builder/README.md](builder/README.md).
 
 This is what ends up installed:
 

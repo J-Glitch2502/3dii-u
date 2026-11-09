@@ -8,7 +8,7 @@ cia_to_decrypted_3ds.py does it (decrypt.py). --emulator: an Azahar or Citra use
 has none yet. --otp: your Wii U's otp.bin, for the common key the WUP is packed with.
 Lines starting with @ are for the app: @stage <name>, @progress <0-100>, @done <where it went>, @error <why>.
 
-It builds with tools/win/build3ds.py, in folders of its own (builder_work/, build_win_builder/), so it never touches the nine ports' builds."""
+It builds with tools/win/build3ds.py, in folders of its own (builder_work/, build_win_builder/ on Windows or build_linux_builder/ on Linux), so it never touches the other ports' builds."""
 import argparse
 import filecmp
 import json
@@ -182,8 +182,8 @@ def main():
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) // 2))
     a = ap.parse_args()
-    if sys.platform != 'win32':
-        fail('Building on Linux isn\'t ready yet: this version builds on Windows.')
+    if sys.platform not in ('win32', 'linux'):
+        fail('This builder supports Windows and Linux.')
     if not (a.card or a.out):
         fail('Choose an SD card or a folder for the WUP.')
     if not os.path.isfile(a.otp) or os.path.getsize(a.otp) != 1024:
@@ -275,7 +275,7 @@ def main():
     b3 = importlib.util.module_from_spec(spec)
     sys.modules['build3ds'] = b3
     spec.loader.exec_module(b3)
-    b3.WORK = os.path.join(WORK, 'build_win_builder').replace('\\', '/')
+    b3.WORK = os.path.join(WORK, 'build_win_builder' if sys.platform == 'win32' else 'build_linux_builder').replace('\\', '/')
     prepare_logs = b3.prepare_logs
 
     def with_vertex_programs(g):  # the standalone app's logs name vertex programs by fingerprint: this dump's own dvlb.bin has their code
@@ -284,8 +284,9 @@ def main():
         if made or left:
             print(f'vertex records from earlier runs: {made}, and {left} whose program this dump hasn\'t', flush=True)
     b3.prepare_logs = with_vertex_programs
-    if not os.path.exists(b3.BIN + 'gcc.exe'):
-        fail('The build tools aren\'t installed: see builder/README.md.')
+    missing = b3.missing_tools(code=True, shaders=True, game=b3.Game(known['slug'] if known else info['slug']))
+    if missing:
+        fail('Build tools missing: ' + '; '.join(missing) + '. See builder/README.md.')
     g = b3.Game(known['slug'] if known else info['slug'])
     g.name = info['slug']
     g.dir = game_dir.replace('\\', '/')

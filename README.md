@@ -7,7 +7,7 @@ installs on a modded Wii U.
 It's not an emulator. The game's code runs natively, and a runtime stands in for the 3DS operating system, its services,
 its GPU and its DSP. The TV shows the top screen, and the GamePad shows the bottom screen and takes touch.
 
-**Status: beta, Windows only.** [`builder/compat.json`](builder/compat.json) lists the games that have been played on a
+**Status: beta. Windows standalone release; native Linux builds from source.** [`builder/compat.json`](builder/compat.json) lists the games that have been played on a
 real Wii U. Any other game builds as "untested": it may not start, or it may stop partway.
 
 **No game data is in this repository.** There's no game code, no assets, no keys and no generated C. Everything is built
@@ -28,7 +28,7 @@ the game and puts it on your SD card. Releases of the standalone app need no Pyt
 | `third_party/3dsrecomp/` | nathsou's 3DS recompiler and runtime (EUPL-1.2), with this project's changes |
 | `port/wiiu/` | The Wii U side: threads, GX2 graphics, shaders, audio, saves, input, the in-game menu |
 | `port/pc/` | A headless Windows build of the same runtime. It finds code the recompiler missed and logs the shaders a game uses |
-| `tools/` | The build (`tools/win/build3ds.py`), the title and WUP steps, the shader tools and developer tools |
+| `tools/` | The build (`tools/build3ds.py`), the title and WUP steps, the shader tools and developer tools |
 | `builder/` | 3Dii U Builder: the window, the build pipeline, dump reading, decryption and mods |
 | `phase0/` | The first feasibility benchmark. The WUP packer and the title templates still live here |
 

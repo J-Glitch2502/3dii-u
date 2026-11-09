@@ -10,7 +10,7 @@ spec.loader.exec_module(app)
 
 base = tempfile.mkdtemp()
 engine, work = os.path.join(base, 'engine'), os.path.join(base, 'work')
-cache = os.path.join(work, 'build_win_builder')
+cache = os.path.join(work, 'build_win_builder' if os.name == 'nt' else 'build_linux_builder')
 
 
 def compiled():

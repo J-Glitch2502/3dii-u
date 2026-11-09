@@ -431,8 +431,7 @@ class App(QObject):
         if not self.game or self._s['building']:
             return
         if not self._s['rootOk']:
-            self.tell('The build engine is missing', 'The engine folder next to 3Dii U Builder.exe holds the recompiler and its toolchain. Copy the '
-                                                     'whole 3Dii U Builder folder again, engine folder included.', 'error')
+            self.tell('The build engine is missing', 'The builder needs its engine sources. Check that you are running it from the source tree or that its engine folder is installed.', 'error')
             return
         if not otp_ok(self.st.get('otp', '')):
             self.tell('otp.bin is missing', 'Choose your Wii U\'s otp.bin: it should be exactly 1024 bytes.', 'warn')
