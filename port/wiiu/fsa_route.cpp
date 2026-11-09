@@ -1,7 +1,11 @@
 #include <cstring>
 
+#include <coreinit/thread.h>
+#include <coreinit/time.h>
+
 #include "fsa_operations.hpp"
 #include "fsa_route.hpp"
+#include "fsa_route_state.hpp"
 #include "fsa_transport.hpp"
 #include "rt.h"
 #include "wiiu.h"
@@ -17,47 +21,57 @@ FSError __real_FSARemove(FSAClientHandle, const char *);
 
 namespace wiiu::fsa {
 const char *const ProbeFile = "/vol/content/shaders.idx";
-enum { UNKNOWN, DIRECT, SYSTEM } route;
-const char *why = "not tried";
+RouteController Routing;
+std::atomic<OSThread *> ProbeOwner{nullptr};
 
-void Probe(FSAClientHandle c) {
-    route = SYSTEM;
+const char *Probe(FSAClientHandle c) {
     alignas(64) static u8 a[256], b[256];
     FSAFileHandle real = (FSAFileHandle)-1, mine = (FSAFileHandle)-1;
     if (__real_FSAOpenFileEx(c, ProbeFile, "r", (FSMode)0x660, FS_OPEN_FLAG_NONE, 0, &real) != FS_ERROR_OK) {
-        why = "the check file wouldn't open";
-        return;
+        return "the check file wouldn't open";
     }
-    if (wiiu::fsa::Open(c, ProbeFile, "r", (FSMode)0x660, FS_OPEN_FLAG_NONE, 0, &mine) != FS_ERROR_OK) {
-        why = "open failed";
-    } else {
+    const char *reason = "open failed";
+    if (wiiu::fsa::Open(c, ProbeFile, "r", (FSMode)0x660, FS_OPEN_FLAG_NONE, 0, &mine) == FS_ERROR_OK) {
         FSAStat st_real, st_mine;
         memset(a, 0, sizeof a);
         memset(b, 1, sizeof b);
         const FSError ra = __real_FSAReadFile(c, a, 1, sizeof a, real, FSA_READ_FLAG_NONE),
                       rb = wiiu::fsa::Read(c, b, 1, sizeof b, mine, FSA_READ_FLAG_NONE);
         if (ra <= 0 || ra != rb)
-            why = "read counts differ";
+            reason = "read counts differ";
         else if (memcmp(a, b, (size_t)ra))
-            why = "read data differs";
+            reason = "read data differs";
         else if (__real_FSAGetStatFile(c, real, &st_real) != FS_ERROR_OK || wiiu::fsa::StatFile(c, mine, &st_mine) != FS_ERROR_OK ||
                  st_real.size != st_mine.size)
-            why = "stat differs";
+            reason = "stat differs";
         else if (wiiu::fsa::Seek(c, mine, 64) != FS_ERROR_OK || wiiu::fsa::Read(c, b, 1, 64, mine, FSA_READ_FLAG_NONE) != 64 ||
                  memcmp(a + 64, b, 64))
-            why = "seek differs";
-        else {
-            route = DIRECT;
-            why = nullptr;
-        }
+            reason = "seek differs";
+        else
+            reason = nullptr;
         wiiu::fsa::Close(c, mine);
     }
     __real_FSACloseFile(c, real);
+    return reason;
 }
 
 bool UseDirect(FSAClientHandle c) {
-    if (route == UNKNOWN) Probe(c);
-    return route == DIRECT;
+    const RouteKind route = Routing.GetRoute();
+    if (route == RouteKind::Direct) return true;
+    if (route == RouteKind::System) return false;
+    if (route == RouteKind::Unknown && Routing.TryBeginProbe()) {
+        ProbeOwner.store(OSGetCurrentThread(), std::memory_order_release);
+        Routing.CompleteProbe(Probe(c));
+        ProbeOwner.store(nullptr, std::memory_order_release);
+    } else if (Routing.GetRoute() == RouteKind::Checking) {
+        if (ProbeOwner.load(std::memory_order_acquire) == OSGetCurrentThread()) {
+            Routing.CancelProbe("recursive route probe");
+            return false;
+        }
+        for (int i = 0; i < 1000 && Routing.GetRoute() == RouteKind::Checking; ++i) OSSleepTicks(OSMillisecondsToTicks(2));
+        if (Routing.GetRoute() == RouteKind::Checking) Routing.CancelProbe("route probe timed out");
+    }
+    return Routing.IsDirect();
 }
 
 } // namespace wiiu::fsa
@@ -95,20 +109,20 @@ void fsa_direct_check_writes() {
     if (!wrong && (removed != FS_ERROR_OK || __real_FSAGetStat(c, name, &st) == FS_ERROR_OK)) wrong = "removing failed";
     if (wrong) {
         __real_FSARemove(c, name);
-        fsa::route = fsa::SYSTEM;
-        fsa::why = wrong;
+        fsa::Routing.DisableDirect(wrong);
     }
 }
 
 void fsa_direct_report() {
-    if (fsa::route == fsa::DIRECT)
+    const fsa::RouteStatus status = fsa::Routing.GetStatus();
+    if (status.Route == fsa::RouteKind::Direct)
         LOG("[fs] every file call goes straight to the file system, past Aroma's hook\n");
     else
-        LOG("[fs] file calls go through the system's functions: %s\n", fsa::why);
+        LOG("[fs] file calls go through the system's functions: %s\n", status.Reason);
 }
 
 bool fsa_direct_flush_quota(const char *path) {
-    if (fsa::route != fsa::DIRECT) return false;
+    if (!fsa::Routing.IsDirect()) return false;
     static FSAClientHandle client = FSAAddClient(nullptr);
     if (client < 0) return false;
     alignas(64) FSAShimBuffer s;
