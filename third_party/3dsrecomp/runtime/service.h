@@ -38,6 +38,9 @@ struct IPC {
     void static_desc(int pos, int index, u32 size);
 };
 
+// the last system archive the game asked for that its build doesn't have (fs.cpp): err:f names it if the game then stops, as Miitopia did
+extern u64 g_missing_system_archive;
+
 struct Service : std::enable_shared_from_this<Service> {
     std::string name;
     explicit Service(std::string n) : name(std::move(n)) {}

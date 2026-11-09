@@ -709,7 +709,10 @@ struct FsUser : Service {
             a.dlc = (tid >> 32) == 0x0004008C;
             a.host = !a.dlc ? system_archive_path(tid) : fsys::exists(g_game.dir + "/dlc_contents.bin") ? g_game.dir + "/dlc_" : "";
             if (a.host.empty()) {
-                VLOG("[fs] system archive %016llx not available\n", (unsigned long long)tid);
+                if (!a.dlc && g_missing_system_archive != tid) {  // a game without DLC asking for it is normal
+                    LOG("[fs] system archive %016llx isn't in this build\n", (unsigned long long)tid);
+                    g_missing_system_archive = tid;
+                }
                 return ERR_NOT_FOUND;
             }
         } else {
@@ -729,6 +732,7 @@ struct FsUser : Service {
         *out = next_archive++;
         archives[*out] = a;
         VLOG("[fs] OpenArchive %x -> %llu (%s)\n", id, (unsigned long long)*out, a.host.c_str());
+        g_missing_system_archive = 0;  // the game went on past a missing one it only looked for (a regional font, say): err:f mustn't blame it
         return 0;
     }
 

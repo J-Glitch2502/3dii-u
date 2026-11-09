@@ -133,6 +133,8 @@ std::shared_ptr<Service> Srv::make_stub(const std::string &name) {
     return s;
 }
 
+u64 g_missing_system_archive;
+
 struct ErrF : Service {
     ErrF() : Service("err:f") {}
     void handle(IPC &ipc) override {
@@ -152,6 +154,14 @@ struct ErrF : Service {
                 snprintf(b, sizeof b, " %08x", v - 4);
                 calls += b;
                 n++;
+            }
+            // said first, as a console's screen shows only the start of the message; only for FS's "not found", the failure a missing archive gives
+            if (const u64 tid = g_missing_system_archive; tid && code == 0xC8804478u) {
+                // 14002 is the shared font, and 14102 to 14302 China's, Korea's and Taiwan's
+                const char *what = tid == 0x0004009B00010202ull ? "the Mii data" : (tid & ~0xF00ull) == 0x0004009B00014002ull ? "the shared font" : "a system file";
+                FATAL("This game needs %s from your 3DS (system archive %016llx), and its build doesn't have it. Build it again with your 3DS system "
+                      "files.\n[err:f] fatal error type %u result %08x pc %08x lr %08x, calls from%s\n", what, (unsigned long long)tid, type, code, pc,
+                      ipc[0x14 / 4], calls.c_str());
             }
             FATAL("[err:f] fatal error type %u result %08x pc %08x lr %08x, calls from%s\n", type, code, pc, ipc[0x14 / 4], calls.c_str());
         }

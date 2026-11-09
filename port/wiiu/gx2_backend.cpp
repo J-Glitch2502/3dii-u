@@ -2682,7 +2682,9 @@ static void upload_target(Surface &s) {
 // Each screen's last few framebuffers, as a game draws into the ones not shown. When a transfer lands on addresses of more than one screen, the one shown there
 // most recently wins: NSMB2's third top buffer, 18300000, is where its bottom screen was during start-up, so every third top picture went to the GamePad
 // (the user, 2026-11-08: "the bottom screen flashing in and out with the top showing on it briefly").
-static int screen_of(u32 paddr, u32 size, u32 &skip) {
+// The picture's height rules out the other LCD whatever the addresses say: the top's are 400 rows (NSMB2's 416), the bottom's 320. A Link Between Worlds' second
+// top buffer is 18300000 too, and its top kept flashing onto the GamePad on a console (2026-11-09).
+static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
     struct Seen {
         u32 pa, when;
     };
@@ -2702,13 +2704,16 @@ static int screen_of(u32 paddr, u32 size, u32 &skip) {
     }
     int found = -1;
     u32 best = 0;
-    for (int s = 0; s < 3; s++)
+    const bool bottom_rows = rows <= 320;
+    for (int s = 0; s < 3; s++) {
+        if ((s == 1) != bottom_rows) continue;  // only the screens of the picture's height
         for (const Seen &x : seen[s])
             if (x.pa && x.pa >= paddr && x.pa - paddr < size && x.when >= best) {  // a tie goes to the later screen, as before
                 found = s;
                 best = x.when;
                 skip = x.pa - paddr;
             }
+    }
     return found;
 }
 
@@ -2731,12 +2736,49 @@ static bool right_eye_transfer(int screen) {
     return false;
 }
 
+// A right eye drawn where no screen shows (the Laytons) is the first screen-sized picture after a left eye, transferred the way the left eye was. Copies in
+// between don't count (Azran's mipmaps); it may go to either of two buffers (both Laytons), and Miracle Mask sends every other one to the right LCD. Other
+// pictures come that way now and then: a top screen's next buffer before its LCD first shows it (Metroid: Samus Returns at start-up, which lost that picture
+// and the copies after it, its objects vanishing for a moment on a console, 2026-11-09). So it takes 60 of them, no more than two left eyes apart, and a
+// buffer an LCD shows ends it.
+struct HiddenRightEye {
+    enum Kind { OTHER, CANDIDATE, RIGHT_EYE, ON_A_SCREEN };
+    bool after_left = false;  // a left eye has gone, and no screen-sized picture since
+    u32 left_flags = 0, lefts_since = 0, runs = 0, dst[4] = {}, next = 0;
+
+    bool remembered(u32 pa) const { return std::find(std::begin(dst), std::end(dst), pa) != std::end(dst); }
+
+    // What a transfer is: a right eye to leave undrawn (the 60th of a run, or one whose pass was skipped already, as that drew nothing to show), one
+    // more of a run, or a remembered buffer an LCD shows after all, which ends the run
+    Kind see(int screen, bool top_sized, bool screen_sized, u32 flags, u32 pa, bool pass_skipped) {
+        Kind kind = OTHER;
+        if (after_left && top_sized && screen < 0 && flags == left_flags) {
+            runs = lefts_since <= 2 ? runs + 1 : 1;  // frames without a right eye in between start the count again
+            lefts_since = 0;
+            if (!remembered(pa)) dst[next++ % 4] = pa;
+            kind = runs >= 60 || pass_skipped ? RIGHT_EYE : CANDIDATE;
+        } else if (screen >= 0 && remembered(pa)) {
+            runs = 0;
+            std::fill(std::begin(dst), std::end(dst), 0u);
+            kind = ON_A_SCREEN;
+        }
+        if (screen == 0) {
+            lefts_since++;
+            left_flags = flags;
+        }
+        if (screen_sized) after_left = screen == 0;
+        return kind;
+    }
+};
+static HiddenRightEye hidden_right_eye;
+
 bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags, u32 out_size) {
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w = out_dims & 0xffff, out_h = out_dims >> 16;
     // the output size is given before the transfer's downscale (the flags' bits 24-25), so a 2x wide target has out_w 480 too
     const bool crop = flags & 4;
+    const u32 rows = out_h >> ((flags >> 24 & 3) == 2);  // the picture's height, after a 2x2 downscale
     u32 skip_bytes = 0;
-    const int known_screen = screen_of(out_paddr, out_size, skip_bytes);
+    const int known_screen = screen_of(out_paddr, out_size, rows, skip_bytes);
     if (gxt()) {
         const kernel::FramebufferInfo t = kernel::gsp_framebuffer(0), b = kernel::gsp_framebuffer(1);
         LOG("[gxt] transfer %08x -> %08x in %ux%u out %ux%u flags %08x screen %d (LCDs %08x %08x)\n", in_paddr, out_paddr, in_w, in_h, out_w, out_h, flags, known_screen,
@@ -2744,13 +2786,36 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     }
     const bool top_sized = in_w == 240 && in_h == 400 && out_w == 240 && out_h == 400;
     if (gx2_skip_copies && !top_sized && known_screen < 0) return true;  // the mipmaps of a right eye that wasn't drawn
-    const bool hidden_eye = left_done && top_sized && known_screen < 0;  // a top screen no LCD shows, right after a left eye
-    if (hidden_eye || known_screen == 2) right_eye_hidden = hidden_eye;
-    if (right_eye_transfer(hidden_eye ? 2 : known_screen)) return true;
+    const bool screen_sized = top_sized || known_screen >= 0 || rows == 320;
+    switch (hidden_right_eye.see(known_screen, top_sized, screen_sized, flags, out_paddr, gx2_skip_pass)) {
+    case HiddenRightEye::RIGHT_EYE:  // nothing to draw or copy from its next clear to this transfer (gx2_memory_fill)
+        if (!right_eye_hidden) {
+            static u32 logged;
+            if (logged++ < 20) LOG("[gx2] right eye goes where no screen shows: transfer %08x -> %08x\n", in_paddr, out_paddr);
+        }
+        right_eye_hidden = right_follows_left = true;
+        gx2_skip_pass = gx2_skip_copies = left_done = false;
+        return true;
+    case HiddenRightEye::ON_A_SCREEN:
+        if (right_eye_hidden) {
+            static u32 logged;
+            if (logged++ < 20) LOG("[gx2] right eye: %08x is a screen's buffer after all\n", out_paddr);
+            right_eye_hidden = right_follows_left = false;
+        }
+        break;
+    default:
+        break;
+    }
+    if (known_screen == 2 && right_eye_hidden) {
+        static u32 logged;
+        if (logged++ < 20) LOG("[gx2] right eye goes to the right LCD: transfer %08x -> %08x\n", in_paddr, out_paddr);
+        right_eye_hidden = false;
+    }
+    if (right_eye_transfer(known_screen)) return true;
     // New Super Mario Bros. 2's framebuffers are 256 wide, and the LCD shows 240 columns of them
     const u32 shown_w = out_w == 256 && (crop || known_screen >= 0) ? 240 : out_w;
     const u32 shown_h = known_screen == 0 ? 400 : known_screen == 1 ? 320 : out_h;
-    const u32 skip_rows = skip_bytes / (out_size / (out_h >> ((flags >> 24 & 3) == 2)));
+    const u32 skip_rows = skip_bytes / (out_size / rows);
     if ((crop ? in_w < out_w : in_w != out_w) || (shown_w != 240 && shown_w != 480) || (shown_h != 400 && shown_h != 320) || (in_h != out_h && !crop)) {
         if (gpu_copy_transfer(in_paddr, out_paddr, in_dims, out_dims, flags)) return true;
         // not a whole screen, as far as this knows: it goes through guest memory, which is slow if it happens every frame
