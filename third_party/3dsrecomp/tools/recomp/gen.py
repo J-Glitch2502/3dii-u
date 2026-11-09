@@ -498,8 +498,10 @@ class Analyzer:
                         v = img.read32(i.reads_pc_lit)
                         if v is not None and img.in_text(v & ~1):
                             lit_candidates.add(v)
-                    if i.kind == OP and not i.thumb and (i.word & 0x0FFF0000) == 0x028F0000:  # ADR (add rX, pc, #imm)
-                        v = (i.addr + 8 + arm.ror(i.word & 0xFF, ((i.word >> 8) & 15) * 2)) & 0xFFFFFFFF
+                    if i.kind == OP and not i.thumb and (i.word & 0x0FFF0000) in (0x028F0000, 0x024F0000):  # ADR: add or sub rX, pc, #imm
+                        imm = arm.ror(i.word & 0xFF, ((i.word >> 8) & 15) * 2)
+                        # the sub form points backwards: Dark Moon passes callbacks made that way (`sub r2, pc, #0x58`)
+                        v = (i.addr + 8 + (imm if i.word & 0x00800000 else -imm)) & 0xFFFFFFFF
                         if img.in_text(v & ~1):
                             lit_candidates.add(v)
             for v in self.pc_rel_ptrs:
