@@ -578,7 +578,7 @@ static BOOL on_exception(OSContext *ctx, const char *what) {
     if (quitting)
         for (;;) OSYieldThread();
     // the same when the HOME Menu took GX2 from a GPU thread on_release couldn't stop in time: it just waits for the game to come back
-    if (kernel::gx_hold && OSGetCurrentThread() == host_threads[1]) {
+    if (kernel::gx_hold.load(std::memory_order_acquire) && OSGetCurrentThread() == host_threads[1]) {
         ctx->srr0 = (u32)gpu_trip;
         return TRUE;
     }

@@ -2184,9 +2184,12 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
     if (left_done && right_follows_left && hidden_right_eyes()) {
         const u32 size = end - start;
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
-        else gx2_skip_pass = gx2_skip_copies = true;
+        else {
+            gx2_skip_copies = true;
+            gx2_skip_pass.store(true, std::memory_order_release);
+        }
     }
-    if (gx2_skip_pass) return true;
+    if (gx2_skip_pass.load(std::memory_order_acquire)) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
     for (auto &s : surfaces)
@@ -2727,14 +2730,16 @@ static int screen_of(u32 paddr, u32 size, u32 &skip) {
     return found;
 }
 
-bool gx2_skip_pass, gx2_skip_copies;
+std::atomic<bool> gx2_skip_pass{false};
+bool gx2_skip_copies;
 
 // New Super Mario Bros. 2 draws a right eye every frame though the slider says 3D is off, and the Wii U couldn't show it: half its draws.
 // Once a right eye is seen right after a left one, the pass between those transfers isn't drawn. If something else turns up there, it stops.
 // Returns true if this transfer needs nothing more.
 static bool right_eye_transfer(int screen) {
-    const bool was_skipping = gx2_skip_pass;
-    gx2_skip_pass = gx2_skip_copies = false;
+    const bool was_skipping = gx2_skip_pass.load(std::memory_order_acquire);
+    gx2_skip_copies = false;
+    gx2_skip_pass.store(false, std::memory_order_release);
     if (screen == 2) {
         right_follows_left |= left_done;
         left_done = false;
@@ -2742,7 +2747,7 @@ static bool right_eye_transfer(int screen) {
     }
     if (was_skipping) right_follows_left = false;
     left_done = screen == 0;
-    gx2_skip_pass = left_done && right_follows_left && !hidden_right_eyes();
+    gx2_skip_pass.store(left_done && right_follows_left && !hidden_right_eyes(), std::memory_order_release);
     return false;
 }
 

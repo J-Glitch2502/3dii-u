@@ -210,7 +210,7 @@ void gsp_frame_boundary() {
     if (cur_frame == dump_frame) dump_state = 1;
 }
 
-volatile bool gx_hold;
+std::atomic<bool> gx_hold{false};
 
 // (GPU thread) executes queued GX commands
 void gsp_process_gx() {
@@ -219,7 +219,7 @@ void gsp_process_gx() {
         {
             std::lock_guard<std::mutex> lk(gsp.qm);
             // a busy game keeps this queue from ever emptying, and the system won't wait long for the GPU thread to let go of GX2
-            if (gsp.queue.empty() || gx_hold) return;
+            if (gsp.queue.empty() || gx_hold.load(std::memory_order_acquire)) return;
             c = gsp.queue.front();
             gsp.queue.pop_front();
         }

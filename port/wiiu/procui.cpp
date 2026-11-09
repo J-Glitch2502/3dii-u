@@ -1,42 +1,40 @@
+#include <atomic>
+
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <proc_ui/procui.h>
 
-#include "kernel.h"
 #include "procui.hpp"
+#include "gpu/pica.h"
 #include "rt.h"
 #include "services/services.h"
 #include "wiiu.h"
 
-namespace gpu {
-extern bool gx2_skip_pass;
-}
-
 namespace wiiu::procui {
 namespace {
-volatile bool GpuPause;
-volatile bool GpuParked;
-volatile bool ForegroundBack;
-volatile bool HomeSlow;
-volatile int HomeReleaseMs = -1;
+std::atomic<bool> GpuPause{false};
+std::atomic<bool> GpuParked{false};
+std::atomic<bool> ForegroundBack{false};
+std::atomic<bool> HomeSlow{false};
+std::atomic<int> HomeReleaseMs{-1};
 
 // Stop the GPU thread before WHB releases GX2 resources on core 2.
 uint32_t OnRelease(void *) {
     const OSTime start = OSGetSystemTime();
-    ForegroundBack = false;
-    kernel::gx_hold = true;
-    gpu::gx2_skip_pass = true;
-    GpuPause = true;
-    for (int i = 0; i < 500 && !GpuParked; i++) {
+    ForegroundBack.store(false, std::memory_order_release);
+    kernel::gx_hold.store(true, std::memory_order_release);
+    gpu::gx2_skip_pass.store(true, std::memory_order_release);
+    GpuPause.store(true, std::memory_order_release);
+    for (int i = 0; i < 500 && !GpuParked.load(std::memory_order_acquire); i++) {
         OSSleepTicks(OSMillisecondsToTicks(2));
-        if (i == 100) HomeSlow = !GpuParked;
+        if (i == 100) HomeSlow.store(!GpuParked.load(std::memory_order_acquire), std::memory_order_release);
     }
-    HomeReleaseMs = (int)OSTicksToMilliseconds(OSGetSystemTime() - start);
+    HomeReleaseMs.store((int)OSTicksToMilliseconds(OSGetSystemTime() - start), std::memory_order_release);
     return 0;
 }
 
 uint32_t OnAcquire(void *) {
-    ForegroundBack = true;
+    ForegroundBack.store(true, std::memory_order_release);
     return 0;
 }
 } // namespace
@@ -47,36 +45,35 @@ void RegisterCallbacks() {
 }
 
 bool IsPauseRequested() {
-    return GpuPause;
+    return GpuPause.load(std::memory_order_acquire);
 }
 bool IsGpuParked() {
-    return GpuParked;
+    return GpuParked.load(std::memory_order_acquire);
 }
 bool IsForegroundBack() {
-    return ForegroundBack;
+    return ForegroundBack.load(std::memory_order_acquire);
 }
 void SetGpuParked(bool parked) {
-    GpuParked = parked;
+    GpuParked.store(parked, std::memory_order_release);
 }
 
 void ResumeGpu() {
-    for (int i = 0; i < 1000 && !GpuParked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
-    gpu::gx2_skip_pass = false;
-    GpuPause = false;
-    kernel::gx_hold = false;
-    while (GpuParked) OSSleepTicks(OSMillisecondsToTicks(1));
+    for (int i = 0; i < 1000 && !GpuParked.load(std::memory_order_acquire); i++) OSSleepTicks(OSMillisecondsToTicks(2));
+    gpu::gx2_skip_pass.store(false, std::memory_order_release);
+    GpuPause.store(false, std::memory_order_release);
+    kernel::gx_hold.store(false, std::memory_order_release);
+    while (GpuParked.load(std::memory_order_acquire)) OSSleepTicks(OSMillisecondsToTicks(1));
     LOG("[wiiu] back in the foreground\n");
 }
 
 void ReportReleaseStatus() {
-    if (HomeSlow) {
-        HomeSlow = false;
+    if (HomeSlow.exchange(false, std::memory_order_acq_rel)) {
         LOG("[home] the GPU thread still hasn't stopped\n");
         wiiu::log_threads();
     }
-    if (HomeReleaseMs >= 0) {
-        LOG("[home] %s after %d ms\n", GpuParked ? "the GPU thread stopped" : "gave up on the GPU thread", HomeReleaseMs);
-        HomeReleaseMs = -1;
+    const int releaseMs = HomeReleaseMs.exchange(-1, std::memory_order_acq_rel);
+    if (releaseMs >= 0) {
+        LOG("[home] %s after %d ms\n", IsGpuParked() ? "the GPU thread stopped" : "gave up on the GPU thread", releaseMs);
     }
 }
 

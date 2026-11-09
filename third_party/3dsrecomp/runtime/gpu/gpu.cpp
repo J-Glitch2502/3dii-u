@@ -467,7 +467,7 @@ void handle_special(u32 id, u32 value) {
     case R::DRAW_INDEXED:
         if (g_trace) LOG("gpu trace: draw%s n=%u\n", id == R::DRAW_INDEXED ? " indexed" : "", regs[R::NUM_VERTICES]);
 #ifdef __WIIU__
-        if (gx2_skip_pass) break;
+        if (gx2_skip_pass.load(std::memory_order_acquire)) break;
 #endif
         vtx_draw(id == R::DRAW_INDEXED);
         break;

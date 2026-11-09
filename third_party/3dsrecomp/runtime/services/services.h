@@ -1,6 +1,7 @@
 // Cross-service hooks.
 #pragma once
 #include <array>
+#include <atomic>
 #include <vector>
 
 #include "../kernel.h"
@@ -37,7 +38,7 @@ struct FramebufferInfo {
 FramebufferInfo gsp_framebuffer(int screen);  // what the LCD shows (any thread)
 void gsp_vblank();                             // (host thread, lock not held) VBlank interrupts
 void gsp_process_gx();                         // (GPU/host thread) run queued GX commands
-extern volatile bool gx_hold;                  // while set, gsp_process_gx leaves the rest of the queue for later
+extern std::atomic<bool> gx_hold;                  // while set, gsp_process_gx leaves the rest of the queue for later
 void gsp_cpu_wrote(u32 vaddr, u32 size);       // a service wrote guest memory the GPU may read
 void gsp_cache_op(u32 vaddr, u32 size, bool cpu_will_read);  // the game flushed or invalidated its cache, by any of the calls that do that
 void register_y2r();
