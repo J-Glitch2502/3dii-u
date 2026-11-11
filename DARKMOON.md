@@ -203,6 +203,8 @@ fill left, nothing else having written it since, is skipped. In the trace every 
    `set toplevel 0` full, `set toplevel 2` follows the GPU; `set lowscale <percent>` the lower size (default 67);
    `set dynres 1` lets it follow the GPU at 720p too. Next: rebuild, in the mansion try `toplevel 1` with lowscale 67, 80,
    90 and read the fps (`st`); if one holds 30, make that the default for Dark Moon (or `dynres` on by default).
+   Tried in Cemu (`set toplevel 1`): the game goes on, the picture is right but for a thin blue line along the top edge
+   (the LCD composition from row 16, `linear_copy_on_gpu`, probably still assumes full size): to fix before it's a default.
 2. The `sync` (6.5 ms a flip: which read backs are left) and the geometry-shader draws on the CPU.
 3. The intro's stutters: a console profile (`test profile`, then `prof`) during the intro with this build.
 4. Something for FTPiiU that doesn't starve the system (a guest thread that yields, say), or a line in the README.
