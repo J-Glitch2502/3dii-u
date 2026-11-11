@@ -23,8 +23,17 @@ WALK = (('CDOWN', 12), ('CRIGHT', 14), ('CLEFT', 28), ('CUP', 8), ('CRIGHT', 14)
 # for a game with no route of its own: through whatever its title screens and menus take
 GENERIC = ['WAIT 600'] + ['A 6', 'WAIT 90', 'T@160/120 4', 'WAIT 90', 'START 6', 'WAIT 90'] * 120
 
+# Kid Icarus: Uprising. Through the title, the file and the story as GENERIC goes; from there on START would pause the game every few
+# seconds (the user, 2026-11-11), so: A to leave a pause, then Pit flies, shoots and steers through chapter 1's air battle (five minutes on
+# rails) and on into its land battle, walking and shooting, with a drag to turn him now and then and an A for whatever asks for one.
+KID_ICARUS_PLAY = ['CUP+L+T@160/110 150', 'CLEFT+L+T@130/120 90', 'CUP+L 150', 'DRAG 110/120 200/120 12', 'CRIGHT+L+T@190/120 90', 'CUP+L 150',
+                   'DRAG 210/120 120/120 12', 'A 6']
+
 ROUTES = {
-    'nsmb2': A(170) + run_right(120),
+    'kid_icarus': GENERIC[:1 + 6 * 7] + A(2, 120) + KID_ICARUS_PLAY * 80,
+    # to the world map on A (it's there within a minute), then right to World 1-1's place on it, in, and running right with a jump now and
+    # then: with A alone Mario stood on the map's first place until the run ended, and no run ever drew a level (2026-11-11)
+    'nsmb2': A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 360'] + run_right(150),
     'dream_team': A(8) + ['DDOWN 6', 'WAIT 40', 'A 6', 'WAIT 80'] * 6 + A(440, 30) + sweep(WALK) + A(500, 30),
     'sticker_star': A(6) + START(4) + A(300, 40) + sweep(WALK) + A(300, 40),
     'paper_jam': A(8) + A(500, 40) + sweep(WALK) + A(300, 40),

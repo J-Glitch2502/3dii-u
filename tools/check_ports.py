@@ -222,6 +222,12 @@ def judge(t, seconds, flags):
         saved_before = bool(save_files(t))
         said = cemu(t, secs, interp)
         text = read_log()
+        if 'exited by itself' in said and not text.strip():
+            # Cemu died before the game wrote a line: one of its own caches for the title, left damaged by the run before, which can happen even
+            # when that run closed as asked (NSMB2's restart, 2026-11-11). cemu_run.ps1 has dropped them, so the same again starts clean.
+            notes.append(f'{name}: Cemu died as it started; run again on fresh caches')
+            said = cemu(t, secs, interp)
+            text = read_log()
         if 'exited by itself' in said and not interp and not re.search(CRASH, text):
             # Cemu's recompiler can die on a game's code, at the start or minutes in, with nothing wrong on the game's own log (3D Land, Paper
             # Jam): its interpreter runs them. A crash of the game's would come back in the interpreter too.
