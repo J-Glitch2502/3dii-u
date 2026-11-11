@@ -123,6 +123,10 @@ struct Thread : WaitObject {
     u64 wait_gen = 0;
     u32 arb_addr = 0;
     Object *arb = nullptr;
+    // what it's doing under the kernel lock, for lock_soon's report: the SVC it's in (-1: none) and, in a service call, the service and command
+    s32 in_svc = -1;
+    const char *in_service = nullptr;
+    u32 in_cmd = 0;
     Type type() const override { return Type::Thread; }
     bool should_wait(Thread *) override { return status != TStatus::Dead; }
     void acquire(Thread *) override {}
@@ -156,6 +160,10 @@ struct Process : Object {
 // ---- the kernel
 extern std::mutex kmutex;  // guards all kernel and HLE service state
 using Lock = std::unique_lock<std::mutex>;
+// The kernel lock for a host thread that can't wait for it, as the sound's can't. Guest threads let it in ahead of their next SVC, so one calling
+// in a tight loop can't keep the lock from it, and a call that holds the lock for longer than about a millisecond is not waited for: false, and
+// once the lock is had again the log says what held it and for how long.
+bool lock_soon(Lock &lk);
 
 Handle add_handle(ObjPtr o);
 ObjPtr get_object(Handle h);

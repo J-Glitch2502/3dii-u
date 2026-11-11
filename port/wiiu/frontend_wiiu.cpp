@@ -316,6 +316,8 @@ static int audio_thread(int, void *) {
     bool silent = false;
     u32 gaps = 0;
     OSTime gaps_logged = 0;
+    // for the report of a gap, since the last one: the longest this thread went between two rounds, and the longest a frame took to make
+    OSTime round = OSGetSystemTime(), away = 0, making = 0;
     while (!quitting) {
         if (gpu_pause != silent) {
             silent = gpu_pause;
@@ -327,6 +329,8 @@ static int audio_thread(int, void *) {
             continue;
         }
         const OSTime now = OSGetSystemTime();
+        away = std::max(away, now - round);
+        round = now;
         if (const int queued = audio::hle::host_queued(); queued >= 0) {
             // Once the voices play, a frame is made whenever what's queued falls under the cushion, so the sound keeps to the console's audio
             // clock. Made by the timer alone, production ran half a percent behind what the voices played, and the queue ran dry about once
@@ -344,9 +348,12 @@ static int audio_thread(int, void *) {
         // a run can be held to none (tools/check_ports.py).
         if (const int queued = audio::hle::host_queued(); queued >= 0 && queued < 160) gaps++;
         kernel::dsp_tick();
+        making = std::max(making, OSGetSystemTime() - now);
         if (gaps && now - gaps_logged > (OSTime)OSSecondsToTicks(1)) {
-            LOG("[audio] %u gaps: the sound ran out before the next frame of it was made\n", gaps);
+            LOG("[audio] %u gaps: the sound ran out before the next frame of it was made (this thread was away for up to %u ms, a frame took up to %u ms)\n", gaps,
+                (u32)OSTicksToMilliseconds(away), (u32)OSTicksToMilliseconds(making));
             gaps = 0;
+            away = making = 0;
             gaps_logged = now;
         }
     }
