@@ -409,7 +409,10 @@ static int guest_entry(int, void *t) {
 static void start_guest_host(Thread *t) {
     auto *host = (GuestHost *)memalign(16, sizeof(GuestHost));
     if (!host) FATAL("no memory for a guest thread\n");
-    if (!OSCreateThread(&host->os, guest_entry, 0, t, host->stack + sizeof host->stack, sizeof host->stack, 16, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
+    // Priority 15, one above an Aroma plugin's threads (16, as the app's own were): only one guest thread runs at a time, and the one the kernel has
+    // given the CPU must get it. At 16 the FTPiiU plugin's busy threads on this core held Luigi's Mansion: Dark Moon's sound thread ready and never run,
+    // the kernel waiting on it for good: the game froze, its sound looping, and with FTPiiU off it played on (Senne's Wii U, 2026-11-11).
+    if (!OSCreateThread(&host->os, guest_entry, 0, t, host->stack + sizeof host->stack, sizeof host->stack, 15, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
         FATAL("cannot create a guest thread\n");
     char *name = guest_names[t->id % 64];
     snprintf(name, sizeof guest_names[0], "guest %u", t->id);
