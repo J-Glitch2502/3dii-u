@@ -631,6 +631,13 @@ u64 hash_bytes(const u8 *p, size_t n);
 // timing statistics (GPU_STATS=1)
 extern bool g_stats, g_trace;
 extern double g_t_shade, g_t_setup, g_t_flush;
+// Draws whose vertices the CPU shaded because the GPU backend couldn't take them, by why; always counted, the Wii U report logs and clears them
+enum VtxCpuWhy { VCPU_NO_SHADER, VCPU_GEOMETRY, VCPU_CONTINUED, VCPU_COUNT };
+struct VtxCpuStats {
+    u64 draws[VCPU_COUNT], verts[VCPU_COUNT];
+    double ms[VCPU_COUNT];
+};
+extern VtxCpuStats vtx_cpu;
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)
 extern double g_tex_decode_ms;
 extern u32 g_tex_decodes;

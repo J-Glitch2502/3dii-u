@@ -14,6 +14,8 @@ std::string gen_blit_vs();
 std::string gen_blit_fs();
 std::string gen_etc1_fs(bool alpha);                                     // decodes an ETC1 (ETC1A4 with alpha) texture on the GPU: see gx2_backend's gpu_decode
 constexpr char kEtc1Key[] = "etc1", kEtc1A4Key[] = "etc1a4";              // their entries in the fragment index
+std::string gen_untile_fs(u32 fmt);                                       // the same for a plain format, 0 to 11
+std::string untile_key(u32 fmt);                                          // its entry in the fragment index
 
 std::string fs_key(const DrawState &ds);
 constexpr u32 FS_KEY_WORDS = 64;

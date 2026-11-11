@@ -139,6 +139,10 @@ int main(int argc, char **argv) {
     ps_index[fnv64(kUberLitKey, strlen(kUberLitKey))] = add_ps(gen_uber_fs(true));
     ps_index[fnv64(kEtc1Key, strlen(kEtc1Key))] = add_ps(gen_etc1_fs(false));
     ps_index[fnv64(kEtc1A4Key, strlen(kEtc1A4Key))] = add_ps(gen_etc1_fs(true));
+    for (u32 fmt = 0; fmt < 12; fmt++) {
+        const std::string k = untile_key(fmt);
+        ps_index[fnv64(k.data(), k.size())] = add_ps(gen_untile_fs(fmt));
+    }
 
     // vertex shaders: every combination of the bool uniforms each program's flow control reads, if there aren't too many
     std::map<std::string, u32> vs_sources;

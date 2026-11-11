@@ -1,4 +1,4 @@
-// What the shader generator's sources need from the rest of the runtime, which it doesn't link. Same as the stubs tools/shaders_build.sh writes.
+// What the shader generator's sources need from the rest of the runtime, which it doesn't link.
 #include <cstdarg>
 #include <cstdio>
 #include "gpu/pica.h"
