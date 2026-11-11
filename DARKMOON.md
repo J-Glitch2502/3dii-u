@@ -47,74 +47,62 @@ Trial options used: `--autoplay 1` (A only; 2 = random buttons, ends up in the s
 2. `tools/recomp/gen.py` `is_trap`: `bkpt` with any condition counts as a deliberate trap. armcc's asserts end in
    `cmp; bkpthi`, which made whole functions be rejected as data (+52 functions, e.g. `0x3b4cc8`).
 3. `tools/recomp/gen.py`: code pointers from `sub rX, pc, #imm` too, not only `add` (1348 in Dark Moon, +109 functions,
-   e.g. callbacks `0x4270c8`, `0x427910`).
+   e.g. callbacks `0x4270c8`, `0x427910`, and `0x4e0ed4`, which `0x4e1208` hands to the array constructor at `0x101978`).
+   Checked on Nov 11: the analysis without any `functions.txt` finds all four, so a fresh Builder run needs nothing from
+   an earlier run.
 4. `port/pc/frontend_pc.cpp`: `RECOMP_MEMDUMP` in the headless trial.
 5. `tools/make_game_title.py`: finds `icon.bin` where `extract_game.py` puts it (the Wii U build stopped at the title step).
-6. Not code: `games/darkmoon/functions.txt` (not in git) holds the functions found at run time. One the analysis still misses
-   is `0x4e0ed4`, called from Thumb code at `0x101978`.
+6. **The freeze** (commit "DSP: give the game a status and an interrupt only after its own frame"), see below.
+7. `services/misc.cpp`: `dlp:SRVR` `IsChild` answers no. As an unimplemented command it left the answer word out and the
+   game read "yes": it started as a Download Play child in Thrill Tower ("Connection error", "Waiting for player") instead
+   of at its title screen. Everything before Nov 11 ("the Thrill Tower screen") was that mode.
 
-With these the game boots, calls the services, starts 9 threads and draws: a lantern loading screen, then the
-"Thrill Tower" (ScareScraper) screen with a menu on the bottom screen, ~1000 GPU lists in the first 600 frames.
+State on Nov 11 (PC trials): "Preparing to start game", title screen, file select, save, the intro (E. Gadd's lab, the Dark
+Moon breaking, Luigi at home, the Pixelshifter), E. Gadd's bunker dialogue. 5 minutes with `--autoplay 2` without a freeze,
+GPU lists rising all the way; a 20-minute run is the next check (trial28, `--run long`).
 
-## The open problem: a freeze after ~10 s (frame ~600, DSP frame ~2190)
+## The freeze, solved (Nov 11)
 
-Every full-speed trial ends with thread 8 spinning at `0x8304e4`, the GPU counters stopped, all other threads waiting on
-the lock it holds. Same with `--speed 50`.
+Every trial used to end with thread 8 spinning at `0x8304e4`, walking a voice's wave buffer list that had become a loop.
 
-What the game does (all addresses in Dark Moon's code.bin):
+How Dark Moon's sound works (addresses in its code.bin; it is nn::snd):
 
-- `0x83048c`: appends a wave buffer to a voice's list: `node->next (+0x14) = 0`, `status (+0x11) = 1`, lock, walk to the
-  end, link. Thread 8 is stuck walking a list that has become a loop: a node whose `next` is itself (found at `0x15d276a4`
-  in a memory dump, status 1). `0x830528` removes one. Lock enter/leave: `0x3a291c`, `0x37ccf8`.
-- Wave buffer node: `+0x10` ?, `+0x11` status (1 queued, 2 playing, 3 done), `+0x12` id (u16), `+0x14` next, buffers of
-  `0x380` bytes, ids counting up.
-- Voice objects (static, same address every run): `0x9ae970` and `0x9ae9ec`, the two channels of one stereo stream.
-  `+0` DSP source number, `+4` sync count, `+0xc` on, `+0x30` list head, `+0x34` buffers given to the DSP.
-- `0x25bb88`: the voice's status update (called through `0x23a984` from `0x20bfec`, for 24 sources). It ignores a status
-  whose sync count doesn't match; only when "current buffer id dirty" is set does it walk the list, marking the buffers
-  before the current one 3 and the current one 2; it then checks `is_enabled`.
-- `0x20bfec` picks the DSP region it reads the status from by the frame counters (`ldrh [r5,#0x1a]`, `bic` with 1), then
-  increments its counter.
-- The game does not submit a frame for every DSP frame: by DSP frame 944 it had submitted ~807 (counter logging). It
-  submits nothing during the first ~55 DSP frames.
+- Thread 8 (prio 45) runs the sound frame `0x1fd130`: `0x20bdfc` waits up to ~9.8 ms for the DSP interrupt (event at
+  `0x9ac984`, through thread 2, prio 24), clears it and reads the status (`0x20bfec`), then submits (`0x20beb4`).
+- Submit: writes the config and its counter `c` into region `c & 1` (its counter at `+0x131a`, region at `+0x131e`), `c++`,
+  signals the DSP. Read: resyncs `c` from the counter of the region it submitted last, then reads the status of the 24
+  sources from region `c & 1`, the one it will submit next, which is where the DSP writes after working on its submission.
+- `0x25bb88`: a voice's status update; only with "current buffer changed" set it walks the list, marking the buffers
+  before the current one done (3) and the current one playing (2). Voices `0x9ae970` / `0x9ae9ec` are the two channels of
+  one stereo stream; the stream refills both channels from what the first one freed, so the two must see the same news.
+- `0x83048c` appends a buffer (`next = 0`, then links it at the end): appending one still in the list makes it point at
+  itself. That is the loop.
 
-What a `RECOMP_VOICEWATCH` run showed (trial17): at DSP frame 2174 voice `9ec`'s list is `199:2 200:1 201:1`, 3 given,
-DSP playing 200 with dirty set; at 2175 the list is empty and 0 given, while the DSP still plays 200. Voice `970` handled
-the same status correctly (200 playing, 201 and 202 waiting). About 20 frames later the list loops on buffer 206.
+What went wrong (trials 19-25, logging put into the generated C of `0x25bb88`, `0x83048c`, `0x20bfa0` and `0x20c058`): our
+DSP runs on its own host thread at a fixed rate. A frame could come while thread 8 was still at work; its interrupt then
+stayed pending, so the game read the status right after submitting, before any frame had worked on that submission, from
+a region two frames old (it took an old "stopped, no buffer" for news, marked playing buffers done and queued them again).
+A frame between two submissions also rewrote the region the game was reading, so one channel got newer news than the other.
 
-Current theory: the game handled an interrupt late, read the status from the other region, which is two frames old, so its
-current buffer is no longer in the list; the update then walked the whole list without finding it and marked everything
-done. A real 3DS (and Azahar, whose DSP and CPU run in lockstep) is never that late.
+The fix (`audio/dsp_core.cpp`, `audio/source.cpp`, `services/dsp.cpp`): as on a 3DS, where every frame works on one the
+game submitted just before, a frame gives its status and the interrupt only when the game has submitted since the last
+one (or never has). Frames in between only play on; a buffer change waits for the next status the game is given. Sound
+keeps its rate. This is in the shared runtime, so it changes every game that uses nn::snd: worth a check on the tested
+games before the PR is merged (none of them are on Senne's PC).
 
-Not enough, or tried and **did not** fix it (reverted, not on this branch):
+Tried before and dropped: writing the status into both regions (froze earlier, reverted), holding frames until the
+counter moves (stalled audio), holding frames while threads below priority 0x20 run (thread 8 is 45).
 
-- `services/dsp.cpp` already holds DSP frames while no thread waits on the pipe event. Dark Moon's interrupt thread
-  (priority 24) only wakes its sound thread and waits again at once, so that gate sees the game as ready.
-- Holding DSP frames until the game's frame counter moves: the game doesn't submit every frame, so this stalled audio
-  (1022 give-ups in 700 frames) and it still froze; a version that disarms itself when the game stops submitting also
-  still froze.
-
-On this branch, **not yet tested together**:
-
-- `audio/source.cpp`: "current buffer changed" stays set until the game has submitted its next frame (tested alone in
-  trial16: still froze).
-- `audio/dsp_core.cpp`: the newest source and DSP status is written into the region the game submitted as well, so a late
-  read gets the newest status (never tested: trial18).
+Debugging aids kept: `RECOMP_VOICEWATCH`, and `rt_debug_log` (C-callable, prefixes the guest thread) for logging put into
+generated C by hand: edit `games/darkmoon/gen_safe/code_NNN.c` before the `/* addr: */` line, run a trial (the file is
+recompiled), and put the file back afterwards (keep a copy; `games/` is not in git).
 
 ## Next step
 
-Run trial18 and read the voice log:
-
-```
-python tools/win/build3ds.py trial darkmoon 3600 --autoplay 1 --run watch --env RECOMP_VOICEWATCH=9ae970,9ae9ec --log-lines 5
-```
-
-- No freeze (GPU counters still rising after frame 600, thread 8 not at `0x8304e4`): keep the fix, check the stream lists
-  in the log stay sane, try a longer run and the Wii U build, then a PR to `main`.
-- Still freezes: find the frame where a voice's list goes wrong in the log (`grep "voice 009ae9ec"`), then look at which
-  status the game read at that moment. Logging which region `0x20bfec` reads and the status it saw at that moment would
-  settle the theory; check `services/dsp.cpp`'s comment above `dsp_tick`, which
-  describes this same bug from another game.
+1. Read trial28 (`build_win/run_darkmoon_long/run.log`, `games/darkmoon/shots/sheet_long.png`): no freeze, and how far
+   it got. Random input doesn't play the game, so it only shows the game survives; Senne playing it says more.
+2. Wii U build through the Builder (as Senne will build it) once the PC runs stay clean, then Cemu and his console.
+3. PR to `main` with an explanation for Josiah.
 
 ## Other loose ends
 
