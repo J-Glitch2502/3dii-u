@@ -186,11 +186,17 @@ flip through a geometry shader on the CPU (500-1500 vertices). Two 256x256 RGBA8
 are uploaded again every frame as definitely written, with no transfer or copy to them in the trace: probably a memory fill
 the game clears them with each frame, done by the CPU since they're textures, not targets.
 
+**The fills, traced** (Cemu, the intro, `[gxt] fill` lines): per frame two 416 KB clears of the targets at `0x18000000` and
+`0x18300000`, two 256 KB ones of the targets at `0x18368000`/`0x183a8000`, a 300 KB clear of the bottom screen at
+`0x18000000` (inside the top screen's target, so before: done in guest memory as well), and 256 KB of white at `0x183e8000`,
+a texture and no target (so before: the CPU, and an upload). Now (`gx2_memory_fill`): a fill whose exact target matched
+ignores other targets it overlaps in part unless a texture lies there, and a fill of a whole texture with the value its last
+fill left, nothing else having written it since, is skipped. In the trace every fill is on the GPU or skipped; on the console
+`memory_fill` was 11% of the GPU thread in the intro. Not measured on the console yet.
+
 ## Next step
 
-1. Trace a mansion frame on the console (`set trace 600`, no `fs`): what writes `0x183a8000`/`0x183e8000` each frame, and
-   what the rest of `tex`'s 44 us is. A fill that covers a whole texture could clear it on the GPU instead of the CPU and an
-   upload.
+1. A console profile with the fill change (intro and mansion): is `memory_fill` gone, and what is the rest of `tex`'s 44 us.
 2. The `sync` (6.5 ms a flip: which read backs are left) and the geometry-shader draws on the CPU.
 3. The intro's stutters: a console profile (`test profile`, then `prof`) during the intro with this build.
 4. Something for FTPiiU that doesn't starve the system (a guest thread that yields, say), or a line in the README.

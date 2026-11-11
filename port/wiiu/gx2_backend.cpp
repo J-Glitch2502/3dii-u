@@ -849,6 +849,9 @@ struct Tex {
     u32 addr, w, h, fmt, levels, bytes;
     u32 hash, sample, heap_flushes;
     bool maybe_dirty, dirty, hash_stale;
+    // what a fill of the whole texture last left there, while nothing else has written it (gx2_memory_fill): the same fill again changes nothing
+    bool filled = false, fill_pending = false;
+    u32 fill_value = 0;
     u32 row_bytes;      // one row of 8x8 tiles of level 0
     u32 dirty_rows[4];  // a bit per tile row (up to 1024 rows of texels) that definite writes touched since the last upload
     u32 lag_rows[4];    // the tile rows the spare image lacks (see replace_image)
@@ -2279,6 +2282,8 @@ static void mark_textures(u32 paddr, u32 size, bool definite) {
     for (auto &p : textures) {
         Tex &e = *p;
         if (e.addr < paddr + size && paddr < e.addr + e.bytes) {
+            if (e.fill_pending) e.fill_pending = false;  // the fill gx2_memory_fill just let through: what it left is known
+            else e.filled = false;
             if (definite) {
                 e.dirty = true;
                 const u32 lo = std::max(paddr, e.addr) - e.addr, hi = std::min(paddr + size, e.addr + e.bytes) - e.addr;
@@ -2423,6 +2428,29 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
             if (fill_inside && s->addr >= start && s->addr + s->bytes() <= end) apply_fill(*s, f);
             else other = true;
         }
+    // A target the fill covers only in part needs its memory filled only if something reads that memory: a texture there. Dark Moon clears its bottom
+    // screen (300 KB at 0x18000000) inside its top screen's target, which it clears on the GPU before every use: that was 300 KB with the CPU a frame.
+    if (any && other && fill_inside) {
+        bool read = false;
+        for (const auto &t : textures)
+            if (t->addr < end && start < t->addr + t->bytes) read = true;
+        if (!read) other = false;
+    }
+    // A texture the game fills whole with the same value every frame (Dark Moon: 256 KB of white at 0x183e8000), which nothing else wrote since: its memory
+    // and its image already hold that, so the fill is done. Otherwise it's filled in guest memory, and noted, so the next one can be skipped.
+    if (!any && fill_inside)
+        for (auto &t : textures)
+            if (t->addr == start && t->bytes == end - start) {
+                if (t->filled && t->fill_value == value && !t->dirty && !t->maybe_dirty) {
+                    if (gxt()) LOG("[gxt] fill %08x-%08x: the texture there holds it already\n", start, end);
+                    return true;
+                }
+                t->filled = true;
+                t->fill_pending = true;
+                t->fill_value = value;
+            }
+    if (gxt()) LOG("[gxt] fill %08x-%08x (%u KB) value %08x control %08x: %s\n", start, end, (end - start) >> 10, value, control,
+                   !any ? "guest memory (no target there)" : other ? "a target, and guest memory (others in part)" : "on the GPU");
     if (!any && pending_fills.size() < 16 && start >= mem::VRAM_PADDR) pending_fills.push_back(f);
     if (any) mark_textures(start, end - start, true);
     return any && !other;  // Nothing reads a render target from guest memory without asking, and filling it there costs real time: New Super Mario Bros. 2 does 2.5 MB a frame
