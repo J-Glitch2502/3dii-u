@@ -684,7 +684,7 @@ def host_build(g, args):
         if len(funcs) > 60000:  # over a program's 65535 exports (Animal Crossing's 98577): code compiled on the spot then can't call the game's
             funcs = []
         open(f'{obj_dir}/exports.def', 'w', newline='\n').write('EXPORTS\n' + '\n'.join(sorted(set(funcs) | set(helpers) | (defined & {'guest_entries', 'guest_entry_count'}))) + '\n')
-        r = run(HOST_CXX + ['-static', f'@{rsp}', f'{obj_dir}/exports.def', '-lpthread', '-lwinmm', f'-Wl,--out-implib,{obj_dir}/game.dll.a', '-o', exe],
+        r = run(HOST_CXX + ['-static', f'@{rsp}', f'{obj_dir}/exports.def', '-lpthread', '-lwinmm', '-lgdi32', f'-Wl,--out-implib,{obj_dir}/game.dll.a', '-o', exe],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
         if r.returncode:
             found = sorted({x for x in r.stdout.splitlines() if 'undefined symbol' in x or 'error' in x})
@@ -713,7 +713,7 @@ def trial(g, args):
         return
     run_dir = f'{WORK}/run_{g.name}' + (f'_{args.run}' if args.run else '')
     os.makedirs(run_dir, exist_ok=True)
-    for d in ('save', 'shots'):
+    for d in ('shots',) if args.keep_save else ('save', 'shots'):
         shutil.rmtree(f'{run_dir}/{d}', ignore_errors=True)
     if args.save_from:
         shutil.copytree(args.save_from, f'{run_dir}/save')
@@ -801,6 +801,7 @@ def main():
     ap.add_argument('--gpu-threads', type=int, default=4, help='trial: threads for the software renderer')
     ap.add_argument('--run', help='trial: a name of its own, so copies can run side by side')
     ap.add_argument('--save-from', help='trial: start from a copy of this save folder')
+    ap.add_argument('--keep-save', action='store_true', help='trial: go on from the save the last run of this name left (tools/win/play_pc.py)')
     ap.add_argument('--env', action='append', help='trial: more settings, as NAME=value')
     ap.add_argument('--shot-every', type=int)
     ap.add_argument('--seconds', type=int, help='trial: stop after this long anyway')
