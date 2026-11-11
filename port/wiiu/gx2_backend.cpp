@@ -441,6 +441,7 @@ struct Surface {
     float sx = 1, sy = 1;  // surface pixels per PICA pixel
     float base_sx = 1, base_sy = 1;  // the same at full size, and which of those it's at: see dyn_res_update
     u32 dyn_level = 0;
+    float dyn_f = 1;  // the share of base_sx/base_sy it's at
     u32 sw = 0, sh = 0;
     u32 tex_h = 0, row0 = 0;  // the height it's read at as a texture, and its window row 0 in the surface (see get_surface)
     GX2ColorBuffer cb;
@@ -649,13 +650,21 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
 // keeps its memory, the bigger block it was given when it was made. What's in it is lost: every game paints a screen over anyway (upload_target), and until then the
 // surface is shown as it was. Depth buffers follow the same way. A depth block shared between surfaces (Layton's) couldn't: only Dream Team does this.
 u32 dyn_level;
+// The lower level's share of full size each way: two thirds, "set lowscale <percent>" to try others. At 1200x720 ("top_720") the level changes only
+// when "set dynres 1" says so, or "set toplevel 0|1" holds it at one (dyn_force); Luigi's Mansion: Dark Moon draws its top screen in five or six passes
+// of 768x1536 or so, and the console's GPU took ~37 ms a frame of that in the mansion.
+float dyn_low = 2.0f / 3;
+bool dyn_720;
+int dyn_force = -1;
+inline float dyn_factor(u32 level) { return level ? dyn_low : 1.0f; }
 inline bool dyn_scaled(const Surface &s) { return s.base_sy > 2; }  // not the bottom screen, which is 2x on a screen a quarter of the size, nor a 1:1 target
 
 void set_surface_scale(Surface &s, u32 level) {
-    if (s.dyn_level == level) return;
+    if (s.dyn_level == level && s.dyn_f == dyn_factor(level)) return;
     s.dyn_level = level;
-    s.sx = level ? s.base_sx * 2 / 3 : s.base_sx;
-    s.sy = level ? s.base_sy * 2 / 3 : s.base_sy;
+    s.dyn_f = dyn_factor(level);
+    s.sx = s.base_sx * s.dyn_f;
+    s.sy = s.base_sy * s.dyn_f;
     s.sw = (u32)(s.w * s.sx);
     s.sh = (u32)(s.tex_h * s.sy);
     s.row0 = s.sh - (u32)(s.h * s.sy);
@@ -677,7 +686,7 @@ void set_surface_scale(Surface &s, u32 level) {
     if (&s == cur_depth) cur_depth = nullptr;
 }
 inline void take_dyn_level(Surface &s) {
-    if (s.dyn_level != dyn_level && dyn_scaled(s)) set_surface_scale(s, dyn_level);
+    if ((s.dyn_level != dyn_level || s.dyn_f != dyn_factor(dyn_level)) && dyn_scaled(s)) set_surface_scale(s, dyn_level);
 }
 
 u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
@@ -2616,7 +2625,11 @@ bool dyn_test;  // a file named "dynres" in the data folder: changes level every
 // At full size, half a second of that goes to the lower level. There, nothing says how much room there is, so it tries full size again after a while, and each try that
 // fails (back below within 20 seconds) makes the next wait twice as long, up to about 3 minutes.
 void dyn_res_update() {
-    if (top_720) {  // only at 1080p ("top1080"): 720p targets fit, and draw at full size
+    if (dyn_force >= 0 || (top_720 && !dyn_720)) {  // at 1080p ("top1080"), or when asked: 720p targets fit, and mostly draw at full size
+        if (dyn_force >= 0 && (u32)dyn_force != dyn_level) {
+            LOG("[gx2] top screen held at %s size\n", dyn_force ? "the lower" : "full");
+            dyn_level = (u32)dyn_force;
+        }
         dyn_waited = 0;
         return;
     }
@@ -2644,7 +2657,7 @@ void dyn_res_update() {
         since_raise = 0;
     }
     if (level != dyn_level) {
-        LOG("[gx2] top screen to %s size, the CPU waited %.1f ms a frame for the GPU\n", level ? "2/3" : "full", wait_ms);
+        LOG("[gx2] top screen to %s size, the CPU waited %.1f ms a frame for the GPU\n", level ? "the lower" : "full", wait_ms);
         dyn_level = level;
     }
 }
@@ -3779,6 +3792,9 @@ bool gfx_set(const char *name, u32 v) {
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
+    else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
+    else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
+    else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way
     else if (!strcmp(name, "trace")) {  // the next v draws and what they use, in the log
         gxt_from = (u32)g_frame;
         gxt_left = v;
