@@ -58,8 +58,8 @@ public:
     void reset() { st = {}; frame = {}; }
     // Parses the configuration (clearing its dirty flags), generates this frame and returns the
     // status to report.
-    // seen: the game has submitted a frame since the last one, so it has read the status that frame wrote
-    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool seen = true);
+    // publish: this frame's status goes to the game (dsp_core.cpp: generate_frame); changes are kept for the next one until then
+    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool publish = true);
     void mix_into(QuadFrame &dst, int mix);
     const StereoFrame &output() const { return frame; }
 
@@ -93,7 +93,7 @@ private:
         std::vector<Sample> decoded;  // ADPCM samples decoded so far (decoded on demand)
         u32 adpcm_decoded = 0;        // a multiple of 14 or cur_length; PCM is read live
         bool buffer_update = false;
-        bool update_unseen = false;  // the last buffer change was reported, but the game hasn't read it yet
+        bool update_unpublished = false;  // the current buffer changed since the game was last given a status
         u16 last_buffer_id = 0, current_buffer_id = 0;
         std::array<s16, 16> adpcm_coeffs{};
         AdpcmState adpcm{};

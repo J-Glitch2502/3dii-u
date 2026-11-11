@@ -12,5 +12,6 @@ std::vector<u8> pipe_read(u32 pipe, u32 size);       // ReadPipe / ReadPipeIfPos
 u32 pipe_readable(u32 pipe);                         // GetPipeReadableSize
 u16 recv_data(u32 reg);                              // RecvData: 0 when on, 1 when off/asleep
 void set_volume(float v);  // host output gain (0..1), from the in-game menu
-bool tick();  // one audio frame (160 samples at 32728 Hz); true if the DSP is running (-> interrupt)
+bool tick(bool *fresh = nullptr);  // one audio frame (160 samples at 32728 Hz); true if the DSP is running. fresh: it worked on a frame
+                                   // the game submitted since the last one (or the game hasn't submitted any yet): only then an interrupt
 }  // namespace audio
