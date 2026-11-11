@@ -177,6 +177,13 @@ def main():
     with open(os.path.join(app, 'Read me first.txt'), 'w', encoding='utf-8') as f:
         f.write(readme)
     shutil.copyfile(os.path.join(HERE, 'app_notices.txt'), os.path.join(app, 'Third-party notices.txt'))
+    # the app's licence (EUPL-1.2) and every bundled part's notice and full licence text, as the licences ask of a binary release
+    shutil.copyfile(os.path.join(ROOT, 'LICENSE'), os.path.join(app, 'LICENSE.txt'))
+    shutil.copyfile(os.path.join(ROOT, 'THIRD_PARTY_LICENSES.md'), os.path.join(app, 'THIRD_PARTY_LICENSES.md'))
+    import user_files
+    leaked = user_files.bundled(app)
+    if leaked:  # keys and console dumps are each user's own: an app carrying one must never ship
+        sys.exit('The app holds files only a user may supply, so it was not packed:\n  ' + '\n  '.join(leaked))
     files = sum(len(fs) for _, _, fs in os.walk(app)) + 1  # and files.txt, which app.py checks by that a tester unzipped the whole app
     with open(os.path.join(app, '_internal', 'files.txt'), 'w') as f:
         f.write(str(files))

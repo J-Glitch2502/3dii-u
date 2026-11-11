@@ -738,10 +738,22 @@ ApplicationWindow {
                 }
             }
             Text {
+                id: versionLabel
                 anchors { right: parent.right; rightMargin: 124; verticalCenter: parent.verticalCenter }
                 text: "v" + app.version
                 color: T.faint
                 font.pixelSize: 11
+            }
+            // credits and licences: the projects the builder is built on (credits.py)
+            Text {
+                anchors { right: versionLabel.left; rightMargin: 14; verticalCenter: parent.verticalCenter }
+                text: "About"
+                color: aboutArea.containsMouse ? T.text : T.dim
+                font.pixelSize: 12
+                font.underline: aboutArea.containsMouse
+                Accessible.role: Accessible.Button
+                Accessible.name: "About 3Dii U Builder, credits and licences"
+                MouseArea { id: aboutArea; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: app.about() }
             }
         }
 

@@ -18,12 +18,14 @@ from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 import covers
+import credits
 import decrypt
 import dumps
 import mods
 import pipeline
+import user_files
 
-APP, VERSION = '3Dii U Builder', '1.0'
+APP, VERSION = credits.APP, credits.VERSION
 HERE = os.path.dirname(os.path.abspath(__file__))
 FROZEN = getattr(sys, 'frozen', False)
 WIN = sys.platform == 'win32'
@@ -146,7 +148,7 @@ def describe(d):
 
 
 def otp_ok(path):
-    return os.path.isfile(path) and os.path.getsize(path) == 1024
+    return user_files.check_otp(path) is None
 
 
 def short(path, n=46, end=False):
@@ -275,6 +277,10 @@ class App(QObject):
         self.show_dialog()
         if head['flow'] and self.flow:
             self.step(yes)
+
+    @Slot()
+    def about(self):
+        self.tell(f'About {APP}', credits.about())
 
     # ---- choosing
     def open_dump(self, path):

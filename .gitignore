@@ -8,6 +8,7 @@
 !/ARCHITECTURE.md
 !/CONTRIBUTING.md
 !/LICENSE*
+!/THIRD_PARTY_LICENSES.md
 !/builder/
 !/port/
 !/tools/
@@ -18,6 +19,28 @@
 __pycache__/
 *.pyc
 *.log
+
+# Anywhere in the tree, even inside a tracked folder: keys and console dumps (each user supplies their own; builder/user_files.py
+# checks them and make_app.py refuses to pack an app holding one), game dumps, and what a build makes from them.
+otp.bin
+seeprom.bin
+boot9.bin
+boot11.bin
+seeddb.bin
+aes_keys.txt
+keys.txt
+movable.sed
+*.3ds
+*.cci
+*.cia
+*.cxi
+*.wud
+*.wux
+*.rpx
+*.app
+*.tik
+*.tmd
+*.h3
 
 # The builder's standalone app and PyInstaller's work folder are build outputs; makerom.exe comes from Project_CTR's releases.
 /builder/dist/
