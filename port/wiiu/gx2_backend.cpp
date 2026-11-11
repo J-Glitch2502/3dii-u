@@ -49,6 +49,7 @@
 #include "shader_compile.h"
 #include "shadergen.h"
 #include "swkbd.h"
+#include "vertex_arrays.h"
 #include "wiiu.h"
 
 extern "C" void *GfxHeapAllocMEM1(uint32_t size, uint32_t alignment) __attribute__((weak));
@@ -142,10 +143,10 @@ std::unordered_map<u64, PsEntry> ps_table;
 GX2VertexShader *vs_passthrough, *vs_blit;
 GX2PixelShader *ps_blit, *ps_fallback, *ps_fallback_tex, *ps_uber, *ps_uber_lit;
 GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GPU (gpu_decode); null in a pack from before it had that one
-// 8-bit integers stay the old way: fetched by the GPU, NSMB2's skinned models (bone numbers in bytes) came out stretched across the screen
-// in Cemu (2026-11-10), and nothing here can tell whether a console would do the same. "gpuattr8" tries it.
-u32 gxt_cpu_attr = 3;                 // a bit per attribute format (s8, u8, s16, float) the old way: copied by itself, integers as floats made by
-                                      // the CPU. Files named "cpuattr" (all) and "cpuattr16" set them.
+// A bit per attribute format (s8, u8, s16, float) kept the old way: copied by itself, integers as floats made by the CPU. Files named "cpuattr"
+// (all), "cpuattr8" and "cpuattr16" set them. None by default: bytes fetched a 4-byte word at a time (gpu_fetched) draw NSMB2's skinned models
+// as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen.
+u32 gxt_cpu_attr;
 bool gxt_cpu_tex;                     // a file named "cputex" in the data folder: every texture decoded by the CPU, as before
 // A vertex shader the pack lacks, compiled on the console: off, a file named "glslvs" turns it on. In Cemu the compiler hands back an empty
 // program (16 bytes, no inputs) for whatever it compiles in its first second, the same source compiling properly afterwards, and NSMB2's
@@ -316,15 +317,20 @@ void vs_locations(VsEntry &v) {
     }
 }
 // what the fetch shader is built from (attribVars) against what the GPU routes by (the semantic table): a compiler may number them differently
+std::unordered_map<u64, u32> vs_set_aside;  // "glslvsforce": the shipped shaders the console's compiler stands in for, by key
 void log_vs_tables(const char *what, u64 key, const GX2VertexShader *s) {
     static u32 shown;
-    if (shown++ >= 48) return;
+    if (shown++ >= 96) return;
     char line[400];
     int n = snprintf(line, sizeof line, "[gx2] %s vs %016llx attribs", what, (unsigned long long)key);
     for (u32 i = 0; i < s->attribVarCount && n < 300; i++) n += snprintf(line + n, sizeof line - n, " %s@%u", s->attribVars[i].name, s->attribVars[i].location);
     n += snprintf(line + n, sizeof line - n, " | semantics(%u)", s->regs.num_sq_vtx_semantic);
     for (u32 i = 0; i < s->regs.num_sq_vtx_semantic && i < 32 && n < 380; i++) n += snprintf(line + n, sizeof line - n, " %u", s->regs.sq_vtx_semantic[i]);
     LOG("%s | block %s at %u size %u\n", line, s->uniformBlockCount ? s->uniformBlocks[0].name : "-", s->uniformBlockCount ? s->uniformBlocks[0].offset : 0, s->uniformBlockCount ? s->uniformBlocks[0].size : 0);
+    // what it hands the pixel shader, which finds its inputs by these ids: two compilers must number them alike
+    n = snprintf(line, sizeof line, "[gx2] %s vs %016llx outputs: config %08x, ids(%u)", what, (unsigned long long)key, s->regs.spi_vs_out_config, s->regs.num_spi_vs_out_id);
+    for (u32 i = 0; i < s->regs.num_spi_vs_out_id && i < 10; i++) n += snprintf(line + n, sizeof line - n, " %08x", s->regs.spi_vs_out_id[i]);
+    LOG("%s, clip %08x, %u bytes\n", line, s->regs.pa_cl_vs_out_cntl, s->size);
 }
 void prepare_vs(VsEntry &v) {
     v.shader = load_vs(v.index);
@@ -343,6 +349,8 @@ void install_compiled() {
                 shader_compile_discard(d);
                 continue;
             }
+            if (const auto shipped = vs_set_aside.find(d.key); shipped != vs_set_aside.end())  // "glslvsforce": the two side by side
+                log_vs_tables("shipped", d.key, load_vs(shipped->second));
             VsEntry &v = vs_table[d.key];
             v.shader = d.vs_shader;
             v.index = COMPILED_HERE;
@@ -1712,13 +1720,8 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
     GX2SetVertexUniformBlock(vs_ubo_loc, VS_BLOCK_WORDS * 4, last);
 }
 
-// Whether the GPU fetches an attribute from the array's copy itself. Bytes are fetched four at a time from a 4-byte boundary, and the mask
-// routes the ones wanted (a byte at an odd place fetched by itself is said to come out shifted on this GPU): so only from an array whose
-// vertices are a multiple of 4 bytes apart, and only if the attribute's bytes lie within one such word.
-inline bool gpu_fetched(const Gx2Attr &at) {
-    if (gxt_cpu_attr >> at.fmt & 1) return false;
-    return at.fmt >= 2 || (at.stride % 4 == 0 && (at.offset & 3) + at.elems <= 4);
-}
+// whether the GPU fetches an attribute from its array's copy (vertex_arrays.h), or the CPU makes floats of it the old way
+inline bool gpu_fetched(const Gx2Attr &at) { return !(gxt_cpu_attr >> at.fmt & 1) && fetchable(at); }
 
 GX2AttribFormat attr_format(u32 fmt, u32 elems) {
     // 3 x 8 or 16 bits don't exist: fetch 4, and the mask supplies w
@@ -1967,33 +1970,16 @@ bool gx2_draw(const Gx2Draw &d) {
     // and the GPU fetches every attribute from the copy in its own format: floats, and 8- and 16-bit integers it turns into floats itself.
     // Each attribute used to get a copy of its own, and integers a float per component from the CPU: 1 to 5 ms a frame on the GPU thread in
     // busy scenes, the largest named cost in the user's console logs (2026-11-10). "cpuattr" brings that back.
-    struct Array {
-        u32 lo, hi, stride;  // the offsets from d.base of its first attribute's start and its last one's end, within a vertex
-        s32 buf;
-        const u8 *copy;
-    };
-    Array arrays[16];
+    VertexArray arrays[16];
     u32 n_arrays = 0;
     u8 reg_array[16] = {};  // the array each input register's attribute went into
     for (u32 r = 0; r < 16; r++) {
-            if (!(vs.inputs & (1u << r)) || vs.location[r] < 0 || reg_attr[r] < 0) continue;
-            const Gx2Attr &at = d.attr[reg_attr[r]];
-            if (at.is_default || at.elems == 0 || at.stride == 0 || !gpu_fetched(at)) continue;
-            // what the fetch reads: bytes as the word they're in, 3 x 16 bits as 4, a lone float as 2 (attr_format)
-            const u32 read = at.fmt == 3 ? (at.elems == 1 ? 2 : at.elems) * 4 : at.fmt == 2 ? (at.elems == 3 ? 4 : at.elems) * 2 : (at.offset & 3) + 4;
-            Array *found = nullptr;
-            for (u32 k = 0; k < n_arrays && !found; k++) {
-                Array &x = arrays[k];  // the same array: the same stride, and within one vertex of what's known of it
-                if (x.stride == at.stride && at.offset + at.stride > x.lo && at.offset < x.lo + at.stride) found = &x;
-            }
-            if (!found) {
-                found = &arrays[n_arrays++];
-                *found = {at.offset, at.offset + read, at.stride, -1, nullptr};
-            }
-            found->lo = std::min(found->lo, at.offset & ~3u);  // on a 4-byte boundary, so a word of bytes is one in the copy too
-            found->hi = std::max(found->hi, at.offset + read);
-            reg_array[r] = (u8)(found - arrays);
-        }
+        if (!(vs.inputs & (1u << r)) || vs.location[r] < 0 || reg_attr[r] < 0) continue;
+        const Gx2Attr &at = d.attr[reg_attr[r]];
+        if (!at.is_default && at.elems && at.stride && gpu_fetched(at)) reg_array[r] = (u8)join_vertex_array(arrays, n_arrays, at);
+    }
+    s32 array_buf[16];  // the attribute buffer each array's copy is bound as, once an attribute has asked for it
+    std::fill(array_buf, array_buf + 16, -1);
     for (u32 r = 0; r < 16; r++) {
         if (!(vs.inputs & (1u << r)) || vs.location[r] < 0) continue;
         const s32 a = reg_attr[r];
@@ -2011,26 +1997,25 @@ bool gx2_draw(const Gx2Draw &d) {
             continue;
         }
         if (gpu_fetched(*at)) {
-            // By what the grouping recorded, not by looking again: an array's start moves down as attributes join it, and one that joined
-            // early could then lie more than a vertex past it and find nothing, which dropped the draw
-            Array *x = &arrays[reg_array[r]];
-            if (x->buf < 0) {
-                const u8 *src = pptr(d.base + x->lo);
+            const VertexArray &x = arrays[reg_array[r]];
+            s32 &bound = array_buf[reg_array[r]];
+            if (bound < 0) {
+                const u8 *src = pptr(d.base + x.lo);
                 if (!src) return true;
                 // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later
-                const u32 count = maxv - minv + 1, bytes = (count - 1) * x->stride + (x->hi - x->lo);
+                const u32 bytes = vertex_array_bytes(x, maxv - minv + 1);
                 u8 *copy = (u8 *)ring_alloc(bytes + 64, 64);
-                memcpy(copy, src + x->stride * minv, bytes);
+                memcpy(copy, src + x.stride * minv, bytes);
                 DCFlushRange(copy, bytes);
-                x->copy = copy - minv * x->stride;  // addressed as if it held vertex 0 too, as the indices count from there
-                x->buf = (s32)buf++;
-                GX2SetAttribBuffer((u32)x->buf, (maxv + 1) * x->stride + 64, x->stride, x->copy);
+                bound = (s32)buf++;
+                // addressed as if it held vertex 0 too, as the indices count from there
+                GX2SetAttribBuffer((u32)bound, (maxv + 1) * x.stride + 64, x.stride, copy - minv * x.stride);
             }
             GX2AttribStream s{};
             s.location = vs.location[r];
-            s.buffer = (u32)x->buf;
+            s.buffer = (u32)bound;
             const u32 lane = at->fmt < 2 ? at->offset & 3 : 0;  // bytes: the word they're in is fetched, and they start at this byte of it
-            s.offset = at->offset - lane - x->lo;
+            s.offset = at->offset - lane - x.lo;
             // Cemu can't fetch one little-endian float: its sprites all got corner 0. Two do the same here, and the mask drops the second.
             s.format = at->fmt == 3 && at->elems == 1 ? GX2_ATTRIB_FORMAT_FLOAT_32_32 : attr_format(at->fmt, at->fmt < 2 ? 4 : at->elems);
             s.type = GX2_ATTRIB_INDEX_PER_VERTEX;
@@ -3118,7 +3103,7 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("cpuvs")) gxt_cpu_vs = true;
     if (wiiu::debug_flag("cputex")) gxt_cpu_tex = true;
     if (wiiu::debug_flag("cpuattr")) gxt_cpu_attr = 0xf;
-    if (wiiu::debug_flag("gpuattr8")) gxt_cpu_attr &= ~3u;  // gpu_fetched still decides attribute by attribute
+    if (wiiu::debug_flag("cpuattr8")) gxt_cpu_attr |= 3;
     if (wiiu::debug_flag("cpuattr16")) gxt_cpu_attr |= 4;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
     if (wiiu::debug_flag("uberall")) uber_all = true;
@@ -3127,6 +3112,7 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("glslvsforce")) {
         glsl_vs = true;  // a test: every vertex shader comes from the console's compiler, none from the pack
         LOG("[gx2] glslvsforce: %u shipped vertex shaders set aside\n", (u32)vs_table.size());
+        for (const auto &e : vs_table) vs_set_aside[e.first] = e.second.index;
         vs_table.clear();
     }
     if (wiiu::debug_flag("kstats")) kernel::kstats.ipc = true;  // SVCs, switches and service requests per frame, on the log
