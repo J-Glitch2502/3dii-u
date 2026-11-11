@@ -561,6 +561,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control);  // true: done
 extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing will show
 extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
+void gx2_copied_to_memory(u32 paddr, u32 size);  // a texture copy or display transfer wrote guest memory (an LCD buffer the game fills itself)
 #endif
 // deferred draws (vertex.cpp): draws are recorded and processed in parallel at batch flush
 bool vtx_jobs_pending();

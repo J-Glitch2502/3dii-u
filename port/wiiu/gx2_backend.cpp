@@ -2077,6 +2077,16 @@ static void mark_textures(u32 paddr, u32 size, bool definite) {
 
 // CPU or DMA writes the game told us about. Nothing needs the CPU's cache flushed here: what the GPU reads in place is flushed at the draw, and on a
 // real CPU flushing a whole heap, as some games ask for after every file, would take tens of milliseconds.
+// What the game's texture copies and display transfers put into guest memory since the last VBlank (gpu/transfer.cpp): a top screen the game put together
+// in its LCD buffer itself shows from there (show_lcd_from_memory). Fills don't count: a game may clear an LCD buffer that a transfer fills later.
+u32 lcd_writes[8][2], lcd_write_count;
+void gx2_copied_to_memory(u32 paddr, u32 size) {
+    if (size < 4096) return;
+    lcd_writes[lcd_write_count % 8][0] = paddr;
+    lcd_writes[lcd_write_count % 8][1] = size;
+    lcd_write_count++;
+}
+
 void metal_guest_written(u32 paddr, u32 size, bool definite) {
     st_flushes++;
     if (!definite && size >= 1 << 20) {
@@ -2428,8 +2438,10 @@ void present() {
 }
 
 bool screen_fresh;
+bool top_shown;  // a display transfer brought the top screen since the last VBlank
 
 void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_hi = 1, float u_hi = 1) {
+    if (which == 0) top_shown = true;
     GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, tex->surface.image, tex->surface.imageSize);
     GX2ColorBuffer *cb = which == 0 ? tv_cb : drc_cb;
     GX2SetColorBuffer(cb, GX2_RENDER_TARGET_0);
@@ -2705,10 +2717,14 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
     int found = -1;
     u32 best = 0;
     const bool bottom_rows = rows <= 320;
+    // A buffer an LCD hasn't shown for a while is no screen's any more. Luigi's Mansion: Dark Moon shows "Preparing to start game" from VRAM at 0x18300000,
+    // later draws each half of its top screen there and puts the halves together in its LCD buffers in FCRAM: remembered for good, the first half went to the
+    // TV as the whole top screen, stretched to twice its height. Games that take turns between buffers show each of them every frame or two.
+    constexpr u32 kForgetAfter = 240;  // transfers: a few seconds, at the most a game makes
     for (int s = 0; s < 3; s++) {
         if ((s == 1) != bottom_rows) continue;  // only the screens of the picture's height
         for (const Seen &x : seen[s])
-            if (x.pa && x.pa >= paddr && x.pa - paddr < size && x.when >= best) {  // a tie goes to the later screen, as before
+            if (x.pa && clock - x.when <= kForgetAfter && x.pa >= paddr && x.pa - paddr < size && x.when >= best) {  // a tie goes to the later screen, as before
                 found = s;
                 best = x.when;
                 skip = x.pa - paddr;
@@ -3232,9 +3248,75 @@ static void draw_keyboard() {
     state_lost = true;
 }
 
+// The top screen as its LCD buffer holds it in guest memory, when no display transfer brought it this frame but the GPU's commands wrote into that buffer:
+// Luigi's Mansion: Dark Moon draws its top screen in two halves and puts them side by side in the LCD buffer with two texture copies. A 3DS's LCD just shows
+// the buffer, so this does too: 240x400, read as a render target's texture is (its last memory row the texture's first), so show_screen takes it as one.
+static void show_lcd_from_memory() {
+    const u32 writes = lcd_write_count;
+    lcd_write_count = 0;
+    const bool by_transfer = top_shown;
+    top_shown = false;
+    if (by_transfer || !writes) return;
+    const kernel::FramebufferInfo f = kernel::gsp_framebuffer(0);
+    const u32 pa = f.valid && f.addr_left ? mem::vaddr_to_paddr(f.addr_left) : 0;
+    const u32 fmt = f.format & 7, bpp = fmt == 0 ? 4 : fmt == 1 ? 3 : 2;
+    const u32 stride = f.stride ? f.stride : 240 * bpp, size = stride * 400;
+    const u8 *src = pa ? pptr(pa) : nullptr;
+    if (!src || stride < 240 * bpp) return;
+    bool hit = false;
+    for (u32 i = 0; i < std::min(writes, 8u); i++)
+        if (lcd_writes[i][0] < pa + size && pa < lcd_writes[i][0] + lcd_writes[i][1]) hit = true;
+    if (!hit) return;
+    static GX2Texture tex[2];
+    static u32 next;
+    GX2Texture &t = tex[next++ & 1];  // the other may still be on its way to the TV
+    if (!t.surface.image) {
+        GX2Surface &s = t.surface;
+        s.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+        s.width = 240;
+        s.height = 400;
+        s.depth = 1;
+        s.mipLevels = 1;
+        s.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+        s.aa = GX2_AA_MODE1X;
+        s.use = GX2_SURFACE_USE_TEXTURE;
+        s.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+        t.viewNumMips = t.viewNumSlices = 1;
+        t.compMap = 0x00010203;
+        GX2CalcSurfaceSizeAndAlignment(&s);
+        GX2InitTextureRegs(&t);
+        s.image = memalign(s.alignment, s.imageSize);
+        if (!s.image) return;
+    }
+    u8 *out = (u8 *)t.surface.image;
+    const u32 pitch = t.surface.pitch * 4;
+    for (u32 r = 0; r < 400; r++) {
+        const u8 *p = src + (size_t)(399 - r) * stride;
+        u8 *o = out + (size_t)r * pitch;
+        for (u32 c = 0; c < 240; c++, p += bpp, o += 4) {
+            const u16 v = (u16)(p[0] | (p[1] << 8));
+            switch (fmt) {
+            case 0: o[0] = p[3]; o[1] = p[2]; o[2] = p[1]; break;
+            case 1: o[0] = p[2]; o[1] = p[1]; o[2] = p[0]; break;
+            case 2: o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 5) & 63) * 255 / 63; o[2] = (v & 31) * 255 / 31; break;
+            case 3: o[0] = ((v >> 11) & 31) * 255 / 31; o[1] = ((v >> 6) & 31) * 255 / 31; o[2] = ((v >> 1) & 31) * 255 / 31; break;
+            default: o[0] = ((v >> 12) & 15) * 17; o[1] = ((v >> 8) & 15) * 17; o[2] = ((v >> 4) & 15) * 17; break;
+            }
+            o[3] = 255;
+        }
+    }
+    DCFlushRange(out, t.surface.imageSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, out, t.surface.imageSize);
+    static u32 notes;
+    if (notes++ < 2) wiiu::note("top screen from its LCD buffer %08x, format %u, stride %u", pa, fmt, stride);
+    show_screen(0, &t, false);
+    top_shown = false;
+}
+
 void gfx_pump() {
     if (!vblank_pending) return;
     vblank_pending = false;
+    show_lcd_from_memory();
     install_compiled();
     shader_compile_watch();
     if (menu_is_open) {

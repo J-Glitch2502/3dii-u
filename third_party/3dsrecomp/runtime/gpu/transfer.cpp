@@ -144,6 +144,9 @@ void display_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u3
     transfer_convert(src, dst, in_dims, out_dims, flags);
     texcache_invalidate(out_paddr, out_w * out_h * obpp);
     metal_guest_written(out_paddr, out_w * out_h * obpp);
+#ifdef __WIIU__
+    gx2_copied_to_memory(out_paddr, out_w * out_h * obpp);
+#endif
     if (from_gpu) metal_note_gpu_output(out_paddr, out_w * out_h * obpp);
     metal_display_transfer(in_paddr, out_paddr, in_dims, out_dims, flags);
 }
@@ -197,6 +200,9 @@ void texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 o
     }
     texcache_invalidate(out_paddr, out_total);
     metal_guest_written(out_paddr, out_total);
+#ifdef __WIIU__
+    gx2_copied_to_memory(out_paddr, out_total);
+#endif
     if (from_gpu) metal_note_gpu_output(out_paddr, out_total);
 }
 
