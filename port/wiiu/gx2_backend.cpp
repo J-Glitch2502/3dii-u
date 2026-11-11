@@ -130,7 +130,6 @@ struct PsEntry {
 };
 constexpr u32 COMPILED_HERE = 0x7ffffffe;  // a VsEntry or PsEntry index: the console compiled it, nothing to load from the shipped set
 constexpr u32 MISSED = ~0u;                // the set lacks it: the fallback draws, or the CPU does, until the console has compiled it
-const void *gsh;
 std::unordered_map<u64, VsEntry> vs_table;
 std::unordered_map<u64, PsEntry> ps_table;
 GX2VertexShader *vs_passthrough, *vs_blit;
@@ -166,15 +165,64 @@ std::vector<u8> read_whole(const char *path, u32 align_to) {
     return d;
 }
 
+// shaders.gsh is read as each shader is needed, not kept whole: with every lit state compiled ahead, Luigi's Mansion: Dark Moon's is 51 MB, which
+// stayed in a heap that a long session filled up. At boot the file is read once to note where each shader's header and program blocks are; a shader
+// is then two reads into a small GFD of its own, which WHB copies out of (its program in memory of its own), and which goes again.
+struct GfdShader {
+    u32 head_at, head_len, prog_at, prog_len;  // each block with its block header
+};
+std::vector<GfdShader> gfd_vs, gfd_ps;
+std::vector<u8> gfd_file_head, gfd_end;  // the file's header and its end block
+FILE *gfd_file;
+
+static void gfd_scan(const u8 *d, u32 n) {
+    constexpr u32 VS_HEAD = 3, VS_PROG = 5, PS_HEAD = 6, PS_PROG = 7, END = 1;
+    auto be32 = [&](u32 at) { return (u32)d[at] << 24 | (u32)d[at + 1] << 16 | (u32)d[at + 2] << 8 | d[at + 3]; };
+    if (n < 32 || memcmp(d, "Gfx2", 4)) FATAL("shaders.gsh is not a GFD file\n");
+    const u32 first = be32(4);
+    gfd_file_head.assign(d, d + first);
+    for (u32 at = first; at + 32 <= n && !memcmp(d + at, "BLK{", 4);) {
+        const u32 head = be32(at + 4), kind = be32(at + 16), size = be32(at + 20), len = head + size;
+        if (kind == VS_HEAD) gfd_vs.push_back({at, len, 0, 0});
+        else if (kind == VS_PROG && !gfd_vs.empty()) gfd_vs.back().prog_at = at, gfd_vs.back().prog_len = len;
+        else if (kind == PS_HEAD) gfd_ps.push_back({at, len, 0, 0});
+        else if (kind == PS_PROG && !gfd_ps.empty()) gfd_ps.back().prog_at = at, gfd_ps.back().prog_len = len;
+        else if (kind == END) gfd_end.assign(d + at, d + at + len);
+        at += len;
+    }
+}
+
+// one shader's blocks as a GFD file of their own, its blocks numbered as the first of their kind
+static std::vector<u8> gfd_one(const GfdShader &g) {
+    std::vector<u8> out(gfd_file_head);
+    const size_t at = out.size();
+    out.resize(at + g.head_len + g.prog_len);
+    wiiu::romfs_begin();  // the content's reads take turns (the game's RomFS is read the same way)
+    fseek(gfd_file, g.head_at, SEEK_SET);
+    const size_t a = fread(out.data() + at, 1, g.head_len, gfd_file);
+    fseek(gfd_file, g.prog_at, SEEK_SET);
+    const size_t b = fread(out.data() + at + g.head_len, 1, g.prog_len, gfd_file);
+    wiiu::romfs_end();
+    if (a != g.head_len || b != g.prog_len) FATAL("shaders.gsh could not be read\n");
+    for (size_t blk : {at, at + g.head_len})
+        for (int k = 0; k < 8; k++) out[blk + 24 + k] = 0;  // block id and index: 0
+    out.insert(out.end(), gfd_end.begin(), gfd_end.end());
+    return out;
+}
+
 GX2VertexShader *load_vs(u32 index) {
     wiiu::last_vs = index;
-    GX2VertexShader *s = WHBGfxLoadGFDVertexShader(index, gsh);
+    if (index >= gfd_vs.size()) FATAL("no vertex shader %u\n", index);
+    std::vector<u8> one = gfd_one(gfd_vs[index]);
+    GX2VertexShader *s = WHBGfxLoadGFDVertexShader(0, one.data());
     if (!s) FATAL("cannot load vertex shader %u\n", index);
     return s;
 }
 GX2PixelShader *load_ps(u32 index) {
     wiiu::last_ps = index;
-    GX2PixelShader *s = WHBGfxLoadGFDPixelShader(index, gsh);
+    if (index >= gfd_ps.size()) FATAL("no pixel shader %u\n", index);
+    std::vector<u8> one = gfd_one(gfd_ps[index]);
+    GX2PixelShader *s = WHBGfxLoadGFDPixelShader(0, one.data());
     if (!s) FATAL("cannot load pixel shader %u\n", index);
     return s;
 }
@@ -182,18 +230,13 @@ GX2PixelShader *load_ps(u32 index) {
 void load_shader_tables() {
     static std::vector<u8> idx;
     idx = read_whole("fs:/vol/content/shaders.idx", 0);
-    void *file = nullptr;
     {
-        FILE *f = fopen("fs:/vol/content/shaders.gsh", "rb");
-        if (!f) FATAL("shaders.gsh is missing\n");
-        fseek(f, 0, SEEK_END);
-        const long n = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        file = memalign(0x40, n);
-        fread(file, 1, n, f);
-        fclose(f);
-    }
-    gsh = file;
+        std::vector<u8> file = read_whole("fs:/vol/content/shaders.gsh", 0);
+        if (file.empty()) FATAL("shaders.gsh is missing\n");
+        gfd_scan(file.data(), (u32)file.size());
+    }  // and the memory goes back
+    gfd_file = fopen("fs:/vol/content/shaders.gsh", "rb");
+    if (!gfd_file) FATAL("shaders.gsh is missing\n");
     if (idx.size() < sizeof(ShaderIndexHeader)) FATAL("shaders.idx is missing\n");
     const auto *h = (const ShaderIndexHeader *)idx.data();
     if (h->magic != kShaderIndexMagic || h->version != kShaderIndexVersion) FATAL("shaders.idx is the wrong version\n");
@@ -444,6 +487,19 @@ static void *for_gpu_writes(void *p, u32 n) {
 
 static bool mem1_relief;  // fast memory has been found full once (wiiu::relieve_mem1)
 
+void relieve_memory(u32 wanted);  // below, where the caches are
+
+// memalign for what the GPU reads, which on failure first makes room in the caches (relieve_memory) and tries again: after a long session through
+// Luigi's Mansion: Dark Moon's rooms a texture found the heap full ("out of memory for a 356352 byte texture", Senne's Wii U, 2026-11-11)
+void *gpu_memalign(u32 align, u32 size) {
+    void *p = memalign(align, size);
+    if (!p) {
+        relieve_memory(size);
+        p = memalign(align, size);
+    }
+    return p;
+}
+
 void *alloc_surface_mem(u32 size, u32 align, bool &mem1, bool want_mem1) {
     if (want_mem1 && GfxHeapAllocMEM1) {
         void *p = GfxHeapAllocMEM1(size, align);
@@ -457,7 +513,7 @@ void *alloc_surface_mem(u32 size, u32 align, bool &mem1, bool want_mem1) {
         }
     }
     mem1 = false;
-    void *p = memalign(align, size);
+    void *p = gpu_memalign(align, size);
     if (!p) FATAL("out of memory for a %u byte surface\n", size);
     return for_gpu_writes(junk(p, size, 1), size);
 }
@@ -996,6 +1052,40 @@ void decode_level(const u8 *src, u32 w, u32 h, u32 fmt, u32 *dst, u32 pitch, u32
     }
 }
 
+// The heap is full: once the GPU is done, everything the vertex cache holds that this frame hasn't used, the buffers it let go, and the textures this
+// frame hasn't used, the least recently used first, down to half of what they take, or until what's wanted is free
+void relieve_memory(u32 wanted) {
+    const u32 now = (u32)st_flips;
+    draw_done();
+    for (auto it = vtx_cache.begin(); it != vtx_cache.end();)
+        if (it->second.used != now) {
+            vtx_retire(it->second);
+            it = vtx_cache.erase(it);
+        } else ++it;
+    u64 freed = 0;
+    for (size_t i = 0; i < vtx_retired.size();)
+        if (vtx_retired[i].second != now + 4) {  // let go before this frame, so no draw of this one reads it
+            free(vtx_retired[i].first);
+            vtx_retired[i] = vtx_retired.back();
+            vtx_retired.pop_back();
+        } else i++;
+    const u64 tex_before = tex_memory, goal = tex_memory / 2;
+    while (tex_memory > goal && !textures.empty()) {
+        auto it = std::min_element(textures.begin(), textures.end(), [](const auto &a, const auto &b) { return a->last_use < b->last_use; });
+        if ((*it)->last_use >= use_counter) break;  // this frame's
+        const u64 m = (*it)->spare ? 2ull * (*it)->mem : (*it)->mem;
+        tex_memory -= m;
+        freed += m;
+        free((*it)->t.surface.image);
+        free((*it)->spare);
+        tex_index.erase(tex_key((*it)->addr, (*it)->w, (*it)->h, (*it)->fmt, (*it)->levels));
+        textures.erase(it);
+        if (freed > 4ull * wanted && freed > (8u << 20)) break;
+    }
+    LOG("[gx2] memory full (%u bytes wanted): textures %u KB -> %u KB, the vertex cache now %u KB\n", wanted, (u32)(tex_before >> 10), (u32)(tex_memory >> 10),
+        (u32)(vtx_cache_size >> 10));
+}
+
 void evict_textures() {
     while (tex_memory > TEX_MEMORY_LIMIT && !textures.empty()) {
         auto it = std::min_element(textures.begin(), textures.end(), [](const auto &a, const auto &b) { return a->last_use < b->last_use; });
@@ -1183,7 +1273,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
     GX2CalcSurfaceSizeAndAlignment(&f);
     GX2InitTextureRegs(&e.t);
     e.mem = f.imageSize + f.mipmapSize;
-    f.image = memalign(f.alignment, e.mem);
+    f.image = gpu_memalign(f.alignment, e.mem);
     if (!f.image) FATAL("out of memory for a %u byte texture\n", e.mem);
     junk(f.image, e.mem, 2);
     if (e.gpu) for_gpu_writes(f.image, e.mem);  // the CPU decoder's writes are flushed as it goes; the GPU's decode isn't
@@ -3699,6 +3789,12 @@ float gfx_report() {
         us(P_KEY), us(P_BIND), us(P_PS), us(P_STATE), us(P_UNI), us(P_TEX), us(P_HASH), us(P_TEXUP), us(P_TEXFL), us(P_VSUNI), us(P_RANGE), us(P_ATTR), us(P_DRAW),
         (list_ns - last_list_ns) / 1e6 / flips, ms(P_PRESENT), ms(P_WAIT), ms(P_SYNC), st_syncs / flips, st_luts / flips, draws / flips, ds_built / flips, st_flushes / flips, st_rehashes / flips, (u32)textures.size());
     last_list_ns = list_ns;
+    {
+        u64 surf = 0;
+        for (const auto &x : surfaces) surf += x->mem1 ? 0 : (x->depth ? x->db.surface.imageSize : x->cb.surface.imageSize);
+        LOG("[prof] memory the renderer holds: textures %u KB, vertex cache %u KB (%u buffers let go), surfaces outside MEM1 %u KB (%u surfaces)\n", (u32)(tex_memory >> 10),
+            (u32)(vtx_cache_size >> 10), (u32)(vtx_retired.size()), (u32)(surf >> 10), (u32)surfaces.size());
+    }
     LOG("[prof] vertex data per draw: %.1f streams, %.0f vertices, %.1f KB; %.0f%% of streams from the cache (%u entries, %u KB)\n", st_attr_streams / draws,
         st_attr_verts / draws, st_attr_bytes / 1024.0 / draws, 100.0 * st_vtx_hits / std::max<u64>(st_vtx_hits + st_vtx_misses, 1), (u32)vtx_cache.size(), (u32)(vtx_cache_size >> 10));
     st_attr_verts = st_attr_bytes = st_attr_streams = st_vtx_hits = st_vtx_misses = 0;
