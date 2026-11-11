@@ -158,12 +158,43 @@ by a factor in Cemu falls about as much on a console.
   `NOBUILD=1` to skip the build) and `console_runs/cemu_play.sh <name> <seconds> <shots>` (A every second or so).
   `console_runs/` is not in git.
 
+### Later on Nov 11: playable on the console, ~27-28 fps
+
+State with the build of 21:56 (Senne's Wii U, FTPiiU off): plays through the intro into the mansion, buttons and HOME work,
+~27-28 fps in the mansion (GPU thread 97% busy), far fewer hitches in new rooms. The intro still stutters at moments.
+
+- **FTPiiU must stay off.** With the plugin on, its busy threads (same priority 16, core 1) kept a guest thread ready but never
+  run, and the game froze with its sound looping. Raising the guest threads to 15 made the HOME button and the GamePad stop
+  working (they starved the system's own threads), so that was reverted. Not solved in code yet.
+- **Memory fills on the GPU** (`gx2_memory_fill`): targets wholly inside a fill are filled too; before, Dark Moon's fills of
+  `0x18000000` were done in guest memory by the CPU, a quarter of the GPU thread's time.
+- **Out of memory after a long session** ("out of memory for a 356352 byte texture"): shaders.gsh is now read per shader as
+  needed instead of whole (`gfd_scan`/`gfd_one`), and a full heap first makes room (`relieve_memory`: the vertex cache, then
+  the least recently used textures). The `[prof]` lines say what the renderer holds. 697 MB in use after ~7 minutes.
+- **Shaders from an Azahar cache**: `tools/azahar_to_log.py` turns a shared Azahar cache (`<id>_fs.vkch`) into fragment
+  states; a shared Dark Moon cache (`D:\Documents\Wii U Modding\lm2_azahar_shaders\`, from Senne) gave 17988, now in
+  `games/darkmoon/shader_logs/azahar_fs.bin`. 414 of 433 of our own logged states are among them. The console now misses 6.
+- **The PC version in a window**: `python tools/win/play_pc.py darkmoon` (see its docstring for the keys) plays the game on
+  the PC and adds the shaders it meets to `games/darkmoon/shader_logs`.
+- Switches over the network: `set vtxcache 0|1`, `set fillinside 0|1`, `set lineargpu 0|1`. The bottom screen sometimes
+  shows only its moving parts (map marker, hearts); not tried with the switches yet.
+- **Don't send the `fs` command**: sent at connect, the game's network console stopped answering (port 4405 closed).
+
+Where the time goes now (console, mansion, `[prof]`): about 180 draws a frame at ~82 us each (~15 ms): **tex 44 us** (of
+which hash 2, upload 5: the rest not yet explained), attr 10, range 9, bind 5; plus `sync` 6.5 ms a flip and 1.5 draws a
+flip through a geometry shader on the CPU (500-1500 vertices). Two 256x256 RGBA8 textures, `0x183a8000` and `0x183e8000`,
+are uploaded again every frame as definitely written, with no transfer or copy to them in the trace: probably a memory fill
+the game clears them with each frame, done by the CPU since they're textures, not targets.
+
 ## Next step
 
-1. Senne rebuilds with the repository's Builder and plays it on his console while the PC reads the log over the network:
-   the fps (the `[gx2]` lines), the `[prof]` lines to see what costs most now, and whether the freeze after A comes back.
-2. Whatever costs most next; the `[prof]` lines say which.
-3. PR to `main` with an explanation for Josiah: the DSP change and the Wii U renderer changes touch every game, so the
+1. Trace a mansion frame on the console (`set trace 600`, no `fs`): what writes `0x183a8000`/`0x183e8000` each frame, and
+   what the rest of `tex`'s 44 us is. A fill that covers a whole texture could clear it on the GPU instead of the CPU and an
+   upload.
+2. The `sync` (6.5 ms a flip: which read backs are left) and the geometry-shader draws on the CPU.
+3. The intro's stutters: a console profile (`test profile`, then `prof`) during the intro with this build.
+4. Something for FTPiiU that doesn't starve the system (a guest thread that yields, say), or a line in the README.
+5. PR to `main` with an explanation for Josiah: the DSP change and the Wii U renderer changes touch every game, so the
    tested games want a run before it's merged (`tools/check_ports.py` runs them in Cemu, given their dumps).
 
 ## Other loose ends
