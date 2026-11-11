@@ -286,6 +286,26 @@ void sleep_current(u64 ns, Lock &lk) {
     block_current(lk);
 }
 
+// Storage is what this is for. A read used to keep the CPU: every other thread of the game, its sound thread among them, stood still for as
+// long as the storage took, which on a console is most of a transition between scenes, and the sound stuttered through each one (2026-11-10).
+void run_blocked(Lock &lk, const std::function<void()> &work) {
+    Thread *cur = current_thread();
+    cur->status = TStatus::WaitSleep;  // with no timeout set: nothing resumes it but the end of this
+    cur->wait_gen++;
+    flush_deferred();
+    running = best_ready();
+    if (running) {
+        running->status = TStatus::Running;
+        running->cv.notify_one();
+    }
+    lk.unlock();
+    work();
+    lk.lock();
+    make_ready(cur, true);
+    schedule_async();  // takes the CPU if it's free, and asks a thread of lower priority for it otherwise
+    cur->cv.wait(lk, [&] { return running == cur; });
+}
+
 // ---------------------------------------------------------------- wait objects
 void WaitObject::add_waiter(Thread *t) {
     if (std::find(waiters.begin(), waiters.end(), t) == waiters.end()) waiters.push_back(t);

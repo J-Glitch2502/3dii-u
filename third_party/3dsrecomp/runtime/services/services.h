@@ -49,7 +49,7 @@ extern GxStats gx_stats;
 void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty);  // (host thread, lock not held)
 void hid_motion(const s16 *accel, const s16 *gyro);                        // (the thread that calls hid_update) x, y, z in the 3DS's units
 // dsp
-bool dsp_tick();  // (host thread, lock not held) one audio frame; false: the game isn't ready for it yet, call again shortly
+void dsp_tick();  // (host thread, lock not held) one audio frame, played whether or not the game has come for the last one shortly
 }
 // The host's microphone, for mic:u (lock held). misc.cpp has weak defaults that give silence.
 void mic_host_start();

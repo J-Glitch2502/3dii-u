@@ -104,7 +104,11 @@ void wakeup(Dsp &d) {
     reset_pipes(d);
 }
 
-StereoFrame generate_frame(Dsp &d) {
+// seen: the game is waiting for this frame. One it isn't waiting for (it's late: reading a file, held up by another thread) still plays what
+// its voices have queued, as a 3DS's DSP goes on playing whatever the game does, but leaves the shared memory's settings and status alone: the
+// game may be in the middle of them, and a status it never read would lose it a "buffer finished" (a stream then reloads a buffer still
+// queued and the game hangs walking the voice's list). The next frame it takes reports what happened meanwhile.
+StereoFrame generate_frame(Dsp &d, bool seen) {
     const int ri = read_region_index();
     SharedMemory &rd = region(ri);
     SharedMemory &wr = region(ri ^ 1);
@@ -113,8 +117,8 @@ StereoFrame generate_frame(Dsp &d) {
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
-        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs);
-        memcpy(&wr.source_status[i], &s, sizeof(s));
+        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen);
+        if (seen) memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
     }
 
@@ -258,13 +262,13 @@ u16 recv_data(u32 /*reg*/) {
     return d.power == Power::On ? 0 : 1;
 }
 
-bool tick() {
+bool tick(bool seen) {
     Dsp &d = dsp();
     StereoFrame out;
     {
         std::lock_guard lk(d.lock);
         if (d.power != Power::On) return false;
-        out = generate_frame(d);
+        out = generate_frame(d, seen);
     }
     host_output(out.data(), out.size());
     return true;

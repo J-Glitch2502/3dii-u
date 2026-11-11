@@ -16,25 +16,24 @@ struct DspState {
 DspState dsp;
 }  // namespace
 
-bool dsp_tick() {
+void dsp_tick() {
+    bool seen = true;
     {
-        // Like the real DSP, don't start a frame until the game is done with the last one. Otherwise the status table gets rewritten while
-        // the game reads it: one channel of a stereo stream misses "buffer finished", the stream reloads a buffer still queued on that
-        // channel, and the game hangs walking the voice's list, now a loop. The limit is for a game that polls for a later frame instead.
+        // A frame the game hasn't come for (it isn't waiting on the pipe's event yet) is played all the same, but kept from the game: see
+        // generate_frame. Waiting for the game instead stopped the sound whenever its sound thread was late, by a file read or a busy frame:
+        // gaps of 5 ms about once a second in NSMB2 (2026-11-10). The limit is for a game that polls for a later frame instead of waiting.
         Lock lk(kmutex);
         auto &ev = dsp.pipe_irq[2];
-        if (ev && ev->waiters.empty() && dsp.game_waits && ++dsp.held < 1000) return false;
-        dsp.held = 0;
+        if (ev && ev->waiters.empty() && dsp.game_waits && ++dsp.held < 100) seen = false;
+        else dsp.held = 0;
         if (ev && !ev->waiters.empty()) dsp.game_waits = true;
     }
-    bool on = audio::tick();
-    if (!on) return true;
+    if (!audio::tick(seen) || !seen) return;
     Lock lk(kmutex);
     static int n;
     if (n++ == 100) VLOG("[dsp] tick: pipe event %s\n", dsp.pipe_irq[2] ? dsp.pipe_irq[2]->name.c_str() : "none");
     if (dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
     schedule_async();
-    return true;
 }
 
 struct Dsp : Service {

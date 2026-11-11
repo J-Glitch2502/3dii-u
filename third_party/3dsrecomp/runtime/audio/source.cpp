@@ -278,14 +278,14 @@ void Source::generate() {
     st.filters.process(frame);
 }
 
-SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16]) {
-    parse_config(cfg, coeffs);
+SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen) {
+    if (seen) parse_config(cfg, coeffs);
     if (st.enabled) generate();
 
     SourceStatus s;
     s.is_enabled = st.enabled;
     s.current_buffer_id_dirty = st.buffer_update ? 1 : 0;
-    st.buffer_update = false;
+    if (seen) st.buffer_update = false;
     s.sync_count = st.sync_count;
     s.buffer_position.set(st.pos);
     s.current_buffer_id = st.current_buffer_id;

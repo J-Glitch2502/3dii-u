@@ -33,6 +33,7 @@
 #include <new>
 #include <string>
 
+#include "audio/host.h"
 #include "audio_iface.h"
 #include "frontend.h"
 #include "gpu_iface.h"
@@ -310,10 +311,14 @@ static int hid_thread(int, void *) {
     return 0;
 }
 
+constexpr int AUDIO_CUSHION = 1600;  // samples kept queued, about 50 ms: audio_wiiu.cpp's CUSHION, which starts the voices at twice this
+
 static int audio_thread(int, void *) {
     const OSTime period = OSNanosecondsToTicks(1000000000ll * 160 / 32728);
     OSTime next = OSGetSystemTime();
     bool silent = false;
+    u32 gaps = 0;
+    OSTime gaps_logged = 0;
     while (!quitting) {
         if (gpu_pause != silent) {
             silent = gpu_pause;
@@ -324,11 +329,29 @@ static int audio_thread(int, void *) {
             OSSleepTicks(OSMillisecondsToTicks(5));
             continue;
         }
-        next += period;
         const OSTime now = OSGetSystemTime();
-        if (next > now) OSSleepTicks(next - now);
-        else if (now - next > period * 8) next = now;  // never try to catch up on more than a short stall
-        while (!kernel::dsp_tick() && !quitting && !gpu_pause) OSSleepTicks(OSMicrosecondsToTicks(500));
+        if (const int queued = audio::hle::host_queued(); queued >= 0) {
+            // Once the voices play, a frame is made whenever what's queued falls under the cushion, so the sound keeps to the console's audio
+            // clock. Made by the timer alone, production ran half a percent behind what the voices played, and the queue ran dry about once
+            // a second with the game at full speed and the CPU mostly idle (NSMB2 in Cemu, 2026-11-10).
+            if (queued >= AUDIO_CUSHION) {
+                OSSleepTicks(OSMillisecondsToTicks(1));
+                continue;
+            }
+        } else {  // before the voices start: by the timer
+            next += period;
+            if (next > now) OSSleepTicks(next - now);
+            else if (now - next > period * 8) next = now;  // never try to catch up on more than a short stall
+        }
+        // Nearly nothing left queued: this thread came too late, and the voices are about to play old sound again. Every time is on the log, so
+        // a run can be held to none (tools/check_ports.py).
+        if (const int queued = audio::hle::host_queued(); queued >= 0 && queued < 160) gaps++;
+        kernel::dsp_tick();
+        if (gaps && now - gaps_logged > (OSTime)OSSecondsToTicks(1)) {
+            LOG("[audio] %u gaps: the sound ran out before the next frame of it was made\n", gaps);
+            gaps = 0;
+            gaps_logged = now;
+        }
     }
     audio_parked = true;
     return 0;
@@ -598,8 +621,14 @@ void frontend_run() {
     quitting = true;
     gfx_may_close = true;
     OSJoinThread(gpu, nullptr);
-    for (int i = 0; i < 50 && !audio_parked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
-    if (audio_parked) audio::shutdown();
+    // The sound system is always shut down before the game goes: left running, its voices play from memory the system is about to take back, and
+    // the Wii U Menu hangs as it starts (testers' NSMB2 and 3D Land, 2026-11-09). The audio thread used to get 100 ms to stop, and a late one
+    // meant no shutdown at all, with nothing logged. A busy game's can be late, so it gets 2 s, and the shutdown happens either way.
+    const OSTime audio_asked = OSGetSystemTime();
+    for (int i = 0; i < 1000 && !audio_parked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
+    LOG("[quit] audio thread %s after %d ms\n", audio_parked ? "stopped" : "still running", (int)OSTicksToMilliseconds(OSGetSystemTime() - audio_asked));
+    audio::shutdown();
+    LOG("[quit] sound system shut down\n");
     fflush(nullptr);
 }
 

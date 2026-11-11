@@ -174,6 +174,9 @@ void run_when_quiescent(std::function<void()> fn);  // (lock held) run fn when n
 void reschedule(Lock &lk);             // (lock held, from a guest thread) yield to a higher priority thread
 void block_current(Lock &lk);          // (lock held) the current thread waits until resumed
 void sleep_current(u64 ns, Lock &lk);  // (lock held) the current thread sleeps for ns of guest time
+// (lock held, from a guest thread) Runs work with the lock released and the CPU given to the other guest threads, as a thread waiting on a
+// service leaves it to them on a 3DS; back once work is done and this thread has the CPU again.
+void run_blocked(Lock &lk, const std::function<void()> &work);
 u64 now_ns();   // the guest clock: real time scaled by the game speed
 u64 real_ns();
 void set_clock_speed(u32 percent);

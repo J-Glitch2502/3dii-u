@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -401,10 +402,12 @@ static void log_romfs_read(u64 off) {
 // Games load in the background and expect the rest of the frame to go on meanwhile; an instant read can finish a
 // load before the code that started it has set up for its end (Animal Crossing: New Leaf's map process cleared
 // its own "ready" flag after a synchronous load, leaving the village's bottom screen blank and untouchable).
+// What the read itself took here (spent_ns) counts towards it: a console's storage is no faster than a game card.
 // RECOMP_FS_DELAY=0 turns it off.
-static void romfs_read_delay(IPC &ipc, u32 len) {
+static void romfs_read_delay(IPC &ipc, u32 len, u64 spent_ns) {
     static const bool on = !getenv("RECOMP_FS_DELAY") || atoi(getenv("RECOMP_FS_DELAY")) != 0;
-    if (on) sleep_current(std::max<u64>((u64)len * 94 + 582778, 663124), *ipc.lk);
+    const u64 on_a_3ds = std::max<u64>((u64)len * 94 + 582778, 663124);
+    if (on && spent_ns < on_a_3ds) sleep_current(on_a_3ds - spent_ns, *ipc.lk);
 }
 
 static std::string archive_dir(u32 id, const LowPath &p) {
@@ -469,9 +472,9 @@ struct FileSession : Service {
             u32 len = ipc[3];
             u32 dst = ipc[5];
             s64 n;
-            // Storage can take a long time to answer, and VBlanks and timers need the kernel lock meanwhile. Only the running thread gets here, and it
-            // keeps the CPU until it next enters the kernel, so nothing else in the guest can run into this file.
-            ipc.lk->unlock();
+            // Storage can take a long time to answer: the game's other threads run meanwhile, as they do on a 3DS (run_blocked)
+            const auto began = std::chrono::steady_clock::now();
+            run_blocked(*ipc.lk, [&] {
             if (romfs) {
                 FsIo io(0x0802);
                 log_romfs_read(base + off);
@@ -498,14 +501,15 @@ struct FileSession : Service {
                     n = pread(fd, gptr(dst), len, (off_t)off);
                 }
             }
-            ipc.lk->lock();
+            });
+            const u64 spent_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - began).count();
             if (n < 0) n = 0;
             if (g_verbose >= 2) LOG("[fs] read %s off %llx len %x -> %lld\n", romfs ? "romfs" : path.c_str(), (unsigned long long)off, len, (long long)n);
             ipc.ok(2, 2);
             ipc.set(2, (u32)n);
             ipc.set(3, (len << 4) | 0xC);
             ipc.set(4, dst);
-            if (romfs) romfs_read_delay(ipc, len);
+            if (romfs) romfs_read_delay(ipc, len, spent_ns);
             break;
         }
         case 0x0803: {  // Write(offset u64, size, flush, mapped buffer)

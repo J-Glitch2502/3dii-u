@@ -87,12 +87,13 @@ void pause(bool on) {
         AXVoiceEnd(voice[c]);
     }
 }
+// Safe with the audio thread still running: host_output and pause do nothing once the voices are gone
 void shutdown() {
-    for (AXVoice *&v : voice)
-        if (v) {
-            AXFreeVoice(v);
-            v = nullptr;
-        }
+    playing = false;  // first: nothing asks a voice where it is after this
+    AXVoice *const mine[2] = {voice[0], voice[1]};
+    voice[0] = voice[1] = nullptr;
+    for (AXVoice *v : mine)
+        if (v) AXFreeVoice(v);
     AXQuit();
 }
 

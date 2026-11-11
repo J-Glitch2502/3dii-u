@@ -58,7 +58,8 @@ public:
     void reset() { st = {}; frame = {}; }
     // Parses the configuration (clearing its dirty flags), generates this frame and returns the
     // status to report.
-    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16]);
+    // seen: the game takes this frame (generate_frame); if not, its settings are left unread and "buffer changed" is kept for the frame it does take
+    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool seen);
     void mix_into(QuadFrame &dst, int mix);
     const StereoFrame &output() const { return frame; }
 
