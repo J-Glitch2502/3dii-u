@@ -98,9 +98,24 @@ Debugging aids kept: `RECOMP_VOICEWATCH`, and `rt_debug_log` (C-callable, prefix
 generated C by hand: edit `games/darkmoon/gen_safe/code_NNN.c` before the `/* addr: */` line, run a trial (the file is
 recompiled), and put the file back afterwards (keep a copy; `games/` is not in git).
 
+## Building it for the Wii U (Nov 11)
+
+- Use the Builder **from this repository** (`builder/3Dii U Builder.pyw`, on the `darkmoon` branch). The packaged
+  `3Dii U Builder 1.0 beta` in `D:\Documents\Wii U Modding\` carries its own copy of the engine without these fixes:
+  with it Dark Moon still starts in Thrill Tower and freezes.
+- Checked with `builder/pipeline.py` on the encrypted `darkmoon.3ds` (keys from `keys\`): reading, decrypting, unpacking,
+  code (rpx 25.8 MB), shaders and the title all go through. Packing stopped only because the run used a blank OTP (there is
+  no `otp.bin` on this PC yet); with Senne's own it packs.
+- Shaders compiled ahead come from `games/darkmoon/shader_logs` (not in git). It held only the Thrill Tower menu's states
+  (8 pixel, 4 vertex shaders); the logs of the Nov 11 runs are merged in (41 vertex records, 564 fragment states, mostly
+  the 20-minute run), which gives 441 pixel and 24 vertex shaders. Parts of the game no PC run reached still compile on
+  first use: the console writes those to `shader_misses.bin` in the game's save (`fs:/vol/save/common`, e.g. with SaveMii);
+  that file put in `games/darkmoon/shader_logs` is compiled ahead by the next build.
+- The shader generator says "108 variants could not be translated": not looked into yet.
+
 ## Next step
 
-1. Wii U build through the Builder, as Senne builds it, then Cemu and his console. Random input doesn't really play the
+1. Senne builds it with the repository's Builder and plays it in Cemu and on his console. Random input doesn't really play the
    game, so him playing it says more than the trials can; how fast it runs on the Wii U is only known then.
 2. PR to `main` with an explanation for Josiah.
 
