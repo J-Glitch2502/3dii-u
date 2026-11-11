@@ -31,5 +31,5 @@
   "00040000000A8500": {"slug": "layton_mask", "title_id": "0005000010334486", "name": "Professor Layton and the Miracle Mask", "product": "WUP-N-LTMM", "folder": "Layton_Miracle_Mask",
                        "status": "Plays", "note": "About 57 fps on a console."},
   "0004000000055F00": {"slug": "darkmoon", "title_id": "000500003D00055F", "name": "Luigi's Mansion: Dark Moon", "product": "WUP-N-AGGE", "folder": "Luigis_Mansion_Dark_Moon",
-                       "status": "Untested", "note": "Boots in the PC trial, then freezes after about 10 s (an audio stream's queue)."}
+                       "status": "Untested", "note": "Plays 20 minutes into Gloomy Manor in the PC trial without freezing. Not yet tried in Cemu or on a console."}
 }
