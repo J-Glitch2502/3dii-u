@@ -47,4 +47,7 @@ struct ShaderIndexEntry {
 };
 constexpr u32 kShaderIndexMagic = 0x53484458;
 constexpr u32 kShaderIndexVersion = 1;
+// Raised whenever gen_fs_glsl or gen_vs_glsl comes to write a state differently. A console's shader cache holds the text the generator of
+// the build that wrote it made, and a build with another number here starts that cache over (shader_compile.cpp).
+constexpr u32 kShaderGenRevision = 1;
 }  // namespace gpu

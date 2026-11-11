@@ -61,10 +61,17 @@ const std::string &cache_path() {
     return p;
 }
 
+// The file starts with these two words. Its GLSL is what the shader generator of the build that wrote it made of each state, so a build whose
+// generator writes a state differently (kShaderGenRevision, shadergen.h) starts the file over: compiled from the old text, a shader would be
+// the old generator's, mistakes and all, under the new build's key.
+const u32 kCacheHead[2] = {0x53484443, kShaderGenRevision};  // 'SHDC'
+
 // u8 vs, u8 pad[3], u32 inputs, u64 key, u32 length, the GLSL: this console's own bytes, nobody else reads it
 void cache_append(const Job &j) {
     wiiu::fs_begin(0xC00B);  // its turn with every other file call
     if (FILE *f = fopen(cache_path().c_str(), "ab")) {
+        fseek(f, 0, SEEK_END);
+        if (ftell(f) == 0) fwrite(kCacheHead, 1, sizeof kCacheHead, f);
         const u32 head[5] = {(u32)j.vs << 24, j.inputs, (u32)(j.key >> 32), (u32)j.key, (u32)j.glsl.size()};
         fwrite(head, 1, sizeof head, f);
         fwrite(j.glsl.data(), 1, j.glsl.size(), f);
@@ -80,6 +87,12 @@ void cache_load() {
     FILE *f = fopen(cache_path().c_str(), "rb");
     if (!f) return;
     u32 n = 0, head[5];
+    if (fread(head, 1, sizeof kCacheHead, f) != sizeof kCacheHead || memcmp(head, kCacheHead, sizeof kCacheHead)) {
+        fclose(f);
+        if ((f = fopen(cache_path().c_str(), "wb"))) fclose(f);  // another generator's, or from before the file said whose: emptied
+        LOG("[glsl] the shader cache was another build's generator's: started over\n");
+        return;
+    }
     while (fread(head, 1, sizeof head, f) == sizeof head && head[4] < (1 << 20)) {
         Job j{(head[0] >> 24) != 0, true, (u64)head[2] << 32 | head[3], head[1], std::string(head[4], '\0')};
         if (fread(&j.glsl[0], 1, head[4], f) != head[4]) break;
@@ -214,9 +227,20 @@ void shader_compile_watch() {
     wiiu::log_threads();  // memory only: this is the GPU thread, which never waits for the card
 }
 
+// A draw is waiting for this one, so it goes ahead of everything the cache queued at the start, and a shader the cache queued that a draw now
+// asks for moves up to the front: after a start with a few hundred cached shaders a miss used to wait its turn behind all of them, its draws
+// going through the fallback for as many seconds.
 void shader_compile_request(bool vs, u64 key, std::string glsl, u32 inputs) {
     OSLockMutex(&mutex);
-    if (known.insert(key).second) jobs.push_back(Job{vs, false, key, inputs, std::move(glsl)});
+    if (known.insert(key).second) jobs.push_front(Job{vs, false, key, inputs, std::move(glsl)});
+    else
+        for (auto it = jobs.begin(); it != jobs.end(); ++it)
+            if (it->key == key && it->vs == vs) {
+                Job j = std::move(*it);
+                jobs.erase(it);
+                jobs.push_front(std::move(j));
+                break;
+            }
     OSUnlockMutex(&mutex);
 }
 
