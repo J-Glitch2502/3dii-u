@@ -8,7 +8,10 @@ WHAT YOU NEED
 
 - A Windows 10 or 11 PC (64-bit). While a game builds, drive C: needs about three times the game's size free.
 - Your 3DS game dump: a .3ds, .cci, .cia, .cxi or .app file, encrypted or decrypted. Its update and DLC too, if you want them in.
-- For encrypted dumps: boot9.bin and seeddb.bin from your own 3DS (GodMode9 can dump both). Put them in C:\Users\<you>\.3ds, or choose their folder in the builder.
+- For encrypted dumps: boot9.bin and seeddb.bin from your own 3DS, from GodMode9. Put them in C:\Users\<you>\.3ds, or choose their folder in the builder.
+  - boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y, then open [0:] SDCARD, press Y again and choose Copy.
+  - seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card.
+  Each row under "Your files" in the builder has a "How do I get this?" button with these steps.
 - Your Wii U's otp.bin, from your own console's NAND backup. The game is packed with it. The builder never shows the key and never stores it.
 - A Wii U with Aroma and WUP Installer GX2, and its SD card.
 - Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in and the
@@ -61,6 +64,9 @@ WHAT STAYS ON YOUR PC
   Deleting that folder frees the space; the builder makes it again.
 - Your dumps are never changed. Your keys are only read.
 - The games you build are made from your dumps and your keys: don't share them.
+
+- When you pick a game, the builder downloads its cover art from GameTDB (art.gametdb.com) for the game's start-up screens and Wii U Menu icon.
+  It sends only the four letters of the game's product code. Under Extras, "Banner art" lets you choose your own picture, or remove it to use the game's icon.
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
 Third-party notices.txt lists the open-source software it carries.

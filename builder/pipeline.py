@@ -107,14 +107,14 @@ def derived(dump):
             'folder': folder, 'status': 'Untested', 'note': 'Not tested on a console yet: it may not start, or stop partway.'}
 
 
-def make_title(game_dir, out, info):
+def make_title(game_dir, out, info, art=None):
     """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
     import importlib.util
     spec = importlib.util.spec_from_file_location('make_game_title', os.path.join(ROOT, 'tools', 'make_game_title.py'))
     titles = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(titles)
     titles.make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
-                      info['title_id'], info['name'], info['product'], ARCHIVES)
+                      info['title_id'], info['name'], info['product'], ARCHIVES, art)
     content = os.path.join(out, 'title', 'content')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')):
@@ -161,6 +161,8 @@ def main():
     ap.add_argument('--card', help='an SD card: the WUP goes in its install folder')
     ap.add_argument('--out', help='a folder to put the WUP in instead')
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
+    ap.add_argument('--art', help="a picture (the cover art, say) for the start-up screens and the Wii U Menu icon; the game's own icon otherwise")
+    ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode (build3ds.Game.mixed)')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) // 2))
     a = ap.parse_args()
     if sys.platform != 'win32':
@@ -268,6 +270,8 @@ def main():
     if not os.path.exists(b3.BIN + 'gcc.exe'):
         fail('The build tools aren\'t installed: see builder/README.md.')
     g = b3.Game(info['slug'], game_dir)  # the recipe every game gets, read from this game's own code (build3ds.py)
+    if a.mixed:
+        g.mixed()
     if g.mode == 'safe':
         print('hand-written code that keeps values in any register across its calls (Mobiclip\'s video decoder): every register goes through memory', flush=True)
     if update:
@@ -327,7 +331,7 @@ def main():
         shutil.copyfile(dvlb, os.path.join(learned, 'dvlb.bin'))
 
     PROGRESS.stage('Making the title')
-    make_title(game_dir, out, info)
+    make_title(game_dir, out, info, a.art)
 
     PROGRESS.stage('Packing the WUP')
     wup = os.path.join(a.out or game_dir, info['folder'])

@@ -17,6 +17,7 @@ from PySide6.QtGui import QColor, QFontDatabase, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QFileDialog
 
+import covers
 import decrypt
 import dumps
 import mods
@@ -30,15 +31,35 @@ NO_WINDOW = 0x08000000 if WIN else 0  # the build's compilers would each open a 
 DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
-# what the 3DS system files are and where they come from: "What are these?", and when they're missing or a folder has none (a tester asked, Nov 9)
-SYSTEM_HELP = ('A few small files every 3DS keeps in its own memory: the system font many games write their text in, and the parts (faces, eyes, '
-               'hair) Miis are drawn from. Games load them from the console, so a game dump doesn\'t have them. The builder puts them in each game '
-               'it makes and won\'t build without them: Mii games stop without the Mii parts.\n\n'
+NO_ART = "The game's own icon"
+LIBRARY_MAX = 40  # games the bottom screen remembers
+# What each of "Your files" is and how to get it from your own consoles: the "How do I get this?" buttons, and the message when one is missing.
+# Testers asked what the system files were and how to get seeddb.bin (Nov 9 and 10).
+HELP = {
+    'keys': ('3DS keys',
+             'Two files from your own 3DS that unlock encrypted game dumps: boot9.bin and seeddb.bin. Decrypted dumps don\'t need them.\n\n'
+             'Both come from GodMode9 on a 3DS with custom firmware (boot9strap):\n'
+             '•  boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y. Open [0:] SDCARD, press Y again and choose Copy.\n'
+             '•  seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card. It holds the seeds of '
+             'the games installed on that 3DS, which newer eShop games need.\n\n'
+             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder..." and choose where they are.'),
+    'otp': ('Wii U otp.bin',
+            'A small file (exactly 1024 bytes) from your own Wii U. The game is packed with a key from it so your console installs it. The '
+            'builder never shows or stores that key.\n\n'
+            'It comes from a Wii U with Aroma: run Wii U NAND Dumper, choose Dump OTP, and otp.bin is written to the SD card. If you already '
+            'made a NAND backup when setting up Aroma, otp.bin is in that backup.\n\n'
+            'On the PC, press "File..." and choose it. Keep it private: it is unique to your console.'),
+    'system': ('3DS system files',
+               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, and the parts (faces, '
+               'eyes, hair) Miis are drawn from. Games load them from the console, so a game dump doesn\'t have them. The builder puts them in '
+               'each game it makes and won\'t build without them: Mii games stop without the Mii parts.\n\n'
                'They come from your own 3DS, either way:\n'
                '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
                '•  GodMode9 on your 3DS: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, '
-               'press Y again and choose Copy (not Move). Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD card.\n\n'
-               'The builder copies them once and keeps them for every game after.')
+               'press Y again and choose Copy (not Move). Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD '
+               'card.\n\n'
+               'The builder copies them once and keeps them for every game after.'),
+}
 
 
 # ---- settings, the PC's drives, and words for what was chosen
@@ -161,15 +182,19 @@ def draw_icon(size):
 def theme():
     families = set(QFontDatabase.families())
     body = next((f for f in ('Segoe UI Variable Text', 'Segoe UI', 'Cantarell', 'Noto Sans') if f in families), '')
-    display = next((f for f in ('Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI') if f in families), body)
-    return {'bg': '#0b0e22', 'rail': '#080a1a', 'surface': '#161a3d', 'surface2': '#1c2150', 'edge': '#282f6c', 'text': '#f4f6ff', 'dim': '#a9b1d8',
-            'faint': '#6b73a6', 'red': '#ff5a73', 'violet': '#a07bff', 'blue': '#3fd0ff', 'green': '#45e3a8', 'amber': '#ffc95e', 'ink': '#14183a',
-            'paper': '#f6f7ff', 'font': body, 'display': display, 'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas'}
+    display = next((f for f in ('Segoe UI Variable Display', 'Segoe UI', 'Cantarell') if f in families), body)
+    # the 3DS HOME Menu's palette: pale greys under white tiles, its blue for what you press, an aqua-blue console
+    return {'bg': '#dfe3e9', 'rail': '#f6f7f9', 'surface': '#ffffff', 'surface2': '#eef1f5', 'hover': '#e4f3fc', 'stripe': '#80ffffff',
+            'edge': '#c9ced6', 'shadow': '#5a6472', 'text': '#33363d', 'dim': '#626873', 'faint': '#9aa0ab', 'red': '#e60012', 'violet': '#7a5cf0',
+            'blue': '#1e9be0', 'sky': '#5cc4f5', 'blueDeep': '#127ab8', 'green': '#35b54a', 'amber': '#f39800', 'ink': '#ffffff', 'paper': '#ffffff',
+            'well': '#d3d9e1', 'font': body, 'display': display,
+            'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas'}
 
 
 # ---- what the window shows, and what its buttons do
 class App(QObject):
     changed = Signal()
+    coverReady = Signal(str, str)  # title id, path: from fetch_cover's thread
     logChanged = Signal()
 
     def _p(kind, name, notify=changed):
@@ -179,6 +204,8 @@ class App(QObject):
     note, meta, icon = _p(str, 'note'), _p(str, 'meta'), _p(str, 'icon')
     updateText, hasUpdate, dlcText, hasDlc = _p(str, 'updateText'), _p(bool, 'hasUpdate'), _p(str, 'dlcText'), _p(bool, 'hasDlc')
     modText, hasMod = _p(str, 'modText'), _p(bool, 'hasMod')
+    artText, hasArt, artUrl = _p(str, 'artText'), _p(bool, 'hasArt'), _p(str, 'artUrl')
+    library = _p('QVariantList', 'library')
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
     target, destText, cards = _p(str, 'target'), _p(str, 'destText'), _p('QVariantList', 'cards')
@@ -195,18 +222,20 @@ class App(QObject):
         if not self.st.get('keys'):
             self.st['keys'] = decrypt.KEYS_DEFAULT
         decrypt.use_keys(self.st['keys'])
-        self.game = self.update = self.dlc = self.mod = None  # the mod is a path
+        self.game = self.update = self.dlc = self.mod = self.art = None  # the mod and the banner art are paths
         self.proc, self.result, self.cancelled = None, None, False
         self.lines, self.log_lines, self.dialogs, self.flow = queue.Queue(), [], [], None
         compat = json.load(open(os.path.join(HERE, 'compat.json'), encoding='utf-8'))
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
-                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, keysOk=False, keysNeeded=False, keysText='', otpOk=False,
+                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
                        otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], canBuild=False, building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
                        games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')],
                        others=compat.get('_cemu', []))  # shown only: they build as untested games, by their own code
+        self.coverReady.connect(self.cover_ready)
+        self.refresh_library()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.refresh_cards()
@@ -264,7 +293,7 @@ class App(QObject):
         if path:
             self.open_game(path)
 
-    def open_game(self, path):
+    def open_game(self, path, ask=True):
         self.st['last_dir'] = os.path.dirname(path)
         d = self.open_dump(path)
         if d is None:
@@ -293,8 +322,49 @@ class App(QObject):
         self.set_extra('update', None)
         self.set_extra('dlc', None)
         self.set_extra('mod', None)
+        saved = self.st.get('art', {}).get(f'{d.title_id:016x}')  # a game keeps the banner art chosen for it; '' is "none, on purpose"
+        self.set_art(saved if saved and os.path.isfile(saved) else None, remember=False)
+        if saved is None:  # nothing chosen yet: its cover art, fetched off the window's thread
+            threading.Thread(target=self.fetch_cover, args=(d,), daemon=True).start()
         self.refresh_files()
-        self.run_flow(self.extras())
+        self.remember_game(d, info['name'])
+        if ask:  # a game picked again from the library keeps quiet
+            self.run_flow(self.extras())
+
+    # ---- the library: the games picked before, as the icons on the bottom screen
+    def remember_game(self, d, name):
+        games = [g for g in self.st.get('library', []) if g['path'] != d.path]
+        games.append(dict(path=d.path, name=name, id=f'{d.title_id:016x}', product=d.product or '', icon=icon_url(d.icon) if d.icon else ''))
+        self.st['library'] = games[-LIBRARY_MAX:]
+        save_settings(self.st)
+        self.refresh_library()
+
+    def refresh_library(self):
+        """what the window shows of each remembered game: its name, its picture (the cover if this PC has it, else its own icon), and
+        which one is open"""
+        covers_dir = os.path.join(os.path.dirname(settings_file()), 'covers')
+        shown = []
+        for g in self.st.get('library', []):
+            art = self.st.get('art', {}).get(g['id']) or os.path.join(covers_dir, (covers.game_code(g['product']) or '-') + '.jpg')
+            cover = QUrl.fromLocalFile(art).toString() if os.path.isfile(art) else ''
+            shown.append(dict(path=g['path'], name=g['name'], icon=g['icon'], cover=cover, current=bool(self.game and self.game.path == g['path'])))
+        self.set(library=shown)
+
+    @Slot(str)
+    def openRecent(self, path):
+        if self._s['building'] or (self.game and self.game.path == path):
+            return
+        if not os.path.isfile(path):
+            self.tell('That game has moved', 'Its file is no longer where it was. Pick it again with the + tile.', 'warn')
+            self.forgetGame(path)
+            return
+        self.open_game(path, ask=False)
+
+    @Slot(str)
+    def forgetGame(self, path):
+        self.st['library'] = [g for g in self.st.get('library', []) if g['path'] != path]
+        save_settings(self.st)
+        self.refresh_library()
 
     def refresh_note(self):
         info = pipeline.profile_for(self.game)
@@ -375,6 +445,46 @@ class App(QObject):
         m.close()
         self.set_extra('mod', path, ', '.join(parts))
 
+    @Slot()
+    def chooseArt(self):
+        path = QFileDialog.getOpenFileName(None, f'A picture for {self._s["gameName"]}: its cover art, say', self.st.get('art_folder', ''),
+                                           'Pictures (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)')[0]
+        if not path:
+            return
+        if QImage(path).isNull():
+            self.tell("That picture can't be read", 'Choose a PNG or JPEG picture.', 'error')
+            return
+        self.st['art_folder'] = os.path.dirname(path)
+        self.set_art(path)
+
+    @Slot()
+    def removeArt(self):
+        self.set_art(None)
+
+    def fetch_cover(self, game):
+        """on a thread of its own: the game's cover art from GameTDB (covers.py), handed to the window's thread when it's here"""
+        path = covers.cover(game.product, os.path.join(os.path.dirname(settings_file()), 'covers'))
+        if path:
+            self.coverReady.emit(f'{game.title_id:016x}', path)
+
+    def cover_ready(self, title_id, path):
+        if self.game and f'{self.game.title_id:016x}' == title_id and not self.art and not self._s['building']:
+            self.set_art(path)
+        self.refresh_library()
+
+    def set_art(self, path, remember=True):
+        """the picture this game's start-up screens and Wii U Menu icon are made from, remembered for the game: a path, or '' once the
+        player has removed it, so its cover isn't fetched again"""
+        self.art = path
+        if self.game and remember:
+            self.st.setdefault('art', {})[f'{self.game.title_id:016x}'] = path or ''
+            save_settings(self.st)
+        cover = bool(path) and os.path.dirname(path) == os.path.join(os.path.dirname(settings_file()), 'covers')
+        self.set(artText=('Its cover art, from GameTDB' if cover else os.path.basename(path)) if path else NO_ART, hasArt=bool(path),
+                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the top screen previews it
+        if remember:
+            self.refresh_library()
+
     @Slot(str)
     def removeExtra(self, kind):
         self.set_extra(kind, None)
@@ -410,12 +520,12 @@ class App(QObject):
                                              self.st.get('system', ''))
         if p:
             if not self.import_system(p):
-                self.tell('No 3DS system files there', SYSTEM_HELP, 'warn')
+                self.tell('No 3DS system files there', HELP['system'][1], 'warn')
             self.refresh_files()
 
-    @Slot()
-    def explainSystem(self):
-        self.tell('3DS system files', SYSTEM_HELP)
+    @Slot(str)
+    def explain(self, what):
+        self.tell(*HELP[what])
 
     def import_system(self, folder):
         """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games"""
@@ -507,7 +617,7 @@ class App(QObject):
                     break
             self.refresh_files()
             if not dumps.have_system_archives(pipeline.ARCHIVES):
-                self.tell('The 3DS system files are missing', SYSTEM_HELP, 'warn')
+                self.tell('The 3DS system files are missing', HELP['system'][1], 'warn')
                 return
         save_settings(self.st)
         argv = [sys.executable, '--pipeline'] if FROZEN else [sys.executable.replace('pythonw.exe', 'python.exe'), '-u', os.path.join(HERE, 'pipeline.py')]
@@ -517,6 +627,8 @@ class App(QObject):
                 argv += [f'--{kind}', getattr(self, kind).path]
         if self.mod:
             argv += ['--mod', self.mod]
+        if self.art:
+            argv += ['--art', self.art]
         self.log_lines, self.result, self.cancelled = [], None, False
         stages = [n for n, _ in pipeline.STAGES if n != 'Copying' or self._s['target'] == 'card']
         self.set(building=True, view='building', stages=stages, stage=0, failed=False, progress=0.0, detail='Starting...', log='')

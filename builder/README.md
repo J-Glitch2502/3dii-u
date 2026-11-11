@@ -70,7 +70,7 @@ Windows 10 or 11 for now (Linux is planned):
   - The builder copies them from Azahar's or Citra's user folder, or from any folder holding a 3DS NAND up to three levels down in Downloads, Desktop or Documents, whatever it's called. It keeps them in its work folder.
   - Off a 3DS, GodMode9 copies `title/0004009b` out of `[1:] SYSNAND CTRNAND`; the user picks that folder (or the one holding it) with "Folder...". Azahar gets them with File > Set Up System Files and the Artic Setup Tool.
   - The NAND's contents may be NCCH (`<n>.app`, encrypted as on the 3DS or not) or RomFS images already taken out (`<n>.app.romfs`). A folder of `<title id>.romfs` files works too.
-  - "What are these?" next to the row explains all this to testers (`gui.SYSTEM_HELP`).
+  - Each row under "Your files" has a "How do I get this?" button that explains its file to testers (`gui.HELP`).
   - Without the Mii data and the shared font, the app and `pipeline.py` won't build. A Miitopia built without them stopped on the console with `[err:f] result c8804478`.
   - If a build ever lacks one, the runtime's error screen names the missing archive.
 - Free disk space of about three times the game's size while it builds. Work files are deleted at the end.
