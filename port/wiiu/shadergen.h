@@ -21,6 +21,7 @@ u32 fs_key_words(const DrawState &ds, u32 *w);  // the same key as words, withou
 DrawState fs_normal(const DrawState &ds);
 DrawState decode_key(const std::string &k);
 u64 fnv64(const void *p, size_t n);
+extern u64 shipped_set_id;  // a hash of the shipped shaders.idx (gx2_backend.cpp): the console's own compile cache goes with it
 // a combiner reads the procedural texture. shortcut: not lighting's bump or shadow input, which still reads zero there; add it if a game does that
 inline bool uses_proctex(const DrawState &ds) {
     for (u32 i = 0; i < ds.tev_count; i++) {

@@ -58,6 +58,7 @@ static void relieve_mem1();  // fast memory found full the first time (beside tv
 }
 
 namespace gpu {
+u64 shipped_set_id;  // which shipped set this build has (a hash of shaders.idx): the console's own compile cache goes with it (shader_compile.cpp)
 namespace {
 
 // ---------------------------------------------------------------- timers: where a draw's time goes, for the log
@@ -230,6 +231,7 @@ GX2PixelShader *load_ps(u32 index) {
 void load_shader_tables() {
     static std::vector<u8> idx;
     idx = read_whole("fs:/vol/content/shaders.idx", 0);
+    shipped_set_id = fnv64(idx.data(), idx.size());
     {
         std::vector<u8> file = read_whole("fs:/vol/content/shaders.gsh", 0);
         if (file.empty()) FATAL("shaders.gsh is missing\n");
