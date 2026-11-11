@@ -2,7 +2,7 @@
 """Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [game ... | all]
 "all" is every game this PC has: the nine ports (GAMES, built by tools/win/build3ds.py) and every game in games/sources.json, built from its
 dump by the builder's pipeline as a tester's would be. sources.json is this PC's own (git-ignored):
-    {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>"}}}
+    {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
 has none) on a blank save, and a restart on what that saved.
 A game fails on a crash, code the translation missed, a vertex shader that wasn't compiled, a failed save flush, a save that formats itself twice, a save in common storage
@@ -29,6 +29,7 @@ CEMU = ROOT + '/build_win/cemu'
 GAMES = {'sticker_star': '77', 'nsmb2': '78', 'dream_team': '79', 'paper_jam': '80', 'superstar_saga': '83', 'bowsers_inside': '84', 'layton_azran': '85', 'layton_mask': '86', 'tomodachi': '67'}
 OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/layton_azran', 'tomodachi': 'build'}
 SOURCES = ROOT + '/games/sources.json'
+CRASH = r'FATAL|no recompiled code at|\[crash\]'  # the game's log on a crash of its own
 
 
 @dataclass
@@ -39,6 +40,7 @@ class Target:
     out: str       # the folder its title folder is in
     data: str      # its folder in games/, for screenshots and the shaders a run missed
     interp: bool = False  # Cemu's own recompiler can't run this one's code: its interpreter does
+    route: str = ''       # whose route in test_routes.py it plays, if not one under its own name
 
     @property
     def common(self):
@@ -134,22 +136,30 @@ def judge(t, seconds, flags):
         os.remove(f)
     os.makedirs(d)
     with open(d + '/live.txt', 'w', newline='\n') as f:
-        f.write('\n'.join(ROUTES.get(t.name, GENERIC)) + '\n')
+        f.write('\n'.join(ROUTES.get(t.route or t.name, GENERIC)) + '\n')
     for flag in flags:
         open(f'{d}/{flag}', 'w').close()
     log = d + '/log.txt'
     interp = t.interp
     for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4))):
+        read_log = lambda: open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
+        saved_before = bool(save_files(t))
         said = cemu(t, secs, interp)
-        if 'exited by itself' in said and not os.path.exists(log) and not interp:
-            # Cemu's recompiler can die on a game's code with nothing logged (3D Land, Paper Jam): its interpreter runs them
-            notes.append(f"{name}: Cemu's recompiler died before the game logged anything; run with its interpreter")
+        text = read_log()
+        if 'exited by itself' in said and not interp and not re.search(CRASH, text):
+            # Cemu's recompiler can die on a game's code, at the start or minutes in, with nothing wrong on the game's own log (3D Land, Paper
+            # Jam): its interpreter runs them. A crash of the game's would come back in the interpreter too.
+            notes.append(f"{name}: Cemu's recompiler died with nothing on the game's log; run with its interpreter")
             interp = True
             said = cemu(t, secs * 2, interp)
-        text = open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
+            text = read_log()
         if 'exited by itself' in said:
             faults.append(f'{name}: Cemu stopped: ' + said.strip()[-120:])
-        for pat, what in ((r'FATAL|no recompiled code at|\[crash\]', 'crash'), (r'\[lazy\] no code', 'code the translation missed')):
+        if text:  # each leg's log is kept in the game's folder: the next leg starts the game's own log over
+            os.makedirs(t.data + '/check_logs', exist_ok=True)
+            with open(f'{t.data}/check_logs/{name.replace(" ", "_")}.txt', 'w', encoding='utf-8', newline='\n') as f:
+                f.write(text)
+        for pat, what in ((CRASH, 'crash'), (r'\[lazy\] no code', 'code the translation missed')):
             n = len(re.findall(pat, text))
             if n:
                 faults.append(f'{name}: {what} ({n}): ' + next(l for l in text.split('\n') if re.search(pat, l))[:120])
@@ -165,7 +175,7 @@ def judge(t, seconds, flags):
         if any(x != '0' for x in flushes):
             faults.append(f'{name}: save flush failed')
         formats = len(re.findall(r'save: formatting', text))
-        if name == 'restart' and formats:
+        if name == 'restart' and formats and saved_before:  # a game that saved nothing on its route formats again, rightly
             faults.append(f'restart: formatted the save again, {formats} times')
         made = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ compiled in (\d+) ms', text)
         bad = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ failed', text)
@@ -214,6 +224,8 @@ def main():
             t = (built_from_dump(game) or 'not built yet') if args.no_build else build_from_dump(game, src['games'][game], src['otp'])
         else:
             t = f'no such game: not one of the ports and not in {SOURCES}'
+        if not isinstance(t, str) and game in src['games']:
+            t.route = src['games'][game].get('route', '')
         faults, notes = ([t], []) if isinstance(t, str) else judge(t, args.seconds, args.flag)
         bad += bool(faults)
         print(f'{"FAIL" if faults else "ok  "} {game} ({int(time.time() - started)} s): ' + '; '.join(notes), flush=True)
