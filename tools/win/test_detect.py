@@ -51,7 +51,7 @@ def layout(switch):
 try:
     assert b3.coroutine_switches(game(layout(True))) == 1, 'a setjmp followed by a longjmp is a task switch'
     assert b3.coroutine_switches(game(layout(False))) == 0, 'a setjmp on its own is an error handler'
-    assert b3.mobiclip_tables(game(layout(True))) == 0
+    assert b3.mobiclip_sites(game(layout(True))) == []
     print('build mode detections: ok')
 finally:
     for d in made:

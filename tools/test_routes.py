@@ -20,6 +20,9 @@ def run_right(n):
 
 WALK = (('CDOWN', 12), ('CRIGHT', 14), ('CLEFT', 28), ('CUP', 8), ('CRIGHT', 14))
 
+# for a game with no route of its own: through whatever its title screens and menus take
+GENERIC = ['WAIT 600'] + ['A 6', 'WAIT 90', 'T@160/120 4', 'WAIT 90', 'START 6', 'WAIT 90'] * 120
+
 ROUTES = {
     'nsmb2': A(170) + run_right(120),
     'dream_team': A(8) + ['DDOWN 6', 'WAIT 40', 'A 6', 'WAIT 80'] * 6 + A(440, 30) + sweep(WALK) + A(500, 30),

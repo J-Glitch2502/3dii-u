@@ -1,5 +1,5 @@
 // Self-check of mic:u's sample writing: encodings, wrapping, the end of an unlooped buffer. The host microphone is the default silence.
-// Runs inside the contained environment, with any PC runtime objects (see tools/pc_runtime.sh), from /root:
+// Runs inside the contained environment, with any PC runtime objects (build3ds.py trial makes them, in build_win/pc_rt), from /root:
 //   RT=/project/third_party/3dsrecomp/runtime; clang++-18 -std=c++20 -O1 -g -w -I/project/port/wiiu -I/project/port/pc -I$RT -I$RT/audio -I$RT/gpu -I$RT/services -include /project/port/pc/shim.h /project/tools/mic_check.cpp $(ls /root/pc_rt_mario/*.o | grep -vE 'services_misc|frontend_pc') -fuse-ld=lld-18 -static -Wl,--unresolved-symbols=ignore-all -lpthread -ldl -lm -o /root/mic_check && /root/mic_check; rm -f /root/mic_check
 #undef NDEBUG
 #include <cassert>
