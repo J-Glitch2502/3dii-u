@@ -49,6 +49,15 @@ WHICH GAMES WORK
   Reports on these games help the most.
 
 
+IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
+
+- Turn off the SDCafiine and FTP (ftpiiu) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch them off, then
+  start the game again. With SDCafiine on, a tester's New Super Mario Bros. 2 ran very slowly in the castles and ran well with it off; with
+  FTP on, games have frozen.
+- The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders. It keeps them,
+  so the next time is smooth.
+
+
 REPORTING A PROBLEM
 
 - If a build fails, press "Show details" and copy what it says.
