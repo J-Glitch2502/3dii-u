@@ -8,9 +8,11 @@
 #include <coreinit/time.h>
 #include <malloc.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -27,6 +29,7 @@ struct Job {
     u64 key;
     u32 inputs;
     std::string glsl;
+    u32 tries = 0;  // compiles that came back hollow (compile_thread)
 };
 OSMutex mutex;
 std::deque<Job> jobs;
@@ -36,6 +39,22 @@ constexpr u32 STACK = 4 << 20;  // the compiler recurses
 OSThread *compiler;
 volatile OSTime busy_since;  // when the compile in progress began, 0 between compiles
 volatile u32 watched;        // reports written about the compile in progress
+
+// How many of a generated vertex shader's inputs (v0 to v15) its code reads: named again after being declared
+u32 inputs_read(const std::string &glsl) {
+    u32 n = 0;
+    for (u32 r = 0; r < 16; r++) {
+        const std::string name = "v" + std::to_string(r);
+        u32 seen = 0;
+        for (size_t at = glsl.find(name); at != std::string::npos && seen < 2; at = glsl.find(name, at + 1)) {
+            const bool starts = at == 0 || !(isalnum((unsigned char)glsl[at - 1]) || glsl[at - 1] == '_');
+            const bool ends = at + name.size() >= glsl.size() || !(isalnum((unsigned char)glsl[at + name.size()]) || glsl[at + name.size()] == '_');
+            seen += starts && ends;
+        }
+        n += seen >= 2;
+    }
+    return n;
+}
 
 const std::string &cache_path() {
     static const std::string p = wiiu::data_dir() + "/shader_cache.bin";
@@ -127,6 +146,22 @@ int compile_thread(int, void *) {
             continue;
         }
         LOG("[glsl] %s %016llx compiled in %u ms%s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, ms, j.cached ? ", from the cache" : "");
+        // A vertex shader that reads inputs and comes back with none, or as a 16-byte program, is hollow: the compiler hands those out for
+        // what it's given in its first second or so after starting, and the same source compiles properly afterwards (seen in Cemu,
+        // 2026-11-10). One is never installed. It's tried again for a couple of seconds, and then given up, so that a later miss can ask
+        // afresh; the CPU shades those draws meanwhile. Fewer inputs than the code reads is no sign of it: the compiler rightly drops an
+        // input that reaches no output, and the same shader comes back that way every time.
+        if (j.vs && (d.vs_shader->size <= 16 || (inputs_read(j.glsl) && !d.vs_shader->attribVarCount))) {
+            FreeVertexShader(d.vs_shader);
+            const bool again = ++j.tries < 8;
+            LOG("[glsl] vertex %016llx came back hollow: %s\n", (unsigned long long)j.key, again ? "trying again" : "given up");
+            if (again) OSSleepTicks(OSMillisecondsToTicks(250));
+            OSLockMutex(&mutex);
+            if (again) jobs.push_front(std::move(j));
+            else known.erase(j.key);
+            OSUnlockMutex(&mutex);
+            continue;
+        }
         if (!j.cached) cache_append(j);
         OSLockMutex(&mutex);
         done.push_back(d);
@@ -155,9 +190,10 @@ void shader_compile_init() {
     }
     auto *t = (OSThread *)memalign(16, sizeof(OSThread));
     void *stack = memalign(16, STACK);
-    // core 0, just below the card thread (20), so a burst of compiles never holds up saves and the log; the game's threads are on core 1 now, so
-    // only core 0's own threads (net, watchdog, audio, hid, card), which mostly sleep, come first. At 25 it never ran back when the game shared core 0
-    if (!t || !stack || !OSCreateThread(t, compile_thread, 0, nullptr, (u8 *)stack + STACK, STACK, 21, OS_THREAD_ATTRIB_AFFINITY_CPU0)) {
+    // Core 2, below the GPU thread (16) and the sound (15) that live there: it compiles in the time the GPU thread spends waiting, and a burst
+    // of compiles holds up neither a frame nor, on core 0, saves, files and the log. The game's threads have core 1 to themselves.
+    // (Proven on a console on core 0 at this priority, 2026-11-07; on core 2 only in Cemu so far.)
+    if (!t || !stack || !OSCreateThread(t, compile_thread, 0, nullptr, (u8 *)stack + STACK, STACK, 21, OS_THREAD_ATTRIB_AFFINITY_CPU2)) {
         LOG("[glsl] no compiler thread\n");
         return;
     }

@@ -103,7 +103,14 @@ void host_output(const Sample *samples, size_t n) {
     if (playing) {
         // keep a steady distance: on an underrun or a pile-up, jump to where the cushion should be
         const u32 distance = (write_pos + RING - play_pos()) % RING;
-        if (distance < 160 || distance > RING / 2) write_pos = (play_pos() + CUSHION) % RING;
+        if (distance < 160 || distance > RING / 2) {
+            // what lies between the voices and the new place is old sound: silence, not a repeat of it
+            for (int c = 0; c < 2; c++) {
+                memset(ring[c], 0, RING * 2);
+                DCFlushRange(ring[c], RING * 2);
+            }
+            write_pos = (play_pos() + CUSHION) % RING;
+        }
     }
     const float g = gain;
     for (size_t i = 0; i < n; i++) {

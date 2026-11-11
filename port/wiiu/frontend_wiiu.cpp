@@ -46,7 +46,7 @@
 
 static const char *const CONTENT_DIR = "fs:/vol/content";
 void rt_log_sync();
-static volatile bool want_log_sync, want_dump, want_report, crash_pending;
+static volatile bool want_log_sync, want_dump, crash_pending;
 static volatile u32 want_hang_dump, card_passes;  // want_hang_dump: seconds without drawing, plus one
 static volatile u32 idle_samples, all_samples;
 static char crash_msg[512];
@@ -255,9 +255,6 @@ static int hid_thread(int, void *) {
         if (err == VPAD_READ_SUCCESS) {
             buttons = map_buttons(st.hold);
             wiiu::mic_blow(st.hold & VPAD_BUTTON_STICK_R);
-            // the four shoulder buttons together: report where every thread is, for a freeze the watchdog can't see
-            constexpr u32 shoulders = VPAD_BUTTON_L | VPAD_BUTTON_R | VPAD_BUTTON_ZL | VPAD_BUTTON_ZR;
-            if ((st.hold & shoulders) == shoulders) want_report = true;
             wiiu::menu_input(st.trigger);
             if (!leaving && wiiu::menu_wants_quit()) {
                 leaving = true;
@@ -473,7 +470,6 @@ static int watchdog_thread(int, void *) {
             want_dump = false;
             want_hang_dump = 1;
         }
-        if (want_report) report_stuck("Reported by hand.");
         if (++tenths < 5) continue;
         tenths = 0;
         if (++seconds >= 41 && !drawn && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
@@ -547,7 +543,9 @@ void frontend_run() {
     OSThread *gpu = spawn(gpu_thread, 2, 16, 2 << 20, "gpu");
     host_threads[1] = gpu;
     host_threads[2] = spawn(hid_thread, 0, 16, 256 << 10, "hid");
-    host_threads[3] = spawn(audio_thread, 0, 15, 512 << 10, "audio");
+    // The cores: 0 for files, input, the network and the log; 1, with the large cache, for the game's code alone; 2 for what makes the picture and
+    // the sound. The sound comes before the GPU thread there, so a busy frame never holds it up.
+    host_threads[3] = spawn(audio_thread, 2, 15, 512 << 10, "audio");
     spawn(card_thread, 0, 20, 256 << 10, "card");
     stage("threads started");
     while (!wiiu::gfx_ready()) OSSleepTicks(OSMillisecondsToTicks(5));
