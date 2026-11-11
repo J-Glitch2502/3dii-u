@@ -5,6 +5,9 @@
 #include "gpu/pica.h"
 
 namespace gpu {
+#ifdef __WIIU__
+u64 g_cpu_route[4];
+#endif
 
 // ---------------------------------------------------------------- vertex loader
 namespace {
@@ -771,6 +774,10 @@ void vtx_draw(bool indexed) {
         }
 #endif
         // geometry shader path: sequential (GS state persists between invocations)
+#ifdef __WIIU__
+        g_cpu_route[0]++;
+        g_cpu_route[1] += n;
+#endif
         vtx_finish_jobs();
         ShaderUnit &u = unit_for(0);
         V4 in[16], buf[16];
@@ -798,6 +805,10 @@ void vtx_draw(bool indexed) {
     PrimAssembler &pa = g.pa;
     if (pa.index != 0 || pa.strip_ready) {
         // primitive continues from a previous draw: shade now and use the generic assembler
+#ifdef __WIIU__
+        g_cpu_route[2]++;
+        g_cpu_route[3] += n;
+#endif
         vtx_finish_jobs();
         ShaderUnit &u = unit_for(0);
         OutMap m;

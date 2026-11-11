@@ -562,6 +562,7 @@ extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing wil
 extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
 void gx2_copied_to_memory(u32 paddr, u32 size);  // a texture copy or display transfer wrote guest memory (an LCD buffer the game fills itself)
+extern u64 g_cpu_route[4];  // draws shaded on the CPU: through a geometry shader (draws, vertices), continuing a primitive (draws, vertices)
 #endif
 // deferred draws (vertex.cpp): draws are recorded and processed in parallel at batch flush
 bool vtx_jobs_pending();

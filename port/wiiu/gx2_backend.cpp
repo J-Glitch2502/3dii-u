@@ -3682,6 +3682,9 @@ float gfx_report() {
     LOG("[prof] vertex data per draw: %.1f streams, %.0f vertices, %.1f KB; %.0f%% of streams from the cache (%u entries, %u KB)\n", st_attr_streams / draws,
         st_attr_verts / draws, st_attr_bytes / 1024.0 / draws, 100.0 * st_vtx_hits / std::max<u64>(st_vtx_hits + st_vtx_misses, 1), (u32)vtx_cache.size(), (u32)(vtx_cache_size >> 10));
     st_attr_verts = st_attr_bytes = st_attr_streams = st_vtx_hits = st_vtx_misses = 0;
+    LOG("[prof] shaded on the CPU per flip: %.1f draws (%.0f vertices) through a geometry shader, %.1f (%.0f) continuing a primitive\n", g_cpu_route[0] / flips,
+        g_cpu_route[1] / flips, g_cpu_route[2] / flips, g_cpu_route[3] / flips);
+    for (u64 &c : g_cpu_route) c = 0;
     if (ds_built > 10 * flips) {  // states built by the hundred per flip: which registers keep changing between the builds
         char line[200] = "";
         int n = 0;
