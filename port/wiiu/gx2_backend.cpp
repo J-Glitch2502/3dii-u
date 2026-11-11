@@ -624,6 +624,10 @@ inline void take_dyn_level(Surface &s) {
 
 u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
 
+// Switches for trying a change on a console while it plays ("set <name> 0|1" over the network, gfx_set): each of these on by default
+bool use_vtx_cache = true, fill_inside = true, linear_on_gpu = true;
+volatile bool vtx_drop_all;
+
 // ---- vertex data, converted once
 // A draw's vertex data was copied (and integers made floats) at every draw, the whole span its indices reach: Luigi's Mansion: Dark Moon's draws reach 1300
 // to 4100 vertices, 36 to 115 KB, 20 to 50 MB a frame, about 43 ms of each frame on a console. What a draw read stays converted, until the game says it
@@ -661,6 +665,10 @@ void vtx_invalidate(u32 paddr, u32 size) {
 // once a flip: free what the GPU is done with, and when the cache is full, what the last frames didn't use
 void vtx_cache_flip() {
     const u32 now = (u32)st_flips;
+    if (vtx_drop_all) {
+        vtx_drop_all = false;
+        vtx_invalidate(0, ~0u);
+    }
     for (size_t i = 0; i < vtx_retired.size();)
         if ((s32)(now - vtx_retired[i].second) >= 0) {
             free(vtx_retired[i].first);
@@ -678,6 +686,12 @@ void vtx_cache_flip() {
 // A buffer holding what fill makes of the bytes at src, as the GPU reads it: from the cache, or made now and kept
 template <typename Fill>
 const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 kind, u32 size, Fill fill) {
+    if (!use_vtx_cache) {
+        void *w = ring_alloc(size + 64, 64);
+        fill(w, src);
+        DCFlushRange(w, size);
+        return w;
+    }
     const u32 bytes = (count - 1) * src_stride + 16;  // the last vertex's attribute reads no more than 16 bytes
     const u64 key = ((u64)addr << 32) ^ ((u64)src_stride << 20) ^ ((u64)kind << 12) ^ ((u64)count * 0x9E3779B97F4A7C15ull);
     const u32 now = (u32)st_flips;
@@ -2314,7 +2328,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
             apply_fill(*s, f);
             any = true;
         } else if (s->addr < end && start < s->addr + s->bytes()) {
-            if (s->addr >= start && s->addr + s->bytes() <= end) apply_fill(*s, f);
+            if (fill_inside && s->addr >= start && s->addr + s->bytes() <= end) apply_fill(*s, f);
             else other = true;
         }
     if (!any && pending_fills.size() < 16 && start >= mem::VRAM_PADDR) pending_fills.push_back(f);
@@ -2744,6 +2758,7 @@ u32 recent_top[4], recent_top_stride, recent_top_bpp, recent_top_fmt;
 // surface is drawn on the GPU instead, into a linear surface at the destination: one already there whose rows it fits, or the top screen's LCD buffer (whole
 // rows from at or before the copy's first, down to the LCD's last), or a new one. The TV shows the buffer from there (show_lcd_from_memory).
 static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap) {
+    if (!linear_on_gpu) return false;
     const u32 in_w = (in_width_gap & 0xffff) * 16, in_gap = (in_width_gap >> 16) * 16;
     const u32 out_w = (out_width_gap & 0xffff) * 16, out_gap = (out_width_gap >> 16) * 16;
     if (!in_w || in_w != out_w || size % in_w) return false;
@@ -3639,6 +3654,11 @@ bool gfx_set(const char *name, u32 v) {
         uber_fallback = v;
         forget_ps = true;
     } else if (!strcmp(name, "cpuvs")) gxt_cpu_vs = v;
+    else if (!strcmp(name, "vtxcache")) {  // the vertex data cache (vtx_cached); off drops what it holds
+        use_vtx_cache = v;
+        if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
+    } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
+    else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
     else if (!strcmp(name, "trace")) {  // the next v draws and what they use, in the log
         gxt_from = (u32)g_frame;
         gxt_left = v;
