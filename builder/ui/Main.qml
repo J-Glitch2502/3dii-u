@@ -807,12 +807,26 @@ ApplicationWindow {
                 NavButton { kind: "help"; label: "Help"; chosen: win.page === kind; onPicked: win.page = kind }
             }
             Text {
+                id: versionLabel
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 16
                 text: "v" + app.version
                 color: T.faint
                 font.pixelSize: 11
+            }
+            // credits and licences: the projects the builder is built on (credits.py)
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: versionLabel.top
+                anchors.bottomMargin: 4
+                text: "About"
+                color: aboutArea.containsMouse ? T.text : T.dim
+                font.pixelSize: 12
+                font.underline: aboutArea.containsMouse
+                Accessible.role: Accessible.Button
+                Accessible.name: "About 3Dii U Builder, credits and licences"
+                MouseArea { id: aboutArea; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: app.about() }
             }
         }
 

@@ -27,10 +27,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get('THREEDII_ROOT') or os.path.dirname(HERE)  # the standalone app runs from elsewhere: app.py finds the repository
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools', 'win'))
+import credits  # noqa: E402
 import decrypt  # noqa: E402
 import dumps  # noqa: E402
 import mods  # noqa: E402
 import shaderlogs  # noqa: E402
+import user_files  # noqa: E402
 
 WORK = os.environ.get('THREEDII_WORK') or ROOT  # the standalone app's engine may be read-only: then it builds in a folder of the user's
 WORK_GAMES = os.path.join(WORK, 'builder_work')
@@ -148,8 +150,18 @@ def copy_to(source, target_dir):
 PROGRESS = Progress()
 
 
+class ShowCredits(argparse.Action):
+    """--credits: who the builder is built on, then exit, before the required options are asked for (as --version does)"""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(credits.text())
+        parser.exit()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--version', action='version', version=f'{credits.APP} {credits.VERSION} ({credits.LICENCE}, {credits.SOURCE})')
+    ap.add_argument('--credits', nargs=0, action=ShowCredits, help='the projects the builder is built on, and their licences')
     ap.add_argument('--game', required=True)
     ap.add_argument('--update')
     ap.add_argument('--dlc')
@@ -167,8 +179,9 @@ def main():
         fail('Building on Linux isn\'t ready yet: this version builds on Windows.')
     if not (a.card or a.out):
         fail('Choose an SD card or a folder for the WUP.')
-    if not os.path.isfile(a.otp) or os.path.getsize(a.otp) != 1024:
-        fail('That otp.bin isn\'t a Wii U OTP dump: it should be exactly 1024 bytes.')
+    problem = user_files.check_otp(a.otp)
+    if problem:
+        fail(problem)
 
     PROGRESS.stage('Reading your game')
     decrypt.use_keys(a.keys)
@@ -186,6 +199,9 @@ def main():
         encrypted = [d for d in [game] + extras if d.encrypted()]
         if encrypted and not decrypt.have_keys(a.keys):
             fail(f'{os.path.basename(encrypted[0].path)} is encrypted. Put boot9.bin and seeddb.bin from your own 3DS in {a.keys or decrypt.KEYS_DEFAULT}.')
+        problem = user_files.check_key_folder(a.keys or decrypt.KEYS_DEFAULT) if encrypted else None
+        if problem:
+            fail(problem)
         game.read_names()
         mod_list = [mods.Mod(p, game.title_id) for p in a.mod]
     except (dumps.DumpError, decrypt.DecryptError, mods.ModError) as e:
