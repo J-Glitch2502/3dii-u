@@ -624,6 +624,96 @@ inline void take_dyn_level(Surface &s) {
 
 u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
 
+// ---- vertex data, converted once
+// A draw's vertex data was copied (and integers made floats) at every draw, the whole span its indices reach: Luigi's Mansion: Dark Moon's draws reach 1300
+// to 4100 vertices, 36 to 115 KB, 20 to 50 MB a frame, about 43 ms of each frame on a console. What a draw read stays converted, until the game says it
+// may have written there: every way a game can make its writes seen by the GPU (GSP's cache calls, GX's, the kernel's, and the GPU's own copies) comes
+// through metal_guest_written, in order with the commands, as the texture cache relies on too. In case a game writes without saying, an entry is checked
+// against what's in memory now and then (kVtxRecheck flips).
+struct VtxEntry {
+    u32 addr = 0, bytes = 0;  // the source, in guest memory
+    void *buf = nullptr;
+    u32 size = 0;
+    u64 hash = 0;
+    u32 used = 0, checked = 0;  // flips
+};
+std::unordered_map<u64, VtxEntry> vtx_cache;
+std::vector<std::pair<void *, u32>> vtx_retired;  // buffers the GPU may still read, and the flip from which they can go
+u64 vtx_cache_size, st_vtx_hits, st_vtx_misses;
+constexpr u32 kVtxRecheck = 60;
+constexpr u64 kVtxCacheMax = 48u << 20;
+
+void vtx_retire(VtxEntry &e) {
+    if (e.buf) vtx_retired.push_back({e.buf, (u32)st_flips + 4});
+    vtx_cache_size -= e.size;
+    e.buf = nullptr;
+    e.size = 0;
+}
+
+void vtx_invalidate(u32 paddr, u32 size) {
+    for (auto it = vtx_cache.begin(); it != vtx_cache.end();)
+        if (it->second.addr < paddr + size && paddr < it->second.addr + it->second.bytes) {
+            vtx_retire(it->second);
+            it = vtx_cache.erase(it);
+        } else ++it;
+}
+
+// once a flip: free what the GPU is done with, and when the cache is full, what the last frames didn't use
+void vtx_cache_flip() {
+    const u32 now = (u32)st_flips;
+    for (size_t i = 0; i < vtx_retired.size();)
+        if ((s32)(now - vtx_retired[i].second) >= 0) {
+            free(vtx_retired[i].first);
+            vtx_retired[i] = vtx_retired.back();
+            vtx_retired.pop_back();
+        } else i++;
+    if (vtx_cache_size > kVtxCacheMax)
+        for (auto it = vtx_cache.begin(); it != vtx_cache.end();)
+            if (now - it->second.used > 2) {
+                vtx_retire(it->second);
+                it = vtx_cache.erase(it);
+            } else ++it;
+}
+
+// A buffer holding what fill makes of the bytes at src, as the GPU reads it: from the cache, or made now and kept
+template <typename Fill>
+const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 kind, u32 size, Fill fill) {
+    const u32 bytes = (count - 1) * src_stride + 16;  // the last vertex's attribute reads no more than 16 bytes
+    const u64 key = ((u64)addr << 32) ^ ((u64)src_stride << 20) ^ ((u64)kind << 12) ^ ((u64)count * 0x9E3779B97F4A7C15ull);
+    const u32 now = (u32)st_flips;
+    auto it = vtx_cache.find(key);
+    if (it != vtx_cache.end()) {
+        VtxEntry &e = it->second;
+        if (e.addr == addr && e.size == size && e.buf && (now - e.checked < kVtxRecheck || hash_bytes(src, bytes) == e.hash)) {
+            if (now - e.checked >= kVtxRecheck) e.checked = now;
+            e.used = now;
+            st_vtx_hits++;
+            return e.buf;
+        }
+        vtx_retire(e);
+        vtx_cache.erase(it);
+    }
+    st_vtx_misses++;
+    void *buf = memalign(64, size + 64);
+    if (!buf) {  // no room: this draw's own copy, as before
+        void *w = ring_alloc(size + 64, 64);
+        fill(w, src);
+        DCFlushRange(w, size);
+        return w;
+    }
+    fill(buf, src);
+    DCFlushRange(buf, size);
+    VtxEntry &e = vtx_cache[key];
+    e.addr = addr;
+    e.bytes = bytes;
+    e.buf = buf;
+    e.size = size;
+    e.hash = hash_bytes(src, bytes);
+    e.used = e.checked = now;
+    vtx_cache_size += size;
+    return buf;
+}
+
 Surface *find_surface(u32 addr, bool depth) {
     for (auto &s : surfaces)
         if (s->addr == addr && s->depth == depth) return s.get();
@@ -730,6 +820,7 @@ u32 heap_flushes;  // Most games flush what they changed. Some flush everything,
 // for the frame rate report: what keeps being uploaded, and how often the GPU's work comes back to guest memory
 struct { u32 addr, w, h, fmt, levels; bool dirty; } last_reupload;
 u32 st_readbacks, st_gpu_copies;
+u64 st_attr_verts, st_attr_bytes, st_attr_streams;  // what draws copied of their vertex data: vertices, bytes read, attribute streams
 
 inline u32 pack_rgba(u32 r, u32 g, u32 b, u32 a) { return r << 24 | g << 16 | b << 8 | a; }
 inline u32 c4(u32 v) { return v * 17; }
@@ -1921,22 +2012,25 @@ bool gx2_draw(const Gx2Draw &d) {
             // rather than depending on how each GPU path fetches little-endian integers. Only floats are read in place.
             const u32 stride = at->elems * 4;
             const u32 count = maxv - minv + 1;
-            float *w = (float *)ring_alloc(count * stride + 64, 64);
-            float *dst = w;
+            st_attr_verts += count;
+            st_attr_bytes += (u64)count * at->stride;
+            st_attr_streams++;
             const u32 src_stride = at->stride;
-            const u8 *src = p + src_stride * minv;
-            const u32 elems = at->elems;
-            if (at->fmt == 2) {
-                for (u32 v = 0; v < count; v++, src += src_stride)
-                    for (u32 c = 0; c < elems; c++) *dst++ = int_floats.s8_times_256[src[2 * c + 1]] + int_floats.u8s[src[2 * c]];
-            } else if (at->fmt == 1) {
-                for (u32 v = 0; v < count; v++, src += src_stride)
-                    for (u32 c = 0; c < elems; c++) *dst++ = int_floats.u8s[src[c]];
-            } else {
-                for (u32 v = 0; v < count; v++, src += src_stride)
-                    for (u32 c = 0; c < elems; c++) *dst++ = int_floats.s8s[src[c]];
-            }
-            DCFlushRange(w, count * stride);
+            const u32 elems = at->elems, fmt = at->fmt;
+            const float *w = (const float *)vtx_cached(addr + src_stride * minv, p + src_stride * minv, src_stride, count, fmt | elems << 4, count * stride,
+                                                       [&](void *out, const u8 *src) {
+                float *dst = (float *)out;
+                if (fmt == 2) {
+                    for (u32 v = 0; v < count; v++, src += src_stride)
+                        for (u32 c = 0; c < elems; c++) *dst++ = int_floats.s8_times_256[src[2 * c + 1]] + int_floats.u8s[src[2 * c]];
+                } else if (fmt == 1) {
+                    for (u32 v = 0; v < count; v++, src += src_stride)
+                        for (u32 c = 0; c < elems; c++) *dst++ = int_floats.u8s[src[c]];
+                } else {
+                    for (u32 v = 0; v < count; v++, src += src_stride)
+                        for (u32 c = 0; c < elems; c++) *dst++ = int_floats.s8s[src[c]];
+                }
+            });
             // the buffer is addressed as if it held vertex 0 too, as the indices count from there
             GX2SetAttribBuffer(buf, (maxv + 1) * stride, stride, (const u8 *)w - minv * stride);
             GX2AttribStream s{};
@@ -1964,13 +2058,17 @@ bool gx2_draw(const Gx2Draw &d) {
         {
             // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later (see gx2_finish_list).
             const u32 elems = at->elems, stride = (elems == 1 ? 2 : elems) * 4, count = maxv - minv + 1, src_stride = at->stride;
-            u32 *copy = (u32 *)ring_alloc(count * stride + 64, 64), *dst = copy;
-            const u8 *src = p + src_stride * minv;
-            for (u32 v = 0; v < count; v++, src += src_stride) {
-                for (u32 c = 0; c < elems; c++) *dst++ = ((const u32 *)src)[c];
-                if (elems == 1) *dst++ = 0;
-            }
-            DCFlushRange(copy, count * stride);
+            st_attr_verts += count;
+            st_attr_bytes += (u64)count * src_stride;
+            st_attr_streams++;
+            const u32 *copy = (const u32 *)vtx_cached(addr + src_stride * minv, p + src_stride * minv, src_stride, count, 3 | elems << 4, count * stride,
+                                                      [&](void *out, const u8 *src) {
+                u32 *dst = (u32 *)out;
+                for (u32 v = 0; v < count; v++, src += src_stride) {
+                    for (u32 c = 0; c < elems; c++) *dst++ = ((const u32 *)src)[c];
+                    if (elems == 1) *dst++ = 0;
+                }
+            });
             GX2SetAttribBuffer(buf, (maxv + 1) * stride, stride, (const u8 *)copy - minv * stride);
             s.offset = 0;
         }
@@ -2100,6 +2198,7 @@ void gx2_copied_to_memory(u32 paddr, u32 size) {
 
 void metal_guest_written(u32 paddr, u32 size, bool definite) {
     st_flushes++;
+    vtx_invalidate(paddr, size);
     if (!definite && size >= 1 << 20) {
         heap_flushes++;
         return;
@@ -2456,6 +2555,7 @@ void present() {
     use_counter++;
     ring_next_segment();
     dyn_res_update();
+    vtx_cache_flip();
     prof[P_PRESENT] += (u32)(OSGetSystemTime() - tp);
 }
 
@@ -3574,6 +3674,9 @@ float gfx_report() {
         us(P_KEY), us(P_BIND), us(P_PS), us(P_STATE), us(P_UNI), us(P_TEX), us(P_HASH), us(P_TEXUP), us(P_TEXFL), us(P_VSUNI), us(P_RANGE), us(P_ATTR), us(P_DRAW),
         (list_ns - last_list_ns) / 1e6 / flips, ms(P_PRESENT), ms(P_WAIT), ms(P_SYNC), st_syncs / flips, st_luts / flips, draws / flips, ds_built / flips, st_flushes / flips, st_rehashes / flips, (u32)textures.size());
     last_list_ns = list_ns;
+    LOG("[prof] vertex data per draw: %.1f streams, %.0f vertices, %.1f KB; %.0f%% of streams from the cache (%u entries, %u KB)\n", st_attr_streams / draws,
+        st_attr_verts / draws, st_attr_bytes / 1024.0 / draws, 100.0 * st_vtx_hits / std::max<u64>(st_vtx_hits + st_vtx_misses, 1), (u32)vtx_cache.size(), (u32)(vtx_cache_size >> 10));
+    st_attr_verts = st_attr_bytes = st_attr_streams = st_vtx_hits = st_vtx_misses = 0;
     if (ds_built > 10 * flips) {  // states built by the hundred per flip: which registers keep changing between the builds
         char line[200] = "";
         int n = 0;
