@@ -58,8 +58,9 @@ Trial options used: `--autoplay 1` (A only; 2 = random buttons, ends up in the s
    of at its title screen. Everything before Nov 11 ("the Thrill Tower screen") was that mode.
 
 State on Nov 11 (PC trials): "Preparing to start game", title screen, file select, save, the intro (E. Gadd's lab, the Dark
-Moon breaking, Luigi at home, the Pixelshifter), E. Gadd's bunker dialogue. 5 minutes with `--autoplay 2` without a freeze,
-GPU lists rising all the way; a 20-minute run is the next check (trial28, `--run long`).
+Moon breaking, Luigi at home, the Pixelshifter), E. Gadd's bunker, then Gloomy Manor: Luigi walking outside the mansion,
+the Dual Scream map on the bottom screen, the pause menu. trial28: 20 minutes (72000 frames) of `--autoplay 2` without a
+freeze or a missing function, GPU lists rising all the way (57500).
 
 ## The freeze, solved (Nov 11)
 
@@ -99,10 +100,9 @@ recompiled), and put the file back afterwards (keep a copy; `games/` is not in g
 
 ## Next step
 
-1. Read trial28 (`build_win/run_darkmoon_long/run.log`, `games/darkmoon/shots/sheet_long.png`): no freeze, and how far
-   it got. Random input doesn't play the game, so it only shows the game survives; Senne playing it says more.
-2. Wii U build through the Builder (as Senne will build it) once the PC runs stay clean, then Cemu and his console.
-3. PR to `main` with an explanation for Josiah.
+1. Wii U build through the Builder, as Senne builds it, then Cemu and his console. Random input doesn't really play the
+   game, so him playing it says more than the trials can; how fast it runs on the Wii U is only known then.
+2. PR to `main` with an explanation for Josiah.
 
 ## Other loose ends
 
