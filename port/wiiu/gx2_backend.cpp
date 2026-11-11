@@ -404,6 +404,8 @@ struct Surface {
     bool gpu_newer = false, guest_newer = false, written_since_flush = false;
     bool first_use = true;                             // nothing has drawn into it yet: see upload_target
     bool gpu_chain = false;                            // made by gx2_texture_copy, or from one: the transfers that make its mipmaps stay on the GPU too
+    u64 drawn = 0;                                     // when the GPU last wrote it (gpu_writes): of targets sharing memory, the latest holds what's there
+    bool linear = false;                               // its memory holds the picture row by row, not in tiles: a display transfer's linear output (gpu_copy_transfer)
     bool shared_depth = false, clear_pending = false;  // see share_depth_block
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
@@ -619,6 +621,8 @@ void set_surface_scale(Surface &s, u32 level) {
 inline void take_dyn_level(Surface &s) {
     if (s.dyn_level != dyn_level && dyn_scaled(s)) set_surface_scale(s, dyn_level);
 }
+
+u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
 
 Surface *find_surface(u32 addr, bool depth) {
     for (auto &s : surfaces)
@@ -1261,6 +1265,7 @@ namespace {
 // ---------------------------------------------------------------- render state
 void bind_targets(const RTConfig &rt) {
     Surface *c = get_surface(rt.color_addr, rt.w, rt.h, rt.color_fmt, false);
+    c->linear = false;  // what the GPU draws into is tiled
     Surface *d = rt.depth_addr && pptr(rt.depth_addr) ? get_surface(rt.depth_addr, rt.w, rt.h, rt.depth_fmt, true) : nullptr;
     take_dyn_level(*c);
     if (d) take_dyn_level(*d);
@@ -1380,7 +1385,10 @@ void set_state(const DrawState &ds) {
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail);
     if (stencil) GX2SetStencilMask(ds.st_mask_in, ds.st_mask_w, ds.st_ref, ds.st_mask_in, ds.st_mask_w, ds.st_ref);
-    if (ds.color_write) c.written_since_flush = c.gpu_newer = true;
+    if (ds.color_write) {
+        c.written_since_flush = c.gpu_newer = true;
+        c.drawn = ++gpu_writes;
+    }
     if (has_depth && (ds.depth_write || (stencil && ds.st_mask_w))) cur_depth->written_since_flush = cur_depth->gpu_newer = true;
 }
 
@@ -2079,12 +2087,15 @@ static void mark_textures(u32 paddr, u32 size, bool definite) {
 // real CPU flushing a whole heap, as some games ask for after every file, would take tens of milliseconds.
 // What the game's texture copies and display transfers put into guest memory since the last VBlank (gpu/transfer.cpp): a top screen the game put together
 // in its LCD buffer itself shows from there (show_lcd_from_memory). Fills don't count: a game may clear an LCD buffer that a transfer fills later.
-u32 lcd_writes[8][2], lcd_write_count;
+struct MemoryWrite {
+    u32 pa, size, seq;
+};
+MemoryWrite lcd_writes[16];
+u32 lcd_write_seq;
 void gx2_copied_to_memory(u32 paddr, u32 size) {
     if (size < 4096) return;
-    lcd_writes[lcd_write_count % 8][0] = paddr;
-    lcd_writes[lcd_write_count % 8][1] = size;
-    lcd_write_count++;
+    lcd_write_seq++;
+    lcd_writes[lcd_write_seq % 16] = {paddr, size, lcd_write_seq};
 }
 
 void metal_guest_written(u32 paddr, u32 size, bool definite) {
@@ -2106,7 +2117,8 @@ void write_back(Surface &s) {
     s.gpu_newer = false;
     st_readbacks++;
     static u32 notes;
-    if (gxt()) LOG("[gxt] read back %08x %ux%u\n", s.addr, s.w, s.h);
+    static u32 told;
+    if (gxt() || told++ < 8) LOG("[gxt] read back %08x %ux%u fmt %u%s, %ux%u at %.2fx%.2f\n", s.addr, s.w, s.h, s.fmt, s.linear ? " linear" : "", s.sw, s.sh, s.sx, s.sy);
     if (notes < 4) wiiu::note("reading back surface %08x, %ux%u", s.addr, s.w, s.h);
     flush_surface(s);
     GX2Surface st;
@@ -2141,6 +2153,14 @@ void write_back(Surface &s) {
             const u32 row = (u32)(y * s.sy) + s.row0;
             const u32 *src = (const u32 *)st.image + (u64)row * st.pitch;
             const u32 my = s.h - 1 - y;  // guest memory rows run top down
+            if (s.linear) {
+                u8 *line = dst + (size_t)my * s.w * bpp;
+                for (u32 x = 0; x < s.w; x++) {
+                    const u32 c = src[(u32)(x * s.sx)];
+                    encode_pixel(pf, rgba(c >> 24, (c >> 16) & 255, (c >> 8) & 255, c & 255), line + x * bpp);
+                }
+                continue;
+            }
             if (pf == 0) {
                 for (u32 x = 0; x < s.w; x++) *(u32 *)(dst + tiled_offset(x, my, s.w, 4)) = le32(src[column[x]]);
                 continue;
@@ -2157,9 +2177,11 @@ void write_back(Surface &s) {
 }  // namespace
 
 void metal_guest_read(u32 paddr, u32 size) {
+    // Of the targets there, the one the GPU wrote last holds what the memory would: Luigi's Mansion: Dark Moon draws its bottom screen (240x320) and each half
+    // of its top screen (256x416, then 128x416) at 0x18000000, and the top screen's texture copies to its LCD buffer read the bottom screen back, so the TV showed black.
     Surface *best = nullptr;
     for (auto &s : surfaces)
-        if (!s->depth && s->gpu_newer && s->addr < paddr + size && paddr < s->addr + s->bytes() && (!best || s->bytes() == size)) best = s.get();
+        if (!s->depth && s->gpu_newer && s->addr < paddr + size && paddr < s->addr + s->bytes() && (!best || s->drawn > best->drawn)) best = s.get();
     if (best) write_back(*best);
 }
 void metal_guest_prewrite(u32, u32) {}
@@ -2573,6 +2595,9 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     Surface *dst = get_surface(out_paddr, out_w, out_h, cbuf_to_pixfmt((flags >> 12) & 7), false, src->gpu_chain ? src : nullptr);
     if (dst == src) return false;
     dst->gpu_chain |= src->gpu_chain;
+    // Neither bit 1 (linear in) nor bit 5 (left tiled): the picture lands in memory row by row, for whatever reads its bytes. Paper Mario's goes on to another
+    // transfer here on the GPU; Luigi's Mansion: Dark Moon's top screen halves go to texture copies into its LCD buffer, which read them back, and tiled they came out black.
+    dst->linear = !(flags & 0x22);
     take_dyn_level(*dst);
     static u32 notes;
     if (gxt()) LOG("[gxt] gpu copy %08x -> %08x, %08x %08x flags %08x\n", in_paddr, out_paddr, in_dims, out_dims, flags);
@@ -2599,8 +2624,98 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
     state_lost = true;
     dst->gpu_newer = true;
+    dst->drawn = ++gpu_writes;
     dst->guest_newer = false;
     dst->written_since_flush = true;
+    return true;
+}
+
+// The top screen's LCD buffers lately (show_lcd_from_memory notes them at each VBlank), and how their rows are laid out
+u32 recent_top[4], recent_top_stride, recent_top_bpp, recent_top_fmt;
+
+// Luigi's Mansion: Dark Moon puts its top screen together with the copy engine, from linear pictures its transfers make (gpu_copy_transfer): each third
+// of the screen is drawn, transferred to a linear picture and copied a row at a time, a few columns over or into its columns of the LCD buffer. Through guest
+// memory that was read backs every frame, each waiting for the GPU, and in Cemu, which reads nothing back, a black screen. A copy of whole rows out of a linear
+// surface is drawn on the GPU instead, into a linear surface at the destination: one already there whose rows it fits, or the top screen's LCD buffer (whole
+// rows from at or before the copy's first, down to the LCD's last), or a new one. The TV shows the buffer from there (show_lcd_from_memory).
+static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap) {
+    const u32 in_w = (in_width_gap & 0xffff) * 16, in_gap = (in_width_gap >> 16) * 16;
+    const u32 out_w = (out_width_gap & 0xffff) * 16, out_gap = (out_width_gap >> 16) * 16;
+    if (!in_w || in_w != out_w || size % in_w) return false;
+    Surface *src = nullptr;
+    for (auto &s : surfaces)
+        if (!s->depth && s->linear && s->addr <= in_paddr && in_paddr < s->addr + s->bytes() && (!src || s->drawn > src->drawn)) src = s.get();
+    if (!src) return false;
+    const u32 bpp = pixel_bytes(cbuf_to_pixfmt(src->fmt)), src_stride = src->w * bpp, rows = size / in_w;
+    const u32 in_off = in_paddr - src->addr;
+    if (in_w + in_gap != src_stride && !(in_gap == 0 && in_w == src_stride)) return false;
+    if (in_w % bpp || (in_off % src_stride) % bpp) return false;
+    const u32 src_row0 = in_off / src_stride, src_col0 = (in_off % src_stride) / bpp, cols = in_w / bpp;
+    if (src_row0 + rows > src->h || src_col0 + cols > src->w) return false;
+    const u32 out_stride = out_gap ? out_w + out_gap : out_w;
+    if (out_stride % bpp) return false;
+    // where it lands
+    Surface *dst = nullptr;
+    u32 base = out_paddr, height = rows;
+    u32 lcd = 0;
+    if (recent_top_stride == out_stride && recent_top_bpp == bpp)
+        for (u32 pa : recent_top)
+            if (pa && out_paddr < pa + 400 * out_stride && out_paddr + rows * out_stride > pa && pa - out_paddr <= 33 * out_stride) lcd = pa;
+    if (lcd) {
+        const u32 back = out_paddr < lcd ? (lcd - out_paddr + out_stride - 1) / out_stride : 0;
+        base = lcd - back * out_stride;
+        height = back + 400;
+    } else {
+        for (auto &s : surfaces)
+            if (!s->depth && s->linear && s.get() != src && s->w * bpp == out_stride && s->addr <= out_paddr && out_paddr + (rows - 1) * out_stride < s->addr + s->bytes() &&
+                (!dst || s->drawn > dst->drawn))
+                dst = s.get();
+        if (dst) {
+            base = dst->addr;
+            height = dst->h;
+        }
+    }
+    const u32 off = out_paddr - base, first_row = off / out_stride;
+    if ((off % out_stride) % bpp || first_row + rows > height) return false;
+    const u32 first_col = (off % out_stride) / bpp;
+    if (!dst) dst = get_surface(base, out_stride / bpp, height, lcd ? recent_top_fmt : src->fmt, false, src);
+    if (dst == src || first_col + cols > dst->w) return false;
+    take_dyn_level(*dst);
+    static u32 notes;
+    if (notes++ < 4) wiiu::note("copying rows on the GPU: %08x into %08x, %u columns from %u", in_paddr, base, cols, first_col);
+    st_gpu_copies++;
+    gx2_flush_cpu_batch();
+    if (dst->first_use) {
+        dst->first_use = false;
+        GX2ClearColor(&dst->cb, 0, 0, 0, 1);
+        restore_context();
+    }
+    flush_surface(*src);
+    GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, src->tex.surface.image, src->tex.surface.imageSize);
+    GX2SetColorBuffer(&dst->cb, GX2_RENDER_TARGET_0);
+    cur_color = nullptr;
+    begin_blit();
+    // memory row 0 at the top of a surface's rows, as gpu_copy_transfer draws them
+    const u32 x0 = (u32)(first_col * dst->sx), y0 = dst->row0 + (u32)(first_row * dst->sy), w = (u32)(cols * dst->sx), h = (u32)(rows * dst->sy);
+    GX2SetViewport((float)x0, (float)y0, (float)w, (float)h, 0, 1);
+    GX2SetScissor(x0, y0, w, h);
+    float *q = (float *)ring_alloc(4 * 16 + 64, 64);
+    const float th = (float)src->tex_h, u0 = (float)src_col0 / src->w, u1 = (float)(src_col0 + cols) / src->w;
+    const float v0 = (th - src->h + src_row0) / th, v1 = (th - src->h + src_row0 + rows) / th;
+    const float data[16] = {-1, 1, u0, v0, 1, 1, u1, v0, -1, -1, u0, v1, 1, -1, u1, v1};
+    memcpy(q, data, sizeof data);
+    DCFlushRange(q, sizeof data);
+    GX2SetAttribBuffer(0, sizeof data, 16, q);
+    GX2SetPixelTexture(&src->tex, 0);
+    GX2SetPixelSampler(&blit_sampler, 0);
+    GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
+    state_lost = true;
+    dst->gpu_newer = true;
+    dst->guest_newer = false;
+    dst->written_since_flush = true;
+    dst->linear = true;
+    dst->gpu_chain = true;
+    dst->drawn = ++gpu_writes;
     return true;
 }
 
@@ -2609,6 +2724,7 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
 // texture, is drawn on the GPU into a surface at that address instead, at the target's scale, which the game then samples (get_texture) or makes mipmaps of
 // (gpu_copy_transfer). Metroid draws its final picture from these copies, so at 1:1 the whole screen came out at the 3DS's resolution.
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap) {
+    if (linear_copy_on_gpu(in_paddr, out_paddr, size, in_width_gap, out_width_gap)) return true;
     Surface *src = find_surface(in_paddr, false);
     if (!src || !src->gpu_newer || src->guest_newer || src->sy <= 1 || size != src->bytes()) return false;
     const u32 bpp = src->bytes() / (src->w * src->h), tile_row = src->w * 8 * bpp;
@@ -2655,6 +2771,7 @@ bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u
     GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
     state_lost = true;
     dst->gpu_newer = true;
+    dst->drawn = ++gpu_writes;
     dst->guest_newer = false;
     dst->written_since_flush = true;
     return true;
@@ -3251,22 +3368,52 @@ static void draw_keyboard() {
 // The top screen as its LCD buffer holds it in guest memory, when no display transfer brought it this frame but the GPU's commands wrote into that buffer:
 // Luigi's Mansion: Dark Moon draws its top screen in two halves and puts them side by side in the LCD buffer with two texture copies. A 3DS's LCD just shows
 // the buffer, so this does too: 240x400, read as a render target's texture is (its last memory row the texture's first), so show_screen takes it as one.
+// A game writes the buffer the LCD doesn't show and swaps to it later, often after the next VBlank: what's shown is whichever buffer the LCD shows now,
+// as last written, each time that changes.
 static void show_lcd_from_memory() {
-    const u32 writes = lcd_write_count;
-    lcd_write_count = 0;
-    const bool by_transfer = top_shown;
-    top_shown = false;
-    if (by_transfer || !writes) return;
+    static u32 shown_pa, shown_seq;
+    static u64 shown_drawn;
     const kernel::FramebufferInfo f = kernel::gsp_framebuffer(0);
     const u32 pa = f.valid && f.addr_left ? mem::vaddr_to_paddr(f.addr_left) : 0;
     const u32 fmt = f.format & 7, bpp = fmt == 0 ? 4 : fmt == 1 ? 3 : 2;
     const u32 stride = f.stride ? f.stride : 240 * bpp, size = stride * 400;
+    if (pa && std::find(std::begin(recent_top), std::end(recent_top), pa) == std::end(recent_top)) {
+        static u32 next_top;
+        recent_top[next_top++ % 4] = pa;
+    }
+    recent_top_stride = stride;
+    recent_top_bpp = bpp;
+    recent_top_fmt = cbuf_to_pixfmt(fmt);  // the display format as a colour buffer's (the table is its own inverse)
+    const bool by_transfer = top_shown;
+    top_shown = false;
+    if (by_transfer) {
+        shown_pa = 0;
+        return;
+    }
     const u8 *src = pa ? pptr(pa) : nullptr;
     if (!src || stride < 240 * bpp) return;
-    bool hit = false;
-    for (u32 i = 0; i < std::min(writes, 8u); i++)
-        if (lcd_writes[i][0] < pa + size && pa < lcd_writes[i][0] + lcd_writes[i][1]) hit = true;
-    if (!hit) return;
+    // put together on the GPU (linear_copy_on_gpu): shown from there, never read back
+    Surface *lcd = nullptr;
+    for (auto &s : surfaces)
+        if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride && (!lcd || s->drawn > lcd->drawn)) lcd = s.get();
+    if (lcd) {
+        if (pa == shown_pa && lcd->drawn == shown_drawn) return;
+        shown_pa = pa;
+        shown_drawn = lcd->drawn;
+        flush_surface(*lcd);
+        const float h = (float)lcd->tex_h, first_row = (float)((pa - lcd->addr) / stride);
+        static u32 told;
+        if (told++ % 300 == 0) LOG("[gx2] top screen from the LCD buffer put together on the GPU, %08x, from row %u of %08x\n", pa, (u32)first_row, lcd->addr);
+        show_screen(0, &lcd->tex, false, (h - first_row - 400) / h, (h - first_row) / h, 240.0f / lcd->w);
+        top_shown = false;
+        return;
+    }
+    u32 latest = 0;
+    for (const MemoryWrite &w : lcd_writes)
+        if (w.seq && w.pa < pa + size && pa < w.pa + w.size) latest = std::max(latest, w.seq);
+    if (!latest || (pa == shown_pa && latest == shown_seq)) return;
+    shown_pa = pa;
+    shown_seq = latest;
     static GX2Texture tex[2];
     static u32 next;
     GX2Texture &t = tex[next++ & 1];  // the other may still be on its way to the TV
@@ -3308,7 +3455,11 @@ static void show_lcd_from_memory() {
     DCFlushRange(out, t.surface.imageSize);
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, out, t.surface.imageSize);
     static u32 notes;
-    if (notes++ < 2) wiiu::note("top screen from its LCD buffer %08x, format %u, stride %u", pa, fmt, stride);
+    if (notes++ % 100 == 0) {
+        u32 lit = 0;
+        for (u32 i = 0; i < size; i += 4) lit += src[i] != 0;
+        LOG("[gx2] top screen from its LCD buffer %08x, format %u, stride %u: %u of %u samples not black\n", pa, fmt, stride, lit, size / 4);
+    }
     show_screen(0, &t, false);
     top_shown = false;
 }
