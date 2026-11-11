@@ -168,6 +168,9 @@ static void audio_thread() {
         std::this_thread::sleep_until(next);
         // as on the Wii U: a long stall isn't made up for, or the sound thread takes all the time from lower priority threads (the game itself) until it has caught up
         if (steady_clock::now() - next > period * 8) next = steady_clock::now();
+        // Debugging: RECOMP_AUDIOSTALL=N stalls this thread 12-20 ms about once every N frames, as a busy console's audio thread can be
+        static const int stall = getenv("RECOMP_AUDIOSTALL") ? atoi(getenv("RECOMP_AUDIOSTALL")) : 0;
+        if (stall > 0 && std::rand() % stall == 0) std::this_thread::sleep_for(milliseconds(12 + std::rand() % 9));
         while (!kernel::dsp_tick()) std::this_thread::sleep_for(microseconds(500));
     }
 }
