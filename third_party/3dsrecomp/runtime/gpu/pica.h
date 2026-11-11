@@ -131,6 +131,8 @@ std::string shader_msl(const ShaderProgram *p, u32 entry, const char *name);
 // the same for one set of bool/int uniforms (flow resolved statically), or "" if it cannot be done exactly
 std::string shader_msl_spec(const ShaderProgram *p, u32 entry, const char *name, u32 b, const u8 (*iu)[4]);
 std::string shader_glsl_spec(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs);
+extern int shader_glsl_fail_line;  // why the last one came out empty: the line in shader.cpp that gave up, and the instruction
+extern u32 shader_glsl_fail_at;
 // the bool uniforms (bit mask) and int uniforms (*loops, bit mask) the program's flow control reads
 u32 shader_static_uniforms(const ShaderProgram *p, u32 *loops);
 void shader_entry_info(const ShaderProgram *p, u32 entry, u64 *id, u32 *bmask, u32 *lmask);

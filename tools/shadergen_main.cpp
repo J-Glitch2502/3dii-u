@@ -158,6 +158,7 @@ int main(int argc, char **argv) {
     const u32 passthrough = add_vs(gen_passthrough_vs());
     const u32 blit_vs = add_vs(gen_blit_vs());
     u32 failed = 0;
+    std::set<std::pair<u32, u32>> failed_seen;
     for (const VsRecord &r : vs_records) {
         std::vector<u32> code = r.code, swz = r.swz;
         const u32 nc = (u32)code.size(), ns = (u32)swz.size();
@@ -184,6 +185,10 @@ int main(int argc, char **argv) {
             u32 inputs = 0;
             const std::string src = gen_vs_glsl(p, r.entry, bm, iu, r.slots, &inputs);
             if (src.empty()) {
+                if (!failed_seen.count({r.entry, bm})) {
+                    failed_seen.insert({r.entry, bm});
+                    printf("not translated: entry %03x, bools %04x: shader.cpp line %d gave up at instruction %03x\n", r.entry, bm, gpu::shader_glsl_fail_line, gpu::shader_glsl_fail_at);
+                }
                 failed++;
                 continue;
             }
