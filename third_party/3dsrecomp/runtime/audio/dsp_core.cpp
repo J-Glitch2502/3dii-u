@@ -129,11 +129,6 @@ StereoFrame generate_frame(Dsp &d) {
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
         SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen);
         memcpy(&wr.source_status[i], &s, sizeof(s));
-        // Also in the region the game submitted: a game that handles one interrupt late reads the status from that region next
-        // (it picks it from the frame counters), and a status two frames old is undone work. Luigi's Mansion: Dark Moon's voice
-        // update then saw a current buffer no longer in its list, marked them all finished, and later queued one still in use, which
-        // turned the list into a loop. With the newest status in both, reading it twice does nothing.
-        memcpy(&rd.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
     }
 
@@ -169,7 +164,6 @@ StereoFrame generate_frame(Dsp &d) {
     d.mixer.tick(rd.dsp_config, rd.intermediate, wr.intermediate, mixes);
     DspStatusBlock status{};
     memcpy(&wr.dsp_status, &status, sizeof(status));
-    memcpy(&rd.dsp_status, &status, sizeof(status));
 
     StereoFrame out = d.mixer.output();
     for (int f = 0; f < kFrameSamples; f++) {
