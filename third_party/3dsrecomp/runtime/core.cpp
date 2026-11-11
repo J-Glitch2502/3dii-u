@@ -424,6 +424,17 @@ void run_guest(CPU *c) {
     }
 }
 
+// Debugging: generated C with logging inserted by hand (tools/dbg_inject.py) can't call rt_log, which is C++.
+extern "C" void rt_debug_log(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    kernel::Thread *t = kernel::current_thread();
+    rt_log("[t%u] %s", t ? t->id : 0, buf);
+}
+
 extern "C" void rt_undefined(CPU *c, u32 addr, u32 word) {
     FATAL("undefined instruction %08x at %08x (lr=%08x)\n", word, addr, c->r[14]);
 }
