@@ -11,10 +11,15 @@ struct VertexArray {
     u32 lo, hi, stride;  // within a vertex, from the draw's base: its first attribute's start, down to a 4-byte boundary, and its last one's end
 };
 
-// Whether the GPU can fetch an attribute from its array's copy. Floats and 16-bit integers always. Bytes are fetched four at a time from a
-// 4-byte boundary, and the mask routes the ones wanted (a byte at an odd place fetched by itself comes out shifted on this GPU): so only from an
-// array whose vertices are a multiple of 4 bytes apart, and only if the attribute's bytes lie within one such word.
-inline bool fetchable(const Gx2Attr &at) { return at.fmt >= 2 || (at.stride % 4 == 0 && (at.offset & 3) + at.elems <= 4); }
+// Whether the GPU can fetch an attribute from its array's copy. It fetches whole 4-byte words from 4-byte boundaries, so the array's vertices
+// have to be a multiple of 4 bytes apart, and then: floats and 16-bit integers have to start on such a boundary; bytes may start anywhere in
+// a word they lie wholly within, the mask routing the ones wanted (a byte at an odd place fetched by itself comes out shifted). A game packs
+// its vertices as tightly as it likes, and whatever doesn't fit this the CPU turns into floats, as it always did: fetched regardless, Mario
+// & Luigi: Superstar Saga's backgrounds came out as vertical stripes, a texture coordinate's second half read as one value (2026-11-11).
+inline bool fetchable(const Gx2Attr &at) {
+    if (at.stride % 4) return false;
+    return at.fmt >= 2 ? at.offset % 4 == 0 : (at.offset & 3) + at.elems <= 4;
+}
 
 // The bytes the fetch reads from an attribute's place on: bytes as the word they're in, 3 x 16 bits as 4, a lone float as 2 (attr_format)
 inline u32 fetched_bytes(const Gx2Attr &at) {
