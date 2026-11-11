@@ -769,6 +769,7 @@ void apply_fill(Surface &s, const Fill &f) {
     s.gpu_newer = true;
     s.guest_newer = false;
     s.written_since_flush = true;
+    s.drawn = ++gpu_writes;
 }
 
 // ---------------------------------------------------------------- textures
@@ -2305,12 +2306,16 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
     if (gx2_skip_pass) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
+    // A target that lies wholly inside the fill is filled too, as its memory would be: Luigi's Mansion: Dark Moon keeps its top screen's target, its bottom
+    // screen's and two linear pictures at 0x18000000, and clearing one meant clearing 416 KB in guest memory with the CPU, a few times a frame
+    // (a quarter of the GPU thread's time on a console). Only a target the fill covers in part still needs guest memory filled.
     for (auto &s : surfaces)
         if (s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
             apply_fill(*s, f);
             any = true;
         } else if (s->addr < end && start < s->addr + s->bytes()) {
-            other = true;
+            if (s->addr >= start && s->addr + s->bytes() <= end) apply_fill(*s, f);
+            else other = true;
         }
     if (!any && pending_fills.size() < 16 && start >= mem::VRAM_PADDR) pending_fills.push_back(f);
     if (any) mark_textures(start, end - start, true);
