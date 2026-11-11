@@ -148,10 +148,12 @@ GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GP
 // draw NSMB2's skinned models as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen there.
 u32 gxt_cpu_attr;
 bool gxt_cpu_tex;                     // a file named "cputex" in the data folder: every texture decoded by the CPU, as before
-// A vertex shader the pack lacks, compiled on the console: off, a file named "glslvs" turns it on. In Cemu the compiler hands back an empty
-// program (16 bytes, no inputs) for whatever it compiles in its first second, the same source compiling properly afterwards, and NSMB2's
-// Koopalings drew untextured with the ones it did make (2026-11-10). Until that's understood those draws stay with the CPU, which draws them right.
-static bool glsl_vs;
+// A vertex shader the pack lacks is compiled on the console, as pixel shaders are; a file named "noglslvs" leaves its draws with the CPU.
+// It was off: in Cemu the compiler hands back an empty program (16 bytes, no inputs) for whatever it compiles in its first second, and NSMB2's
+// Koopalings drew untextured with those (2026-11-10). Empty ones are turned away and compiled again now (shader_compile.cpp), and what it
+// then makes matches the pack's. Left with the CPU, a place no build's runs had reached is unplayable: in Kid Icarus's land battle the pack
+// lacked eleven, and the CPU shaded 47,000 vertices a frame, 3.5 fps in Cemu and about 2 on the user's console (2026-11-11).
+static bool glsl_vs = true;
 static bool glsl_force;  // "glslforce": the console's compiler is asked for every pixel shader the shipped set has too, which puts it under a real load in Cemu (it keeps the shipped ones)
 volatile bool uber_all;  // "uberall" (a file in the data folder, or set from the PC): every draw uses the uber shaders, which shows up a mistake in them
 bool uber_fallback;  // a fragment state with no compiled shader draws with them
@@ -1870,8 +1872,8 @@ bool gx2_draw(const Gx2Draw &d) {
         miss_put(g.vs.i, 16);
         miss_put(d.slot_src, 24);
         LOG("[gx2] no compiled vertex shader %016llx, entry %u\n", (unsigned long long)key, d.entry);
-        // With "glslvs", the console compiles the shader itself, as it does pixel shaders (install_compiled puts it in the table), and this
-        // draw and the next ones go the CPU way meanwhile. A build's dump scan misses programs a game keeps outside shader binaries: 63 of
+        // The console compiles the shader itself, as it does pixel shaders (install_compiled puts it in the table), and this draw and the
+        // next ones go the CPU way meanwhile. A build's dump scan misses programs a game keeps outside shader binaries: 63 of
         // the 64 vertex shaders runs met and builds lacked (2026-11-10).
         if (glsl_vs && shader_compile_on()) {
             u32 bools = 0, inputs = 0;
@@ -3113,7 +3115,7 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("dynres")) dyn_test = true;
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
-    if (wiiu::debug_flag("glslvs")) glsl_vs = true;
+    if (wiiu::debug_flag("noglslvs")) glsl_vs = false;
     if (wiiu::debug_flag("glslvsforce")) {
         glsl_vs = true;  // a test: every vertex shader comes from the console's compiler, none from the pack
         LOG("[gx2] glslvsforce: %u shipped vertex shaders set aside\n", (u32)vs_table.size());

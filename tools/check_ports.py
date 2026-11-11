@@ -241,9 +241,12 @@ def judge(t, seconds, flags):
                 faults.append(f'{name}: {what} ({n}): ' + next(l for l in text.split('\n') if re.search(pat, l))[:120])
         if 'every file call goes straight' not in text:
             faults.append(f'{name}: files not direct: ' + ' / '.join(l[:90] for l in text.split('\n') if '[fs] ' in l)[:200])
-        vs = len(re.findall(r'no compiled vertex shader', text))
-        if vs:
-            faults.append(f'{name}: {vs} vertex shaders not compiled')
+        # A vertex shader the pack lacks is compiled by the console, and its draws are the CPU's until it's there: a fault only if it never came
+        lacked, came = len(re.findall(r'no compiled vertex shader', text)), len(re.findall(r'\[glsl\] vertex [0-9a-f]+ compiled', text))
+        if lacked > came:
+            faults.append(f'{name}: {lacked - came} vertex shaders the pack lacks and the console did not compile')
+        elif lacked:
+            notes.append(f'{name}: {lacked} vertex shaders the pack lacked, compiled by the console')
         # A vertex attribute in a layout Cemu has no decoder for is left out, with nothing on the game's log, and the pictures then show what no
         # console draws: NSMB2's world map without its ground, Superstar Saga's backgrounds as stripes (2026-11-11). Cemu's own log says so.
         with open(CEMU + '/portable/log.txt', encoding='utf-8', errors='replace') as f:
