@@ -4,7 +4,7 @@ its root; keep the two lists in step."""
 
 APP, VERSION = '3Dii U Builder', '1.0'
 LICENCE = 'EUPL-1.2'
-SOURCE = 'https://github.com/josiahg2502-glitch/3dii-u'
+SOURCE = 'https://github.com/J-Glitch2502/3dii-u'
 
 # (what, by whom, licence, where): the projects whose code is in the app or in the games it makes
 UPSTREAM = [

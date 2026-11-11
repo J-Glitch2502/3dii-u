@@ -32,7 +32,7 @@ project's licence, the [EUPL-1.2](LICENSE). Never add keys, console dumps or any
 the repository" above. Then:
 
 1. Install the GitHub CLI and sign in: `winget install GitHub.cli`, then `gh auth login`.
-2. Get the code: `gh repo clone josiahg2502-glitch/3dii-u`
+2. Get the code: `gh repo clone J-Glitch2502/3dii-u`
 3. In that folder, run `python tools/setup.py`.
 
 The setup script checks every tool the build needs, and installs what it can:

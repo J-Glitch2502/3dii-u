@@ -2,7 +2,7 @@ Third-party software in 3Dii U Builder
 ======================================
 
 3Dii U Builder is free and open-source under the European Union Public Licence v1.2 (LICENSE.txt, beside this file). Its
-source is at https://github.com/josiahg2502-glitch/3dii-u and in this app's engine folder.
+source is at https://github.com/J-Glitch2502/3dii-u and in this app's engine folder.
 
 It carries the programs and libraries below, each under its own licence. THIRD_PARTY_LICENSES.md, beside this file, has
 every notice and the full text of every licence. Each GitHub release also offers the source of the GPL and LGPL parts.
