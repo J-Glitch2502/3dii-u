@@ -112,7 +112,9 @@ extern const char *g_live_path;
 void frontend_wake() { OSSignalEvent(&gpu_event); }
 }  // namespace kernel
 void frontend_live_text(const std::string &) {}
-void frontend_live_key(const std::string &) {}
+void frontend_live_key(const std::string &key) {  // a route's "KEY <name>"
+    if (key == "quit") wiiu::menu_quit_now();
+}
 namespace onescreen {
 u32 host_mask(const char *) { return 0; }
 }  // namespace onescreen
@@ -545,6 +547,35 @@ static void let_card_catch_up() {
     for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(ms); card_passes == seen && OSGetSystemTime() < until;) OSSleepTicks(OSMillisecondsToTicks(5));
 }
 
+// What a tester can send: this run's log, the log of the run before it (the one that froze or crashed, if one did), and what this console has
+// had to compile for the game, copied to the SD card as the game closes: sd:/3dii-u/<title id>/. All three live in the title's save, which
+// nothing on a PC reads, so a report of a slow place or a freeze used to come as a description alone. The builder folds learned.bin into
+// its next build of the game (builder/pipeline.py). With no card in, or no room on it, nothing happens.
+static void copy_to_card(const std::string &from, const std::string &to) {
+    FILE *in = fopen(from.c_str(), "rb");
+    if (!in) return;
+    if (FILE *out = fopen(to.c_str(), "wb")) {
+        alignas(64) static char block[64 << 10];
+        for (size_t n; (n = fread(block, 1, sizeof block, in)) > 0;)
+            if (fwrite(block, 1, n, out) != n) break;
+        fclose(out);
+    }
+    fclose(in);
+}
+
+static void leave_on_card() {
+    char dir[64];
+    snprintf(dir, sizeof dir, "fs:/vol/external01/3dii-u/%016llx", (unsigned long long)OSGetTitleID());
+    const std::string to = dir, from = wiiu::data_dir();
+    wiiu::fs_begin(0xC00D);
+    mkdir("fs:/vol/external01/3dii-u", 0777);
+    mkdir(dir, 0777);
+    copy_to_card(from + "/log.txt", to + "/log.txt");
+    copy_to_card(from + "/log.txt.prev", to + "/log_before.txt");
+    copy_to_card(from + "/shader_misses.bin", to + "/learned.bin");
+    wiiu::fs_end();
+}
+
 void frontend_run() {
     wiiu::profile_this_core();
     OSThread *gpu = spawn(gpu_thread, 2, 16, 2 << 20, "gpu");
@@ -636,7 +667,11 @@ void frontend_run() {
     LOG("[quit] audio thread %s after %d ms\n", audio_parked ? "stopped" : "still running", (int)OSTicksToMilliseconds(OSGetSystemTime() - audio_asked));
     audio::shutdown();
     LOG("[quit] sound system shut down\n");
+    wiiu::fs_begin(0xC001);
+    rt_log_sync();  // the lines since the card thread's last look, these [quit] ones among them: they never reached the file before
+    wiiu::fs_end();
     fflush(nullptr);
+    leave_on_card();
 }
 
 // a crash shows what happened on the screen, so it can be reported: the addresses can be looked up against build/game.nm

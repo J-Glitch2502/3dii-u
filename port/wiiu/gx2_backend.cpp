@@ -3164,6 +3164,7 @@ static volatile bool menu_quit;
 bool menu_open() { return menu_is_open; }
 int game_speed() { return menu_speed; }
 bool menu_wants_quit() { return menu_quit; }
+void menu_quit_now() { menu_quit = true; }
 
 void menu_input(u32 pressed) {
     if (!menu_is_open) {

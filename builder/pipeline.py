@@ -109,6 +109,31 @@ def derived(dump):
             'folder': folder, 'status': 'Untested', 'note': 'Not tested on a console yet: it may not start, or stop partway.'}
 
 
+def console_learned(info, slug, card):
+    """What consoles learned playing this game, as shader logs for its build. A game leaves the list of what the console had to compile for it
+    on the SD card as it closes (sd:/3dii-u/<title id>/learned.bin, port/wiiu/frontend_wiiu.cpp). The card this build is for is read, and what
+    was read before is kept (with the game's other logs in the repository, in the work folder for the standalone app), so a later build has
+    it without the card. Returns the logs."""
+    kept = os.path.join(ROOT, 'games', slug, 'shader_logs') if WORK == ROOT else os.path.join(WORK, 'learned', slug)
+    new = os.path.join(card.rstrip('\\/') + os.sep, '3dii-u', info['title_id'].lower(), 'learned.bin') if card else ''
+    if os.path.isfile(new) and os.path.getsize(new):
+        import hashlib
+        with open(new, 'rb') as f:
+            log = os.path.join(kept, 'console_card_' + hashlib.sha1(f.read()).hexdigest()[:12] + '.bin')
+        if not os.path.exists(log):
+            os.makedirs(kept, exist_ok=True)
+            r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'misses_to_log.py'), new, log], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               errors='replace')
+            if r.returncode:  # cut short by a console switched off as it wrote: this build goes without it
+                if os.path.exists(log):
+                    os.remove(log)
+                print('What your console left on the SD card couldn\'t be read (the file is cut short): this build goes without it.', flush=True)
+            else:
+                made = sum(int(n) for n in re.findall(r'\d+', r.stdout))
+                print(f'From your console, on the SD card: the {made} shaders it had to make while you played are ready-made in this build.', flush=True)
+    return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
+
+
 def make_title(game_dir, out, info, art=None):
     """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
     import importlib.util
@@ -267,6 +292,9 @@ def main():
         for f in os.listdir(logs):
             if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
                 shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
+    for f in console_learned(info, (known or derived(game))['slug'], a.card):
+        os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
+        shutil.copyfile(f, os.path.join(game_dir, 'shader_logs', os.path.basename(f)))
 
     # after the dumps, as it sets the toolchain up as it loads; by path, so the standalone app uses the repository's copy and its paths
     import importlib.util
