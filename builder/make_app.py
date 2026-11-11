@@ -184,6 +184,7 @@ def main():
     leaked = user_files.bundled(app)
     if leaked:  # keys and console dumps are each user's own: an app carrying one must never ship
         sys.exit('The app holds files only a user may supply, so it was not packed:\n  ' + '\n  '.join(leaked))
+    shutil.copyfile(os.path.join(app, 'engine', 'stamp.txt'), os.path.join(app, '_internal', 'stamp.txt'))  # app.py: one version, not two mixed
     files = sum(len(fs) for _, _, fs in os.walk(app)) + 1  # and files.txt, which app.py checks by that a tester unzipped the whole app
     with open(os.path.join(app, '_internal', 'files.txt'), 'w') as f:
         f.write(str(files))

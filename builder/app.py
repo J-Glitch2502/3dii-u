@@ -133,12 +133,29 @@ def unpacked_whole():
     return sum(len(fs) for _, _, fs in os.walk(app)) >= want  # more is fine: the build's scripts may leave caches
 
 
-def cannot_start(why=''):
+def one_version():
+    """A new app unzipped over an older one, or its .exe copied into the old folder, runs the new build steps on the old engine, and fails in
+    ways no tester can read (a tester's Bloo Kid 2, 2026-11-11). make_app.py gives the app and its engine the same stamp."""
+    app = os.path.dirname(os.path.abspath(sys.executable))
+    if not FROZEN or not os.path.isdir(os.path.join(app, 'engine')):
+        return True
+    try:
+        with open(os.path.join(app, '_internal', 'stamp.txt')) as f, open(os.path.join(app, 'engine', 'stamp.txt')) as g:
+            return f.read() == g.read()
+    except OSError:
+        return False
+
+
+MISSING = ('Some of its files are missing.\n\nUnzip the whole zip again, into a short folder such as C:\\Games: Windows can\'t unzip into deep '
+           'folders and skips files there. If it happens again, check whether your antivirus removed any of them.')
+MIXED = ('This folder holds parts of two versions of the app.\n\nDelete the folder, then unzip the whole new zip into an empty one: don\'t unzip '
+         'a new version over an old one. Your games and settings are kept elsewhere and stay.')
+
+
+def cannot_start(why=MISSING):
     """said before Qt loads, as Qt may be what's missing"""
     import ctypes
-    ctypes.windll.user32.MessageBoxW(None, 'Some of its files are missing.\n\nUnzip the whole zip again, into a short folder such as C:\\Games: '
-                                     'Windows can\'t unzip into deep folders and skips files there. If it happens again, check whether your '
-                                     'antivirus removed any of them.' + (f'\n\n({why})' if why else ''), '3Dii U Builder can\'t start', 0x10)
+    ctypes.windll.user32.MessageBoxW(None, why, '3Dii U Builder can\'t start', 0x10)
     sys.exit(1)
 
 
@@ -160,12 +177,14 @@ def main():
     else:
         if not unpacked_whole():
             cannot_start()
+        if not one_version():
+            cannot_start(MIXED)
         try:
             import gui
         except ImportError as e:  # a file the count can't miss: one an antivirus emptied, say
             if not FROZEN:
                 raise
-            cannot_start(e)
+            cannot_start(f'{MISSING}\n\n({e})')
         sys.exit(gui.run())
 
 
