@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [game ... | all]
+"""Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [--bless] [game ... | all]
 "all" is every game this PC has: the nine ports (GAMES, built by tools/win/build3ds.py) and every game in games/sources.json, built from its
 dump by the builder's pipeline as a tester's would be. sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
 has none) on a blank save, and a restart on what that saved.
-A game fails on a crash, code the translation missed, a vertex shader that wasn't compiled, a failed save flush, a save that formats itself twice, a save in common storage
+Each leg's screenshots, of the TV and of the GamePad, are kept in games/<folder>/check_shots/<game>/<leg> and held to the good runs in
+games/<folder>/good_shots/<game>/<leg>: a game fails when, against the nearest good run, two or more pictures of a screen are in one and not in
+the other (pictures()), and so also when it draws nothing where a good run drew. A game with no good run says so. --bless runs nothing: it keeps
+the last run's pictures as a good run, for once they've been looked at (tools/contact_sheet.py lays them out, a sheet per game).
+A game also fails on a crash, code the translation missed, a vertex shader that wasn't compiled, a failed save flush, a save that formats itself twice, a save in common storage
 instead of the player's, or files not going straight to the file system. Fragment misses and frame rates are reported, not judged: Cemu has no real GPU. Shaders a run missed go to shader_logs, for the next build. Exit code 0 if all passed.
 Cemu is a private copy in build_win/cemu (a renamed exe, so other sessions' scripts leave it alone), run by tools/win/cemu_run.ps1.
 """
@@ -117,6 +121,78 @@ def cemu(t, seconds, interp):
     return run(*ps).stdout
 
 
+UNLIKE = 45  # mean difference per colour channel, of 255, between two pictures shrunk to 64x36: a frame of the same scene a moment apart
+#              comes to 2 to 35, the same scene with its background drawn as stripes to 50 to 80 (Superstar Saga, 2026-11-11)
+
+
+def kept(t, what):
+    """where a check keeps a game's logs or pictures: under the check's own name, as a game built with its update shares its folder with the game alone"""
+    return f'{t.data}/{what}/{t.name}'
+
+
+def small(path):
+    """a picture shrunk to 64x36, as bytes, or None if it can't be read"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    img = QImage(path)
+    if img.isNull():
+        return None
+    img = img.scaled(64, 36, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB888)
+    return b''.join(bytes(img.constScanLine(y))[:64 * 3] for y in range(36))
+
+
+def unlike(a, b):
+    return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
+
+
+def strangers(mine, theirs):
+    """how many of mine are unlike every one of theirs"""
+    return sum(1 for m in mine if all(unlike(m, g) > UNLIKE for g in theirs))
+
+
+def pictures(t, leg):
+    """Keeps the leg's screenshots, of both screens, and says what's wrong with them against the good runs: (fault or None, note or None)"""
+    mine, good = f'{kept(t, "check_shots")}/{leg}', f'{kept(t, "good_shots")}/{leg}'
+    shutil.rmtree(mine, ignore_errors=True)
+    os.makedirs(mine)
+    for f in glob.glob(t.data + '/shots/cemu/*.png'):  # tv_NN.png and pad_NN.png (cemu_run.ps1)
+        shutil.move(f, mine)
+    count = {s: len(glob.glob(f'{mine}/{s}_*.png')) for s in ('tv', 'pad')}
+    for screen, name in (('tv', 'TV'), ('pad', 'GamePad')):
+        if not count[screen]:
+            return f'{leg}: no pictures of the {name}', None
+    runs = glob.glob(good + '/*/')
+    if not runs:
+        return None, f'{leg}: no good pictures to compare with yet'
+    try:
+        shrunk = {s: [x for x in map(small, sorted(glob.glob(f'{mine}/{s}_*.png'))) if x] for s in count}
+
+        def apart(run):  # the most pictures of one screen that this run or that good one has and the other hasn't
+            n = 0
+            for s in count:
+                theirs = [x for x in map(small, glob.glob(f'{run}/{s}_*.png')) if x]
+                n = max(n, strangers(shrunk[s], theirs), strangers(theirs, shrunk[s]))
+            return n
+        nearest = min(map(apart, runs))
+    except ImportError:
+        return None, f'{leg}: pictures not compared (PySide6 is not installed)'
+    if nearest >= 2:
+        return f'{leg}: {nearest} pictures of a screen are in this run or the nearest good run and not in the other (see {mine})', None
+    return None, f'{leg}: pictures like a good run\'s'
+
+
+def bless(t):
+    """The pictures the last run kept become a good run: small copies. To start a game's good runs over, delete its good_shots folder."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    stamp, n = time.strftime('%m%d_%H%M%S'), 0
+    for f in glob.glob(f'{kept(t, "check_shots")}/*/*.png'):
+        to = f'{kept(t, "good_shots")}/{os.path.basename(os.path.dirname(f))}/{stamp}'
+        os.makedirs(to, exist_ok=True)
+        n += QImage(f).scaled(320, 180, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).save(f'{to}/{os.path.basename(f)}')
+    return f'{n} pictures kept as a good run'
+
+
 def save_files(t):
     got = {}
     base = t.player + '/save'
@@ -155,9 +231,9 @@ def judge(t, seconds, flags):
             text = read_log()
         if 'exited by itself' in said:
             faults.append(f'{name}: Cemu stopped: ' + said.strip()[-120:])
-        if text:  # each leg's log is kept in the game's folder: the next leg starts the game's own log over
-            os.makedirs(t.data + '/check_logs', exist_ok=True)
-            with open(f'{t.data}/check_logs/{name.replace(" ", "_")}.txt', 'w', encoding='utf-8', newline='\n') as f:
+        if text:  # each leg's log is kept: the next leg starts the game's own log over
+            os.makedirs(kept(t, 'check_logs'), exist_ok=True)
+            with open(f'{kept(t, "check_logs")}/{name.replace(" ", "_")}.txt', 'w', encoding='utf-8', newline='\n') as f:
                 f.write(text)
         for pat, what in ((CRASH, 'crash'), (r'\[lazy\] no code', 'code the translation missed')):
             n = len(re.findall(pat, text))
@@ -194,6 +270,11 @@ def judge(t, seconds, flags):
             notes.append(f'{name}: {s[len(s) // 2]:.0f} fps (low {s[0]:.0f}), {ps[-1] if ps else 0} fragment misses, {sum(map(int, cpu))} draws shaded by the CPU, {len(flushes)} flushes')
         else:
             faults.append(f'{name}: nothing drawn')
+        fault, note = pictures(t, name.replace(' ', '_'))
+        if fault:
+            faults.append(fault)
+        if note:
+            notes.append(note)
         misses = d + '/shader_misses.bin'
         if os.path.exists(misses) and os.path.getsize(misses):
             os.makedirs(t.data + '/shader_logs', exist_ok=True)
@@ -212,20 +293,25 @@ def main():
     p.add_argument('--no-build', action='store_true')
     p.add_argument('--seconds', type=int, default=200)
     p.add_argument('--flag', action='append', default=[], help='a debug file in the data folder, like top1080')
+    p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     args = p.parse_args()
     src = sources()
     games = list(GAMES) + list(src['games']) if args.games == ['all'] else args.games
+    built = args.no_build or args.bless
     bad = 0
     for game in games:
         started = time.time()
         if game in GAMES:
-            t = port(game) if args.no_build else build_port(game)
+            t = port(game) if built else build_port(game)
         elif game in src['games']:
-            t = (built_from_dump(game) or 'not built yet') if args.no_build else build_from_dump(game, src['games'][game], src['otp'])
+            t = (built_from_dump(game) or 'not built yet') if built else build_from_dump(game, src['games'][game], src['otp'])
         else:
             t = f'no such game: not one of the ports and not in {SOURCES}'
         if not isinstance(t, str) and game in src['games']:
             t.route = src['games'][game].get('route', '')
+        if args.bless and not isinstance(t, str):
+            print(f'{game}: {bless(t)}', flush=True)
+            continue
         faults, notes = ([t], []) if isinstance(t, str) else judge(t, args.seconds, args.flag)
         bad += bool(faults)
         print(f'{"FAIL" if faults else "ok  "} {game} ({int(time.time() - started)} s): ' + '; '.join(notes), flush=True)
