@@ -48,7 +48,7 @@ GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0, the compiler 
 CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'  # the same compiler as a library for the console: port/wiiu/shader_compile.cpp. Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
 HOST_CXX = [LLVM + 'clang++.exe', '--target=x86_64-w64-mingw32', '--sysroot=' + MINGW, '-fuse-ld=lld']
 CRO_BASE = '0x1C000000'  # the slots CRO modules' code gets (tools/recomp/cro.py), in the part of the address space the Wii U port leaves free
-FRAGMENT_VARIANTS = 12000  # how many lit-state combinations a game may get compiled ahead (prepare_logs): more and the build and the shader file grow too big
+FRAGMENT_VARIANTS = 2000  # how many lit-state combinations a game may get compiled ahead (prepare_logs): more and the build and the shader file grow too big
 BELOW_NORMAL = 0x4000
 MIN_FREE_MB = 2500
 
