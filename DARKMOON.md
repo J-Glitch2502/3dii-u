@@ -111,20 +111,65 @@ recompiled), and put the file back afterwards (keep a copy; `games/` is not in g
   the 20-minute run), which gives 441 pixel and 24 vertex shaders. Parts of the game no PC run reached still compile on
   first use: the console writes those to `shader_misses.bin` in the game's save (`fs:/vol/save/common`, e.g. with SaveMii);
   that file put in `games/darkmoon/shader_logs` is compiled ahead by the next build.
-- The shader generator says "108 variants could not be translated": not looked into yet.
+- The shader generator's "108 variants could not be translated" were Dark Moon's vertex shaders: see below.
+
+## On the console and in Cemu (Nov 11)
+
+The first console build (Senne's Wii U, Aroma) booted to the file select, then froze after A with the music stuttering
+("The game has frozen" screen: guest busy, all host threads waiting); it ran at 1.6 fps, and the TV showed one third of the
+top screen, stretched. Fixed since, each its own commit:
+
+- **Vertex shaders on the CPU** (1.6 fps): the GLSL translator (`runtime/gpu/shader.cpp`, `SpecGen`) gave up on every
+  backward jump. Dark Moon's one vertex program jumps back on b14 (`0e5` to `002`, `141` to `124`, ...), so 108 variants
+  ran on the console's CPU. A `JMPU` the variant's bools settle is now followed. 60 vertex shaders instead of 24; the 37
+  left would loop forever on a 3DS too (b0 without b14). `tools/shadergen_main.cpp` now prints why a variant failed.
+- **The TV picture**: Dark Moon draws its top screen in three passes at `0x18000000`, transfers each to a linear picture at
+  `0x18300000`, moves columns with texture copies (an 8-column shift through a strip at `0x180b3000`) and copies the pieces
+  into its LCD buffer in FCRAM (`0x2112e3f0`, stride 768 = 256 px RGB8, 416 rows from 16 rows before what the LCD shows).
+  `screen_of` remembered `0x18300000` as a top LCD buffer from "Preparing to start game" forever; no path showed a screen
+  that no display transfer brought; linear transfer outputs were written back tiled; `metal_guest_read` read back the
+  bottom screen, which shares `0x18000000`. Now (`port/wiiu/gx2_backend.cpp`): buffers no LCD has shown for 240
+  transfers are forgotten; texture copies of whole rows out of a linear surface are drawn on the GPU into a linear surface
+  at the destination (`linear_copy_on_gpu`), the LCD buffer included; at VBlank a top screen no transfer brought is shown
+  from that surface (or from guest memory). No read backs: on the console those were ~34 ms of waiting a frame.
+- **Vertex data**: copied and converted at every draw, 36-115 KB a draw, 108 us a draw on the console (~43 ms a frame).
+  Now converted once and kept until the game flushes that memory (`vtx_cached`). In Cemu 16-50 us a draw became 1.8-3.6.
+- Not looked into yet: the freeze after A at the file select happened at 1.6 fps and hasn't been seen since; the "108
+  variants" line is the vertex shader issue above. 13 fragment misses in a 7-minute Cemu run.
+
+Cemu at 60 fps (title screen, intro, E. Gadd's bunker, 7 minutes) says the picture is right, not how fast a console is:
+its CPU is far faster. The `[prof]` lines (microseconds per draw for each step) are what to compare: a step that falls
+by a factor in Cemu falls about as much on a console.
+
+### Testing without the SD card
+
+- **Cemu**: a private copy in `build_win/cemu` (Senne's Cemu 2.6 exe as `CemuMario.exe`, its own `portable` folder with his
+  settings but its own `mlc01`; `mlc01/sys` copied from his Wii U Menu dump, 740 MB, so system files and fonts are there).
+  `tools/win/cemu_run.ps1` runs it on a desktop of its own. Before each run delete `portable/shaderCache`, put back
+  `portable/settings.template.xml` as `settings.xml`, and delete `portable/title_list_cache.xml` and
+  `portable/mlc01/usr/save/system/pdm`: a Cemu stopped while writing those crashes at the next start (`0xc0000409`).
+  Cemu reads nothing the GPU drew back into memory, so anything that depends on read backs is black there.
+- **The game's own log, live**: the build listens on port 4405 (`port/wiiu/net_console.cpp`), in Cemu (`127.0.0.1`) and
+  on the console (`192.168.0.149` on Senne's network). `tools/console_watch.py <ip> [commands]` (local: `.gitignore`
+  keeps `tools/console_*` out) saves the log, and sends commands: `st`, `ps`, `misses` (saves `shader_misses.bin`),
+  `shot`, `surf <hex address>` (a picture of a target), `set trace <n>` (the next n draws and copies in the log), and
+  `in <buttons> <frames>` / `in WAIT <frames>` (input). Only one PC can be connected at a time.
+- The scripts used: `console_runs/cemu_cycle.sh <name> [seconds]` (build with the Builder, run in Cemu, read the log;
+  `NOBUILD=1` to skip the build) and `console_runs/cemu_play.sh <name> <seconds> <shots>` (A every second or so).
+  `console_runs/` is not in git.
 
 ## Next step
 
-1. Senne builds it with the repository's Builder and plays it in Cemu and on his console. Random input doesn't really play the
-   game, so him playing it says more than the trials can; how fast it runs on the Wii U is only known then.
-2. PR to `main` with an explanation for Josiah.
+1. Senne rebuilds with the repository's Builder and plays it on his console while the PC reads the log over the network:
+   the fps (the `[gx2]` lines), the `[prof]` lines to see what costs most now, and whether the freeze after A comes back.
+2. Whatever costs most next; the `[prof]` lines say which.
+3. PR to `main` with an explanation for Josiah: the DSP change and the Wii U renderer changes touch every game, so the
+   tested games want a run before it's merged (`tools/check_ports.py` runs them in Cemu, given their dumps).
 
 ## Other loose ends
 
 - The PC trial's lazy compile of a missed function crashed after loading its DLL (exit `0xC0000005`), so a run only
   records one missed function at a time. Not looked into.
 - `tools/setup.py` crashes instead of stopping when MSYS2 is missing (`install_mingw` runs `C:/msys64/usr/bin/bash.exe`).
-- The Wii U build (`all darkmoon`) got as far as the title step before fix 5 (shaders: 4 vertex, 8 pixel, 8 variants not
-  translated). It hasn't been run in Cemu or on a console yet.
-- The Wii U falls back to the CPU for vertex shaders it hasn't compiled yet. Dark Moon has no shader set yet, so expect
-  that on a first run. Upstream's advice: measure how often and how expensive before changing it.
+- The Wii U falls back to the CPU for vertex shaders it hasn't compiled yet: put the console's `shader_misses.bin` (the
+  `misses` command above) in `games/darkmoon/shader_logs` and rebuild.
