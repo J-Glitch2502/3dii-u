@@ -632,6 +632,28 @@ struct DirSession : Service {
 
 // Shared extdata F000000B always exists on a console (made at system setup): it holds gamecoin.dat, the
 // Play Coin counter, which some games read (or fail) without creating it.
+// What an archive was formatted with: its size in bytes, how many directories and files it's for, and whether it keeps duplicate data. A game
+// asks for these back (GetFormatInfo) and formats again when they aren't what it formats with: The Legend of Zelda: A Link Between Worlds
+// wiped its save at every start while the answer was the same four numbers for every game (2026-11-11). Kept in a file beside the archive's
+// folder, in this machine's byte order: it never leaves the save it describes.
+struct FormatInfo {
+    u32 bytes = 0x20000, dirs = 0x10, files = 0x10, duplicate = 0;  // what's answered for an archive formatted before this was kept
+};
+static void keep_format_info(const std::string &dir, const FormatInfo &info) {
+    if (FILE *f = fopen((dir + ".format").c_str(), "wb")) {
+        fwrite(&info, sizeof info, 1, f);
+        fclose(f);
+    }
+}
+static FormatInfo format_info(const std::string &dir) {
+    FormatInfo info, kept;
+    if (FILE *f = fopen((dir + ".format").c_str(), "rb")) {
+        if (fread(&kept, sizeof kept, 1, f) == 1) info = kept;
+        fclose(f);
+    }
+    return info;
+}
+
 static void create_gamecoin(const std::string &dir) {
     fsys::create_directories(dir);
     struct { u32 magic; u16 coins, coins_today; u32 steps, last_steps; u16 year; u8 month, day; } gc{le32(0x4F00), le16(10), 0, 0, 0, le16(2014), 1, 1};
@@ -961,10 +983,13 @@ struct FsUser : Service {
         case 0x084C: {  // FormatSaveData
             std::string d = save_root() + "/savedata";
             std::error_code ec;
+            // size in 512-byte blocks, directories, files, two bucket counts, duplicate data: after the archive's path in FormatSaveData
+            const int at = ipc.cmd() == 0x084C ? 4 : 1;
             FS_NOTE("save: formatting");
             SAVE_SETTLE(d, true);
             fsys::remove_all(d, ec);
             fsys::create_directories(d);
+            keep_format_info(d, {ipc[at] * 512, ipc[at + 1], ipc[at + 2], ipc[at + 5] & 0xff});
             FS_NOTE("save: formatted");
             LOG("[fs] formatted save data at %s\n", d.c_str());
             save_changed(d);
@@ -977,11 +1002,12 @@ struct FsUser : Service {
                 ipc.result(ERR_NOT_FORMATTED, 5);
                 break;
             }
+            const FormatInfo info = format_info(d);
             ipc.ok(5);
-            ipc.set(2, 0x20000);  // total size
-            ipc.set(3, 0x10);     // dirs
-            ipc.set(4, 0x10);     // files
-            ipc.set(5, 0);        // duplicate data
+            ipc.set(2, info.bytes);
+            ipc.set(3, info.dirs);
+            ipc.set(4, info.files);
+            ipc.set(5, info.duplicate);
             break;
         }
         case 0x0851: {  // CreateExtSaveData(info[0..5 words], ...)
