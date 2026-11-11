@@ -190,10 +190,11 @@ void shader_compile_init() {
     }
     auto *t = (OSThread *)memalign(16, sizeof(OSThread));
     void *stack = memalign(16, STACK);
-    // Core 2, below the GPU thread (16) and the sound (15) that live there: it compiles in the time the GPU thread spends waiting, and a burst
-    // of compiles holds up neither a frame nor, on core 0, saves, files and the log. The game's threads have core 1 to themselves.
-    // (Proven on a console on core 0 at this priority, 2026-11-07; on core 2 only in Cemu so far.)
-    if (!t || !stack || !OSCreateThread(t, compile_thread, 0, nullptr, (u8 *)stack + STACK, STACK, 21, OS_THREAD_ATTRIB_AFFINITY_CPU2)) {
+    // Core 0, just below the card thread (20): a burst of compiles never holds up saves and the log, and only core 0's own threads (net,
+    // watchdog, hid, card), which mostly sleep, come first. Not core 2 with the GPU thread: when shaders are missing that thread is at its
+    // busiest, shading on the CPU what the missing shaders would, and the compiler below it got no time at all. One compile took 69 s there
+    // against under 1 s here, at 7 fps against 57 (NSMB2 with every vertex shader from this compiler, in Cemu, 2026-11-11).
+    if (!t || !stack || !OSCreateThread(t, compile_thread, 0, nullptr, (u8 *)stack + STACK, STACK, 21, OS_THREAD_ATTRIB_AFFINITY_CPU0)) {
         LOG("[glsl] no compiler thread\n");
         return;
     }

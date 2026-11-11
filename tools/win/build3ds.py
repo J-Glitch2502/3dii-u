@@ -395,9 +395,14 @@ def build_runtime(g, args):
     return obj_dir
 
 
+# A game's translated code is 15 to 25 times the size of its ARM code, and a console's core has 32 KB of instruction cache: for size, then
+# (NSMB2's code is 25.3 MB at -O2 and 21.5 MB at -Os). No frame pointer and no position-independent code, which are this compiler's defaults, said so.
+GAME_OPT = ['-Os', '-fomit-frame-pointer', '-fno-pic']
+
+
 def game_flags(g, opt=None):
-    return [BIN + 'gcc.exe'] + (shlex.split(opt) if opt else g.opt or ['-O2']) + ['-mcpu=750', '-meabi', '-mhard-float', '-ffp-contract=off', '-fno-math-errno',
-                                                                                   '-fno-strict-aliasing', '-std=gnu11', '-w', f'-I{PORT}', f'-I{RT}', f'-I{g.gen_dir}']
+    return [BIN + 'gcc.exe'] + (shlex.split(opt) if opt else g.opt or GAME_OPT) + ['-mcpu=750', '-meabi', '-mhard-float', '-ffp-contract=off', '-fno-math-errno',
+                                                                                    '-fno-strict-aliasing', '-std=gnu11', '-w', f'-I{PORT}', f'-I{RT}', f'-I{g.gen_dir}']
 
 
 def build_game_code(g, args):

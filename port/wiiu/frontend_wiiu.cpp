@@ -543,9 +543,11 @@ void frontend_run() {
     OSThread *gpu = spawn(gpu_thread, 2, 16, 2 << 20, "gpu");
     host_threads[1] = gpu;
     host_threads[2] = spawn(hid_thread, 0, 16, 256 << 10, "hid");
-    // The cores: 0 for files, input, the network and the log; 1, with the large cache, for the game's code alone; 2 for what makes the picture and
-    // the sound. The sound comes before the GPU thread there, so a busy frame never holds it up.
-    host_threads[3] = spawn(audio_thread, 2, 15, 512 << 10, "audio");
+    // The cores: 0 for files, input, the network, the log, the sound and the shader compiler; 1, with the large cache, for the game's code
+    // alone; 2 for the GPU thread alone. The sound was tried on core 2, ahead of the GPU thread: NSMB2's slowest frames fell from 50 fps to
+    // 14 to 16 and its restart from 60 fps to 39 to 44, twice over, and came back with the sound here (Cemu, 2026-11-11). Core 0's own
+    // threads mostly sleep, and the sound has had no gaps from here.
+    host_threads[3] = spawn(audio_thread, 0, 15, 512 << 10, "audio");
     spawn(card_thread, 0, 20, 256 << 10, "card");
     stage("threads started");
     while (!wiiu::gfx_ready()) OSSleepTicks(OSMillisecondsToTicks(5));
