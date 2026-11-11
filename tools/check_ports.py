@@ -213,7 +213,7 @@ def judge(t, seconds, flags):
     os.makedirs(d)
     with open(d + '/live.txt', 'w', newline='\n') as f:
         f.write('\n'.join(ROUTES.get(t.route or t.name, GENERIC)) + '\n')
-    for flag in flags:
+    for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp)
         open(f'{d}/{flag}', 'w').close()
     log = d + '/log.txt'
     interp = t.interp
@@ -244,6 +244,12 @@ def judge(t, seconds, flags):
         vs = len(re.findall(r'no compiled vertex shader', text))
         if vs:
             faults.append(f'{name}: {vs} vertex shaders not compiled')
+        # A vertex attribute in a layout Cemu has no decoder for is left out, with nothing on the game's log, and the pictures then show what no
+        # console draws: NSMB2's world map without its ground, Superstar Saga's backgrounds as stripes (2026-11-11). Cemu's own log says so.
+        with open(CEMU + '/portable/log.txt', encoding='utf-8', errors='replace') as f:
+            undecoded = sorted(set(re.findall(r'Unsupported fmt \w+ nfa \d+ signed \d+ endian \d+', f.read())))
+        if undecoded:
+            faults.append(f"{name}: Cemu can't decode vertex data this game drew with, so these aren't a console's pictures: " + '; '.join(undecoded))
         gaps = sum(int(x) for x in re.findall(r'\[audio\] (\d+) gaps', text))
         if gaps:
             faults.append(f'{name}: {gaps} gaps in the sound')

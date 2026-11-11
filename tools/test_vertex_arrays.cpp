@@ -45,9 +45,10 @@ int main() {
     check("bytes at an odd offset, fetched as the word they're in", bytes, 2, 1);
 
     const Gx2Attr odd_stride{0, 7, 1, 3, false}, across{6, 16, 1, 4, false}, word{4, 16, 0, 4, false}, packed_shorts{2, 6, 2, 3, false};
-    const Gx2Attr shorts{8, 12, 2, 2, false}, off_word_shorts{6, 12, 2, 2, false}, floats{12, 24, 3, 3, false}, off_word_floats{2, 16, 3, 3, false};
-    if (fetchable(odd_stride) || fetchable(across) || !fetchable(word) || fetchable(packed_shorts) || !fetchable(shorts) || fetchable(off_word_shorts) ||
-        !fetchable(floats) || fetchable(off_word_floats)) {
+    const Gx2Attr shorts{8, 12, 2, 2, false}, off_word_shorts{6, 12, 2, 2, false}, floats{12, 24, 3, 3, false};
+    // bytes only as the word they lie in; 16-bit integers and floats wherever they lie, however the vertices are packed
+    if (fetchable(odd_stride) || fetchable(across) || !fetchable(word) || !fetchable(packed_shorts) || !fetchable(shorts) || !fetchable(off_word_shorts) ||
+        !fetchable(floats) || fetched_bytes(shorts) != 8 || fetched_bytes(packed_shorts) != 8) {
         failures++;
         printf("FAILED: which attributes the GPU fetches\n");
     }

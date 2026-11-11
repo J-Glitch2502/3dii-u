@@ -144,8 +144,8 @@ GX2VertexShader *vs_passthrough, *vs_blit;
 GX2PixelShader *ps_blit, *ps_fallback, *ps_fallback_tex, *ps_uber, *ps_uber_lit;
 GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GPU (gpu_decode); null in a pack from before it had that one
 // A bit per attribute format (s8, u8, s16, float) kept the old way: copied by itself, integers as floats made by the CPU. Files named "cpuattr"
-// (all), "cpuattr8" and "cpuattr16" set them. None by default: bytes fetched a 4-byte word at a time (gpu_fetched) draw NSMB2's skinned models
-// as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen.
+// (all), "cpuattr8" and "cpuattr16" set them, and "cemu" the signed bytes. None by default: bytes fetched a 4-byte word at a time (gpu_fetched)
+// draw NSMB2's skinned models as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen there.
 u32 gxt_cpu_attr;
 bool gxt_cpu_tex;                     // a file named "cputex" in the data folder: every texture decoded by the CPU, as before
 // A vertex shader the pack lacks, compiled on the console: off, a file named "glslvs" turns it on. In Cemu the compiler hands back an empty
@@ -1724,11 +1724,13 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
 inline bool gpu_fetched(const Gx2Attr &at) { return !(gxt_cpu_attr >> at.fmt & 1) && fetchable(at); }
 
 GX2AttribFormat attr_format(u32 fmt, u32 elems) {
-    // 3 x 8 or 16 bits don't exist: fetch 4, and the mask supplies w
+    // 3 x 8 or 16 bits don't exist: fetch 4, and the mask supplies w. 16-bit integers are fetched as four however many there are, the mask
+    // dropping the rest: the console's GPU fetches one or two as well, but Cemu has no decoder for those, leaves the attribute out without a
+    // word on the game's side, and its pictures then show what no console draws (see check_ports.py's look at Cemu's own log).
     static const u32 base[4][4] = {
         {GX2_ATTRIB_TYPE_8, GX2_ATTRIB_TYPE_8_8, GX2_ATTRIB_TYPE_8_8_8_8, GX2_ATTRIB_TYPE_8_8_8_8},
         {GX2_ATTRIB_TYPE_8, GX2_ATTRIB_TYPE_8_8, GX2_ATTRIB_TYPE_8_8_8_8, GX2_ATTRIB_TYPE_8_8_8_8},
-        {GX2_ATTRIB_TYPE_16, GX2_ATTRIB_TYPE_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16},
+        {GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16},
         {GX2_ATTRIB_FORMAT_FLOAT_32, GX2_ATTRIB_FORMAT_FLOAT_32_32, GX2_ATTRIB_FORMAT_FLOAT_32_32_32, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32}};
     u32 f = base[fmt & 3][(elems - 1) & 3];
     if (fmt != 3) f |= GX2_ATTRIB_FLAG_SCALED;
@@ -3105,6 +3107,9 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("cpuattr")) gxt_cpu_attr = 0xf;
     if (wiiu::debug_flag("cpuattr8")) gxt_cpu_attr |= 3;
     if (wiiu::debug_flag("cpuattr16")) gxt_cpu_attr |= 4;
+    // check_ports.py's runs say they're in Cemu, which has no decoder for signed bytes made into floats and leaves such an attribute out
+    // (NSMB2's world map lost its ground, 2026-11-11): there the CPU makes them. The console's GPU fetches them itself.
+    if (wiiu::debug_flag("cemu")) gxt_cpu_attr |= 1;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
