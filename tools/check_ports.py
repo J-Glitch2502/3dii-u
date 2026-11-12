@@ -255,6 +255,14 @@ def judge(t, seconds, flags, measured=False):
             notes.append(f'{name}: Cemu died as it started; run again on fresh caches')
             said = cemu(t, secs, interp)
             text = read_log()
+        elif not text.strip() and not glob.glob(t.data + '/shots/cemu/tv_*.png'):
+            # Or it stayed up and never started the game: no line on the game's log and not one picture (A Link Between Worlds' restart,
+            # 2026-11-11, right after Kirby's died the other way). The same caches, which cemu_run.ps1 only drops when Cemu exits or won't close.
+            notes.append(f'{name}: Cemu never started the game; run again on fresh caches')
+            for f in glob.glob(f'{CEMU}/portable/shaderCache/transferable/00050000{t.low}_*'):
+                os.remove(f)
+            said = cemu(t, secs, interp)
+            text = read_log()
         if 'exited by itself' in said and not interp and not re.search(CRASH, text):
             # Cemu's recompiler can die on a game's code, at the start or minutes in, with nothing wrong on the game's own log (3D Land, Paper
             # Jam): its interpreter runs them. A crash of the game's would come back in the interpreter too.
