@@ -633,10 +633,16 @@ std::vector<Surface *> read_targets;  // those the list being run has drawn to, 
 // (New Super Mario Bros. 2), and a screen's own surface counts while the game has cleared it in each of its last eight frames, as what is
 // wiped every frame is drawn every frame.
 FrameCap cap;
+// Not for a game that puts its top screen together in its LCD buffer with texture copies (show_lcd_from_memory): Luigi's Mansion: Dark Moon
+// draws each half of it in turn, and with every other frame left out one half was never drawn, so the TV showed the same picture twice, one over
+// the other (Cemu, 2026-11-13). Such a game turns the cap off for good (lcd_composed). "set cap 0|1" over the network.
+bool use_cap = true, lcd_composed;
+inline bool cap_on() { return use_cap && !lcd_composed; }
 
 // at a screen's transfer: true if the frame it ends was left out
 bool frame_left_out(Surface &s, int which) {
     s.lcds |= 1 << which;
+    if (!cap_on()) return false;
     const bool shared = s.lcds == 3;
     if (which == 0 || !shared) {  // a bottom screen drawn in the top's surface goes by the top's frames
         s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
@@ -647,7 +653,7 @@ bool frame_left_out(Surface &s, int which) {
 
 // the screen's surface a draw is for, if the frame being made for that screen is left out
 Surface *left_out(u32 color_addr, u32 w, u32 h) {
-    if (!cap.marking()) return nullptr;
+    if (!cap_on() || !cap.marking()) return nullptr;
     for (auto &s : surfaces)
         if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && cap.drops(s->lcds)) return s.get();
     return nullptr;
@@ -2792,7 +2798,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
     for (auto &s : surfaces)
         if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
             s->cleared = true;
-            left |= cap.drops(s->lcds);
+            left |= cap_on() && cap.drops(s->lcds);
         }
     if (gx2_skip_pass || left) return true;
     const Fill f{start, end, value, control};
@@ -4081,6 +4087,9 @@ static void show_lcd_from_memory() {
     for (auto &s : surfaces)
         if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride && (!lcd || s->drawn > lcd->drawn)) lcd = s.get();
     if (lcd) {
+        if (!lcd_composed) LOG("[gx2] the top screen is put together in its LCD buffer: no thirty-a-second cap for this game
+");
+        lcd_composed = true;
         if (pa == shown_pa && lcd->drawn == shown_drawn) return;
         shown_pa = pa;
         shown_drawn = lcd->drawn;
@@ -4239,7 +4248,8 @@ bool gfx_set(const char *name, u32 v) {
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
-    else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
+    else if (!strcmp(name, "gputime")) gt_on = v;
+    else if (!strcmp(name, "cap")) use_cap = v;  // the thirty-a-second cap (frame_cap.h)  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
     else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way

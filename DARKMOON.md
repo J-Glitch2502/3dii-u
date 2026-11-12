@@ -208,8 +208,12 @@ an array copy (f_003fd8a0), so a count is garbage. Not the cause (each tried alo
 other threads run (run_blocked), the DSP merge (pre-merge DSP back), and probably not the unpacked shared font (that run died in
 Cemu itself, inconclusive). **Found: main's -Os for game code** (a939b24). The same build at -O2 plays the intro in Cemu (60 fps,
 right picture). Dark Moon is now built at -O2 (build3ds.py O2_GAMES); why -Os breaks it isn't known (worth a look: a miscompile,
-or generated C that relies on something -Os changes). Next: a Cemu run of the committed fix, then Senne builds with
-`tools/win/builder_measuring.bat` and profiles on the console.
+or generated C that relies on something -Os changes). At -O2 it played, but the TV showed the top screen twice, one over the other:
+main's thirty-a-second cap (4063444) left out every other frame, and Dark Moon draws the halves of its top screen in turn. With the
+cap off the lab scene is right in Cemu; now a game whose top screen is put together in its LCD buffer turns the cap off
+(lcd_composed; `set cap 0|1`). That exact build's Cemu check was still running when the PC went off: run it first
+(`bash console_runs/cemu_cmd.sh cap1 120 st`, look at tv_01.png). Also seen: noise in the TV's side bars in the new Cemu pictures
+(not checked whether that's new). Then Senne builds with `tools/win/builder_measuring.bat` and profiles on the console.
 
 ## Next step
 
