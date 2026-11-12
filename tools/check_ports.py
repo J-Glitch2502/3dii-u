@@ -232,8 +232,9 @@ def judge(t, seconds, flags, measured=False):
         os.remove(f)
     os.makedirs(d)
     route = ROUTES.get(t.route or t.name, GENERIC)
-    for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp)
-        open(f'{d}/{flag}', 'w').close()
+    for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp); name=text for a file with something in it
+        with open(f'{d}/{flag.split("=")[0]}', 'w') as f:
+            f.write(flag.partition('=')[2])
     if t.env:
         with open(d + '/env.txt', 'w', newline='\n') as f:
             f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
@@ -347,7 +348,7 @@ def main():
     p.add_argument('games', nargs='*', default=['all'])
     p.add_argument('--no-build', action='store_true')
     p.add_argument('--seconds', type=int, default=200)
-    p.add_argument('--flag', action='append', default=[], help='a debug file in the data folder, like top1080')
+    p.add_argument('--flag', action='append', default=[], help='a debug file in the data folder, like top1080, or with what it holds: "gxtrace=3000 400"')
     p.add_argument('--route', help="a route of test_routes.py for every game named, instead of its own: nsmb2_stand to time a level's first screen")
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     p.add_argument('--measure', action='store_true', help="the measuring kind of build (build3ds.py's THREEDII_MEASURE): frame rates and costs on the log, and the scenes")
