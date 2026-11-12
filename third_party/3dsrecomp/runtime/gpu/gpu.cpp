@@ -314,6 +314,9 @@ constexpr u32 expand_mask[16] = {
 
 // registers needing side effects
 bool special[0x300];
+// and of those, the ones a list writes long runs of words to (write_run): which kind, or 0
+enum { RUN_NONE, RUN_VS_UNIFORMS, RUN_VS_CODE, RUN_VS_SWIZZLE, RUN_LIGHT_TABLE };
+u8 run_kind[0x300];
 void init_special() {
     const u32 list[] = {R::IRQ_REQ,      R::TOPOLOGY,      R::RESTART_PRIM, R::FIXATTR_INDEX,
                         R::DRAW,         R::DRAW_INDEXED,  R::GS + R::SH_BOOL,
@@ -335,6 +338,10 @@ void init_special() {
         special[R::LUT_DATA + i] = true;
         special[R::FOG_LUT_DATA + i] = true;
         special[R::PT_LUT_DATA + i] = true;
+        run_kind[R::VS + R::SH_FLOAT_DATA + i] = RUN_VS_UNIFORMS;
+        run_kind[R::VS + R::SH_CODE_DATA + i] = RUN_VS_CODE;
+        run_kind[R::VS + R::SH_SWZ_DATA + i] = RUN_VS_SWIZZLE;
+        run_kind[R::LUT_DATA + i] = RUN_LIGHT_TABLE;
     }
 }
 
@@ -347,30 +354,46 @@ inline u64 lut_mix(u32 slot, u32 value) {
 }
 #endif
 
+// One word for each of the registers a list writes runs of words to: what handle_special does with it, and write_run for a whole run
+inline void vs_uniform_word(u32 value) {
+    const int idx = upload_float(g.vs, R::VS, value);
+    if (idx >= 0 && mirror_vs_to_gs()) g.gs.f[idx] = g.vs.f[idx];
+}
+inline void vs_code_word(u32 value) {
+    u32 &off = g.regs[R::VS + R::SH_CODE_IDX];
+    if (off >= 512) return;
+    upload_code(g.vs, off, value);
+    if (mirror_vs_to_gs()) upload_code(g.gs, off, value);
+    off++;
+}
+inline void vs_swizzle_word(u32 value) {
+    u32 &off = g.regs[R::VS + R::SH_SWZ_IDX];
+    if (off >= 4096) return;
+    upload_swizzle(g.vs, off, value);
+    if (mirror_vs_to_gs()) upload_swizzle(g.gs, off, value);
+    off++;
+}
+inline void light_table_word(u32 value) {
+    u32 &cfg = g.regs[R::LUT_INDEX];
+    const u32 index = cfg & 0xff, type = (cfg >> 8) & 0x1f;
+    if (type < 24 && g.light_lut[type][index] != value) {
+#ifdef __WIIU__
+        g.light_lut_hash ^= lut_mix(type << 8 | index, g.light_lut[type][index]) ^ lut_mix(type << 8 | index, value);
+#endif
+        g.light_lut[type][index] = value;
+        g.light_lut_dirty = true;
+    }
+    cfg = (cfg & ~0xffu) | ((index + 1) & 0xff);
+}
+
 void handle_special(u32 id, u32 value) {
     u32 *regs = g.regs;
-    if (id >= R::VS + R::SH_FLOAT_DATA && id < R::VS + R::SH_FLOAT_DATA + 8) {
-        int idx = upload_float(g.vs, R::VS, value);
-        if (idx >= 0 && mirror_vs_to_gs()) g.gs.f[idx] = g.vs.f[idx];
-        return;
-    }
-    if (id >= R::VS + R::SH_CODE_DATA && id < R::VS + R::SH_CODE_DATA + 8) {
-        u32 &off = regs[R::VS + R::SH_CODE_IDX];
-        if (off < 512) {
-            upload_code(g.vs, off, value);
-            if (mirror_vs_to_gs()) upload_code(g.gs, off, value);
-            off++;
-        }
-        return;
-    }
-    if (id >= R::VS + R::SH_SWZ_DATA && id < R::VS + R::SH_SWZ_DATA + 8) {
-        u32 &off = regs[R::VS + R::SH_SWZ_IDX];
-        if (off < 4096) {
-            upload_swizzle(g.vs, off, value);
-            if (mirror_vs_to_gs()) upload_swizzle(g.gs, off, value);
-            off++;
-        }
-        return;
+    switch (run_kind[id]) {
+    case RUN_VS_UNIFORMS: return vs_uniform_word(value);
+    case RUN_VS_CODE: return vs_code_word(value);
+    case RUN_VS_SWIZZLE: return vs_swizzle_word(value);
+    case RUN_LIGHT_TABLE: return light_table_word(value);
+    default: break;
     }
     if (id >= R::GS + R::SH_FLOAT_DATA && id < R::GS + R::SH_FLOAT_DATA + 8) {
         upload_float(g.gs, R::GS, value);
@@ -390,19 +413,6 @@ void handle_special(u32 id, u32 value) {
             upload_swizzle(g.gs, off, value);
             off++;
         }
-        return;
-    }
-    if (id >= R::LUT_DATA && id < R::LUT_DATA + 8) {
-        u32 &cfg = regs[R::LUT_INDEX];
-        u32 index = cfg & 0xff, type = (cfg >> 8) & 0x1f;
-        if (type < 24 && g.light_lut[type][index] != value) {
-#ifdef __WIIU__
-            g.light_lut_hash ^= lut_mix(type << 8 | index, g.light_lut[type][index]) ^ lut_mix(type << 8 | index, value);
-#endif
-            g.light_lut[type][index] = value;
-            g.light_lut_dirty = true;
-        }
-        cfg = (cfg & ~0xffu) | ((index + 1) & 0xff);
         return;
     }
     if (id >= R::FOG_LUT_DATA && id < R::FOG_LUT_DATA + 8) {
@@ -529,6 +539,67 @@ inline void write_reg(u32 id, u32 value, u32 mask) {
     }
 #endif
 }
+
+// A run of words for one register: a block of uniforms, a shader's code, a lighting table. Nearly half of what a list holds (New
+// Super Mario Bros. 2: 27,000 of the 60,000 words of two frames, most of them tables and code that are the same every frame), and a word
+// at a time each went through write_reg and into handle_special to do one small thing. Here the register is looked at once for the
+// whole run. What write_reg does for each word is done for all of them at the end: none of these words reads the register it is written to.
+void write_run(u32 kind, u32 id, u32 first, const u32 *extra, u32 count) {
+    const auto each = [&](auto word) {
+        word(first);
+        for (u32 i = 0; i < count; i++) word(le32(extra[i]));
+    };
+    switch (kind) {
+    case RUN_VS_UNIFORMS: each([](u32 v) { vs_uniform_word(v); }); break;
+    case RUN_VS_CODE: each([](u32 v) { vs_code_word(v); }); break;
+    case RUN_VS_SWIZZLE: each([](u32 v) { vs_swizzle_word(v); }); break;
+    default: each([](u32 v) { light_table_word(v); }); break;
+    }
+    g.regs[id] = le32(extra[count - 1]);
+#ifdef __WIIU__
+    if (id < 0x200) g.regs_version += count + 1;
+#else
+    g.regs_version += count + 1;
+#endif
+}
+
+#ifndef __WIIU__
+// GPU_CHECK_RUNS (the PC build): every run is done both ways from the same state, and the two results must be the same, byte for byte
+struct RunState {
+    u32 regs[0x300];
+    ShaderSetup vs, gs;
+    u32 light_lut[24][256];
+    bool light_lut_dirty;
+    u64 regs_version;
+};
+void run_state(RunState &r, bool save) {
+    const auto field = [&](void *mine, void *theirs, size_t n) { save ? memcpy(mine, theirs, n) : memcpy(theirs, mine, n); };
+    field(r.regs, g.regs, sizeof r.regs);
+    field(&r.vs, &g.vs, sizeof r.vs);
+    field(&r.gs, &g.gs, sizeof r.gs);
+    field(r.light_lut, g.light_lut, sizeof r.light_lut);
+    field(&r.light_lut_dirty, &g.light_lut_dirty, sizeof r.light_lut_dirty);
+    field(&r.regs_version, &g.regs_version, sizeof r.regs_version);
+}
+void checked_run(u32 kind, u32 id, u32 first, const u32 *extra, u32 count) {
+    static RunState before, as_run, by_word;  // 100 KB each
+    static u64 checked;
+    memset(&as_run, 0, sizeof as_run);
+    memset(&by_word, 0, sizeof by_word);
+    run_state(before, true);
+    write_run(kind, id, first, extra, count);
+    run_state(as_run, true);
+    run_state(before, false);
+    write_reg(id, first, 0xf);
+    for (u32 i = 0; i < count; i++) write_reg(id, le32(extra[i]), 0xf);
+    run_state(by_word, true);
+    if (memcmp(&as_run, &by_word, sizeof as_run)) {
+        LOG("FATAL: a run of %u words for register %03x (kind %u) left the GPU state different from the same words one at a time\n", count + 1, id, kind);
+        abort();
+    }
+    if (!(++checked & (checked - 1))) LOG("[gpu] %llu runs checked against the same words one at a time\n", (unsigned long long)checked);
+}
+#endif
 }  // namespace
 
 void cmd_run(u32 paddr, u32 size) {
@@ -549,6 +620,15 @@ void cmd_run(u32 paddr, u32 size) {
         const u32 *extra = cl.head + cl.idx;
         if (cl.idx + count > cl.len) count = cl.len - cl.idx;
         cl.idx += count;
+        if (count && !group && mask == 0xf && id < 0x300 && run_kind[id]) {
+#ifndef __WIIU__
+            static const bool check = getenv("GPU_CHECK_RUNS") != nullptr;
+            if (check) checked_run(run_kind[id], id, value, extra, count);
+            else
+#endif
+                write_run(run_kind[id], id, value, extra, count);
+            continue;
+        }
         write_reg(id, value, mask);
         for (u32 i = 0; i < count && !stop_requested; i++)
             write_reg(group ? id + 1 + i : id, le32(extra[i]), mask);
