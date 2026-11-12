@@ -476,22 +476,25 @@ def main():
                 for at, stages, extra in materials(b):
                     st = [stage(i, w, extra.get(0xE0, 0)) for i, w in enumerate(stages)]
                     m = b.rfind(b'MTOB', 0, at)
-                    if m >= 0:  # CGFX: the material's flags (bit 0 fragment lighting, bit 4 fog) and its lighting layer config
+                    # CGFX: the material's flag for fragment lighting (bit 0) and its lighting layer config. Its fog flag (bit 4) is not gone by:
+                    # Super Mario 3D Land draws materials in fog whose flag says none, and with it believed not one of the 64 states a console
+                    # had to compile there was made ahead; without it, 19 (2026-11-12, --holdout).
+                    if m >= 0:
                         flags = struct.unpack_from('<I', b, m + 0x14)[0]
-                        lit, layer, fog_ok = bool(flags & 1), struct.unpack_from('<I', b, at - 0x20)[0], bool(flags & 16)
+                        lit, layer = bool(flags & 1), struct.unpack_from('<I', b, at - 0x20)[0]
                     else:  # BCH and the rest: lit if a stage reads the lighting, otherwise either way
                         lit = True if any(x in (1, 2) for t in st for x in t['csrc'] + t['asrc']) else None
-                        layer, fog_ok = None, True
+                        layer = None
                     at_reg = extra.get(0x104, 0)
                     fogat = ((at_reg & 1) << 2 | ((at_reg >> 4) & 7) << 3) if at_reg & 1 else 0
-                    bases.append((lit, layer, fog_ok, tev_list(st), fogat))
+                    bases.append((lit, layer, tev_list(st), fogat))
     bases = list({repr(x): x for x in bases}.values())
-    model_sigs = {sig(normal(dict(head=1, tex=[0, 0, 0], tev=tev, light=0, fogat=0, blend=0, mask=0))['tev']) for _, _, _, tev, _ in bases}
+    model_sigs = {sig(normal(dict(head=1, tex=[0, 0, 0], tev=tev, light=0, fogat=0, blend=0, mask=0))['tev']) for _, _, tev, _ in bases}
     tails = [[]] + learned_tails(states, model_sigs)
     made = {}  # state -> which part found it
     for c in contexts:  # most common settings first, until the limit
-        for lit, layer, fog_ok, tev, fogat in bases:
-            if (lit is not None and bool(c['light']) != lit) or (c['light'] and layer is not None and (c['lcfg'] >> 4) & 15 != layer) or (c['fogat'] & 1 and not fog_ok):
+        for lit, layer, tev, fogat in bases:
+            if (lit is not None and bool(c['light']) != lit) or (c['light'] and layer is not None and (c['lcfg'] >> 4) & 15 != layer):
                 continue
             top = max((t['si'] for t in tev), default=-1)
             for tail in tails:
