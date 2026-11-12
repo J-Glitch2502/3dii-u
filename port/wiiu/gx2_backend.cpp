@@ -451,6 +451,10 @@ struct Surface {
     // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
     // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
     bool in_list = false, sampled = false, was_sampled = false;
+    // for the thirty-a-second cap (frame_left_out): the screens its picture has been shown on (1 the top, 2 the bottom, 3 both), whether
+    // the game has cleared it since its last transfer, and for how many frames in a row it has
+    u8 lcds = 0, steady = 0;
+    bool cleared = false;
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
         return w * h * bpp;
@@ -464,6 +468,47 @@ Surface *cur_color, *cur_depth;
 // as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
 inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
 std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
+
+// Thirty frames a second. Of a game that makes a frame for every VBlank, every other frame of each screen is left out: nothing is drawn to
+// that screen's surface from the transfer before it to its own (gx2_skip_draw, metal_flush), its clear is dropped, and its transfer shows
+// nothing, so the frame before stays up for both VBlanks. The game itself runs as it did: its lists are read, its other targets drawn, its
+// interrupts sent. Only half the drawing is done, which is what holds a game back when it can't keep up.
+// Which frames: once a frame has come less than two VBlanks after the one before, the frame after each drawn one is left out. The left-out
+// frames say whether to go on: they cost nothing to draw, so one that takes two VBlanks to come is the game's own pace (a game or a scene
+// made for thirty), and the leaving out stops.
+// Only a picture the game is sure to draw again: one whose frame is left out and never drawn again would be lost for good (a menu drawn
+// once and then only sent). A surface both screens are drawn in has to be drawn afresh for each (New Super Mario Bros. 2), and it goes by
+// the top screen's frames, as which screen a draw there is for isn't known until its transfer. A screen's own surface counts while the
+// game has cleared it in each of its last eight frames: what is wiped every frame is drawn every frame.
+// shortcut: a game that stops drawing altogether right after a left-out frame (a long load) keeps the frame before it on that screen until
+// it draws again; if one shows that (a fade's last step), keep the left-out frame's lists and draw them late.
+struct ScreenCycle {
+    u64 last = 0;  // the VBlank its last frame came at
+    bool skip = false, engaged = false;
+};
+ScreenCycle cycle[2];  // the top screen's and the bottom's
+
+// at a screen's transfer: true if the frame it ends was left out
+bool frame_left_out(Surface &s, int which) {
+    s.lcds |= 1 << which;
+    if (which == 1 && s.lcds == 3) return cycle[0].skip;
+    ScreenCycle &c = cycle[which];
+    const bool was = c.skip, fast = g_frame - c.last < 2;
+    c.last = g_frame;
+    if (was || fast) c.engaged = fast;
+    s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
+    s.cleared = false;
+    c.skip = !was && c.engaged && (s.lcds == 3 || s.steady >= 8);
+    return was;
+}
+
+// the screen's surface a draw is for, if the frame being made for that screen is left out
+Surface *left_out(u32 color_addr, u32 w, u32 h) {
+    if (!cycle[0].skip && !cycle[1].skip) return nullptr;
+    for (auto &s : surfaces)
+        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && s->lcds && cycle[s->lcds == 2].skip) return s.get();
+    return nullptr;
+}
 GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
@@ -2227,7 +2272,7 @@ void gx2_flush_cpu_batch() {
 }
 
 void metal_flush(const RTConfig &rt, const MBatch &mb) {
-    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80)) return;
+    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80) || left_out(rt.color_addr, rt.w, rt.h)) return;
     // Textures first: a decode takes ring memory of its own, megabytes for a large one, and the batch's vertices mustn't already be lying in a
     // segment that the decodes go on to leave behind
     for (const MSeg &seg : mb.segs)
@@ -2391,7 +2436,13 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
         else gx2_skip_pass = gx2_skip_copies = true;
     }
-    if (gx2_skip_pass) return true;
+    bool left = false;  // the clear of a screen's frame that isn't drawn; a clear also says the game draws that screen afresh (frame_left_out)
+    for (auto &s : surfaces)
+        if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
+            s->cleared = true;
+            left |= cycle[s->lcds == 2].skip;
+        }
+    if (gx2_skip_pass || left) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
     for (auto &s : surfaces)
@@ -2938,6 +2989,10 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
 }
 
 bool gx2_skip_pass, gx2_skip_copies;
+bool gx2_skip_draw() {
+    const u32 dim = g.regs[R::FB_DIM];
+    return gx2_skip_pass || left_out((g.regs[R::COLOR_ADDR] & 0x0fffffff) * 8, dim & 0x7ff, ((dim >> 12) & 0x3ff) + 1);
+}
 
 // New Super Mario Bros. 2 draws a right eye every frame though the slider says 3D is off, and the Wii U couldn't show it: half its draws.
 // Once a right eye is seen right after a left one, the pass between those transfers isn't drawn. If something else turns up there, it stops.
@@ -3078,7 +3133,9 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     static u32 shown[2];  // pictures sent to each screen's own buffers
     const bool spare = known_screen < 0 && passed_over(out_paddr, shown[which]);
     if (known_screen >= 0) shown[which]++;
-    if (!spare) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
+    // a buffer its LCD has shown ends a frame of that screen's, which may be one that was left out
+    const bool out = known_screen >= 0 && frame_left_out(*s, which);
+    if (!spare && !out) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
     last_transfer[spare ? 2 : which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
     return true;
 }

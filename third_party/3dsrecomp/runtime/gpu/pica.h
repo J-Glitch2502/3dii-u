@@ -557,6 +557,7 @@ void *gx2_fog_lut();
 void gx2_flush_cpu_batch();
 bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control);  // true: done, guest memory needn't be filled too
 extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing will show
+bool gx2_skip_draw();       // the draw the registers describe is one to leave out: that, or a frame that isn't shown (frame_left_out)
 extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
 #endif
