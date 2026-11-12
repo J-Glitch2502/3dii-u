@@ -290,6 +290,13 @@ def main():
     if not dumps.have_system_archives(archives):  # a Miitopia built without them stopped on the console with FS "not found" (Nov 9)
         fail('The 3DS system files are missing: the Mii data, without which Mii games stop, and the shared font. Give --emulator Azahar\'s '
              'user folder (after its File > Set Up System Files) or the 0004009b folder GodMode9 copies off your 3DS (title, in CTRNAND).')
+    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:  # and what this game's own code names of them (dumps.archives_named)
+        lacking = [t for t in dumps.archives_named(f.read()) if not os.path.isfile(os.path.join(archives, t + '.romfs'))]
+    if lacking:
+        t = lacking[0]
+        fail(f'This game reads {dumps.ARCHIVE_NAMES.get(t, "a font")} from the 3DS itself, and your 3DS system files don\'t have it: the game would '
+             f'stop as it starts. It is in the {t[:8]} folder: with GodMode9, copy that folder off your 3DS too ([1:] SYSNAND CTRNAND > title), '
+             f'next to the 0004009b one, and choose the folder again under "3DS system files". Azahar\'s File > Set Up System Files brings it too.')
     # what earlier runs of a game learned (render states it uses; code only static analysis misses) goes with it, if the code is the same.
     # An untested game's live under its own slug (games/g_<code>/shader_logs): a run's shader_misses.bin put there is compiled ahead next time.
     logs = os.path.join(ROOT, 'games', (known or derived(game))['slug'], 'shader_logs')

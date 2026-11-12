@@ -1220,7 +1220,7 @@ ApplicationWindow {
                         model: [
                             { title: "Your game", body: "A dump of a 3DS game you own: .3ds, .cci, .cia or .cxi. Encrypted dumps are fine, with your keys." },
                             { title: "Your 3DS keys", body: "boot9.bin and seeddb.bin from your own 3DS (GodMode9 can dump them), in .3ds in your user folder. Only needed for encrypted dumps." },
-                            { title: "Your 3DS system files", body: "Your 3DS's font and Mii parts, which games load from the console itself. Azahar copies them off your 3DS (File > Set Up System Files), or GodMode9 can: the 0004009b folder in [1:] SYSNAND CTRNAND > title. The builder needs them once." },
+                            { title: "Your 3DS system files", body: "Your 3DS's font, Mii parts and bad-word list, which games load from the console itself. Azahar copies them off your 3DS (File > Set Up System Files), or GodMode9 can: the 0004009b and 000400db folders in [1:] SYSNAND CTRNAND > title. The builder needs them once." },
                             { title: "Your Wii U", body: "otp.bin from your Wii U's NAND backup. The game is packed for your console with it." },
                             { title: "Install", body: "Put the SD card in your Wii U and install with WUP Installer GX2. If an older build of the game is installed, delete that first (System Settings, Data Management). Saves stay with the game on the console." }
                         ]

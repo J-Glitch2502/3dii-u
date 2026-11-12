@@ -44,6 +44,8 @@ def main():
         'game detection': [[py, ROOT + '/tools/win/test_detect.py']],
         'shader logs': [[py, ROOT + '/builder/test_shaderlogs.py']],
         'user files': [[py, ROOT + '/builder/test_user_files.py']],
+        'system archives': [[py, ROOT + '/builder/test_system_archives.py']],
+        'builder app': [[py, ROOT + '/builder/test_app.py']],
         'learned shaders': [[py, ROOT + '/builder/test_learned.py']],
     }
     failed = []

@@ -68,7 +68,7 @@ Windows 10 or 11 for now (Linux is planned):
   - Beside it, `objcache` keeps up to 2 GB of compiled game code by what went into it (`tools/win/objcache.py`). A game built again by a newer app, or with its update, then compiles only the files whose code changed.
 - The 3DS system archives (its shared font and Mii data) don't come with it: they're your own 3DS's files.
   - The builder copies them from Azahar's or Citra's user folder, or from any folder holding a 3DS NAND up to three levels down in Downloads, Desktop or Documents, whatever it's called. It keeps them in its work folder.
-  - Off a 3DS, GodMode9 copies `title/0004009b` out of `[1:] SYSNAND CTRNAND`; the user picks that folder (or the one holding it) with "Folder...". Azahar gets them with File > Set Up System Files and the Artic Setup Tool.
+  - Off a 3DS, GodMode9 copies `title/0004009b` (font, Mii data) and `title/000400db` (the bad-word list) out of `[1:] SYSNAND CTRNAND`; the user picks either folder (or the one holding them) with "Folder...". A build stops if the game's code names an archive the files lack (`dumps.archives_named`): Tomodachi Life stops at start without the word list. Azahar gets them with File > Set Up System Files and the Artic Setup Tool.
   - The NAND's contents may be NCCH (`<n>.app`, encrypted as on the 3DS or not) or RomFS images already taken out (`<n>.app.romfs`). A folder of `<title id>.romfs` files works too.
   - Each row under "Your files" has a "How do I get this?" button that explains its file to testers (`gui.HELP`).
   - Without the Mii data and the shared font, the app and `pipeline.py` won't build. A Miitopia built without them stopped on the console with `[err:f] result c8804478`.

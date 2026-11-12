@@ -1123,6 +1123,11 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
             LOG("[svc] r%d-r%d: %08x %08x %08x %08x\n", i, i + 3, c->r[i], c->r[i + 1], c->r[i + 2], c->r[i + 3]);
         for (u32 a = c->r[13]; a < c->r[13] + 0x80; a += 16)
             LOG("[svc] stack %08x: %08x %08x %08x %08x\n", a, r32(a), r32(a + 4), r32(a + 8), r32(a + 12));
+        // Said first, as the screen shows only the start: the last thing the game asked for was a system archive its build lacks, and it has
+        // opened nothing since. Three testers' Tomodachi Life stopped here with only the numbers below (2026-11-10 to 12): the bad-word list.
+        if (const u64 tid = g_missing_system_archive)
+            FATAL("This game asked for %s from your 3DS (system archive %016llx), which its build doesn't have, and stopped. Build it again with "
+                  "your 3DS system files.\n[svc] Break(%u) from thread %u, lr=%08x\n", system_archive_name(tid), (unsigned long long)tid, c->r[0], t->id, c->r[14]);
         FATAL("[svc] Break(%u) from thread %u, lr=%08x\n", c->r[0], t->id, c->r[14]);
     }
     case 0x3D: {

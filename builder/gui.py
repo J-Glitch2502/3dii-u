@@ -52,14 +52,16 @@ HELP = {
             'made a NAND backup when setting up Aroma, otp.bin is in that backup.\n\n'
             'On the PC, press "File..." and choose it. Keep it private: it is unique to your console.'),
     'system': ('3DS system files',
-               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, and the parts (faces, '
-               'eyes, hair) Miis are drawn from. Games load them from the console, so a game dump doesn\'t have them. The builder puts them in '
-               'each game it makes and won\'t build without them: Mii games stop without the Mii parts.\n\n'
+               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, the parts (faces, '
+               'eyes, hair) Miis are drawn from, and the list of bad words games check typed names against. Games load them from the console, '
+               'so a game dump doesn\'t have them. The builder puts them in each game it makes and won\'t build a game without the ones it '
+               'reads: Mii games stop without the Mii parts, and Tomodachi Life without the word list.\n\n'
                'They come from your own 3DS, either way:\n'
                '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
-               '•  GodMode9 on your 3DS: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, '
-               'press Y again and choose Copy (not Move). Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD '
-               'card.\n\n'
+               '•  GodMode9 on your 3DS: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and '
+               '000400db (the word list). Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then '
+               'copy 000400db the same way, next to it. Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD '
+               'card. Copied this way they are encrypted, so the builder needs your 3DS keys to read them.\n\n'
                'The builder copies them once and keeps them for every game after.'),
 }
 

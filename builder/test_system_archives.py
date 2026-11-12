@@ -31,6 +31,15 @@ with tempfile.TemporaryDirectory() as tmp:
     romfs(os.path.join(sd, '0004009b', '00010202', 'content', '00000000.app.romfs'))
     assert dumps.nand_titles(sd) == sd and dumps.nand_titles(os.path.join(sd, '0004009b')) == sd
     assert dumps.import_system_archives(os.path.join(sd, '0004009b'), os.path.join(tmp, 'from_sd'), tmp) == ['0004009b00010202']
+    # GodMode9's other folder, title/000400db (the bad-word list): copied beside the first, both come from picking either
+    romfs(os.path.join(sd, '000400db', '00010302', 'content', '00000000.app.romfs'))
+    assert dumps.nand_titles(os.path.join(sd, '000400db')) == sd
+    for pick in (os.path.join(sd, '0004009b'), os.path.join(sd, '000400db'), sd):
+        assert dumps.import_system_archives(pick, os.path.join(tmp, 'both'), tmp) == ['0004009b00010202', '000400db00010302'], pick
+    # what a game's code names of them: a title ID as two words side by side, either way round; half of one is nothing
+    code = bytes(64) + struct.pack('<II', 0x00010302, 0x000400DB) + bytes(8) + struct.pack('<II', 0x0004009B, 0x00010202) + struct.pack('<I', 0x00010402)
+    assert dumps.archives_named(code) == ['0004009b00010202', '000400db00010302'], dumps.archives_named(code)
+    assert dumps.archives_named(struct.pack('<I', 0x00010302) * 8) == []
 
     out = os.path.join(tmp, 'archives')
     got = dumps.import_system_archives(user, out, tmp)

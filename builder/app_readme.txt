@@ -14,11 +14,14 @@ WHAT YOU NEED
   Each row under "Your files" in the builder has a "How do I get this?" button with these steps.
 - Your Wii U's otp.bin, from your own console's NAND backup. The game is packed with it. The builder never shows the key and never stores it.
 - A Wii U with Aroma and WUP Installer GX2, and its SD card.
-- Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in and the
-  parts Miis are drawn from. Games load them from the console, so dumps don't have them, and Mii games stop without them. From your own 3DS, either way:
+- Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in, the
+  parts Miis are drawn from and the list of bad words games check typed names against. Games load them from the console, so dumps don't
+  have them: Mii games stop without the Mii parts, and Tomodachi Life without the word list. From your own 3DS, either way:
   - Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.
-  - GodMode9: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, press Y again and choose Copy (not Move).
-    In the builder, press "Folder..." next to "3DS system files" and choose that 0004009b folder.
+  - GodMode9: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and 000400db (the word list).
+    Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then copy 000400db the same way, next to it.
+    In the builder, press "Folder..." next to "3DS system files" and choose that 0004009b folder. Copied this way the files are
+    encrypted, so the builder needs your 3DS keys (boot9.bin) to read them.
   The builder also looks in Citra's user folder, and in Downloads, Desktop and Documents. It copies them once and keeps them for every game after.
 
 
