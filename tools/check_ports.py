@@ -35,6 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace('\\',
 CEMU = ROOT + '/build_win/cemu'
 GAMES = {'sticker_star': '77', 'nsmb2': '78', 'dream_team': '79', 'paper_jam': '80', 'superstar_saga': '83', 'bowsers_inside': '84', 'layton_azran': '85', 'layton_mask': '86', 'tomodachi': '67'}
 OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/layton_azran', 'tomodachi': 'build'}
+MEASURE = False  # --measure: the measuring kind of build, which build3ds.py and the builder's pipeline keep in folders of their own
 SOURCES = ROOT + '/games/sources.json'
 # A scene is a port run once more with switches of the runtime set (env.txt in its data folder, frontend_wiiu.cpp): a level a route can't reach
 # by playing, loaded in place of the one it enters. NSMB2's files: <world>-14 is a world's tower, -16 its castle, -12 its ghost house.
@@ -80,7 +81,8 @@ def run(*cmd):
 
 
 def port(game):
-    return Target(game, '103344' + GAMES[game], ROOT + '/' + OUT.get(game, f'build_mario/{game}'), f'{ROOT}/games/{game}', game == 'paper_jam')
+    out = f'build_measure/{game}' if MEASURE else OUT.get(game, f'build_mario/{game}')
+    return Target(game, '103344' + GAMES[game], ROOT + '/' + out, f'{ROOT}/games/{game}', game == 'paper_jam')
 
 
 def build_port(game):
@@ -95,7 +97,7 @@ def build_port(game):
 
 def built_from_dump(name, since=0):
     """the builder's work folder for a game of sources.json, if it's there (and newer than since)"""
-    for out in sorted(glob.glob(ROOT + '/builder_work/*/out'), key=os.path.getmtime, reverse=True):
+    for out in sorted(glob.glob(ROOT + '/builder_work/*/' + ('out_measure' if MEASURE else 'out')), key=os.path.getmtime, reverse=True):
         mark = os.path.dirname(out) + '/check_name.txt'
         if os.path.exists(mark) and open(mark).read() == name and os.path.getmtime(out) >= since and os.path.exists(out + '/title/code/app.xml'):
             tid = re.search(r'00050000([0-9A-Fa-f]{8})', open(out + '/title/code/app.xml').read())
@@ -115,7 +117,7 @@ def build_from_dump(name, src, otp):
     err = re.findall(r'@error (.*)', r.stdout)
     if r.returncode or err:
         return 'build failed: ' + (err[-1] if err else r.stdout[-400:])
-    for out in glob.glob(ROOT + '/builder_work/*/out'):  # the pipeline names the folder after the game's code; this says which check it's for
+    for out in glob.glob(ROOT + '/builder_work/*/out*'):  # the pipeline names the folder after the game's code; this says which check it's for
         if os.path.getmtime(out) >= started:
             with open(os.path.dirname(out) + '/check_name.txt', 'w') as f:
                 f.write(name)
@@ -354,6 +356,8 @@ def main():
     p.add_argument('--measure', action='store_true', help="the measuring kind of build (build3ds.py's THREEDII_MEASURE): frame rates and costs on the log, and the scenes")
     args = p.parse_args()
     if args.measure:
+        global MEASURE
+        MEASURE = True
         os.environ['THREEDII_MEASURE'] = '1'  # the builds this run starts inherit it
     src = sources()
     games = list(GAMES) + (list(SCENES) if args.measure else []) + list(src['games']) if args.games == ['all'] else args.games

@@ -57,7 +57,8 @@ os.environ['DEVKITPPC'] = DKP + '/devkitPPC'
 os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ['PATH']
 # A game is built without what only measures it: the clock reads behind the log's five-second lines, those lines, and the network console
 # (rt.h's kMeasure). THREEDII_MEASURE in the environment builds with them, for the checks in Cemu (check_ports.py --measure): the runtime
-# then has a folder of its own, so the two kinds never mix, and nothing built that way is packed for a console.
+# and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
+# packed for a console.
 MEASURE = bool(os.environ.get('THREEDII_MEASURE'))
 
 
@@ -275,6 +276,8 @@ class Game:
         self.dir = (game_dir or f'{ROOT}/games/{name}').replace('\\', '/')
         # where the build goes: the folders the first ports were built in, which tools/check_ports.py and tools/ship_card.py look in
         self.out = f'{ROOT}/build' if name == 'tomodachi' else f'{ROOT}/build_layton/{name}' if name.startswith('layton_') else f'{ROOT}/build_mario/{name}'
+        if MEASURE:  # never where the games for a console are built and packed
+            self.out = f'{ROOT}/build_measure/{name}'
         self.rpx, self.nm, self.shaders = f'{self.out}/{name}.rpx', f'{self.out}/game.nm', f'{self.out}/shaders'
         self.extra_functions = f'{self.dir}/functions.txt'  # what runs of the game found that static analysis missed
         # what the 3dsrecomp project's own runs of this game learned: its functions and the render states it uses

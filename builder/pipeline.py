@@ -320,7 +320,7 @@ def main():
         print('hand-written code that keeps values in any register across its calls (Mobiclip\'s video decoder): every register goes through memory', flush=True)
     if update:
         g.upstream_functions = None  # the 3dsrecomp project's lists are of the base game's code, which the update replaces
-    out = os.path.join(game_dir, 'out')
+    out = os.path.join(game_dir, 'out_measure' if b3.MEASURE else 'out')  # a measuring build apart from the one for a console
     g.out, g.rpx, g.nm, g.shaders = out, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'game.nm'), os.path.join(out, 'shaders')
     os.makedirs(out, exist_ok=True)
 
