@@ -85,6 +85,15 @@ u32 paddr_to_vaddr(u32 paddr);  // 0 if not mapped
 u8 *paddr_ptr(u32 paddr);
 u32 vaddr_to_paddr(u32 vaddr);
 u32 hle_alloc(u32 size, u32 align = 0x1000);
+#ifdef __WIIU__
+// The stretch of the block from the end of the game's program to its heap, where a game can map nothing, as the host's memory (core.cpp)
+void lend(u32 from, u32 to);
+bool lent(u32 addr, u32 size);          // whether a guest range reaches into it
+void *host_alloc(u32 align, u32 size);  // from that stretch, or from the heap once it's full; nullptr when neither has it
+void host_free(void *p);
+#else
+inline bool lent(u32, u32) { return false; }
+#endif
 }  // namespace mem
 
 // ---- dispatch

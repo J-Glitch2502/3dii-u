@@ -997,14 +997,14 @@ void decode_level(const u8 *src, u32 w, u32 h, u32 fmt, u32 *dst, u32 pitch, u32
     }
 }
 
-void evict_textures() {
-    while (tex_memory > TEX_MEMORY_LIMIT && !textures.empty()) {
+void evict_textures(u64 keep = TEX_MEMORY_LIMIT) {
+    while (tex_memory > keep && !textures.empty()) {
         auto it = std::min_element(textures.begin(), textures.end(), [](const auto &a, const auto &b) { return a->last_use < b->last_use; });
         if ((*it)->last_use + 2 >= use_counter) break;  // the GPU may still be reading it
         draw_done();
         tex_memory -= (*it)->spare ? 2ull * (*it)->mem : (*it)->mem;
-        free((*it)->t.surface.image);
-        free((*it)->spare);
+        mem::host_free((*it)->t.surface.image);
+        mem::host_free((*it)->spare);
         tex_index.erase(tex_key((*it)->addr, (*it)->w, (*it)->h, (*it)->fmt, (*it)->levels));
         textures.erase(it);
     }
@@ -1021,7 +1021,7 @@ bool replace_image(Tex &e) {
         return false;
     }
     if (!e.spare) {
-        e.spare = memalign(f.alignment, e.mem);
+        e.spare = mem::host_alloc(f.alignment, e.mem);
         if (!e.spare) {
             draw_done();
             return false;
@@ -1199,7 +1199,11 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
     GX2CalcSurfaceSizeAndAlignment(&f);
     GX2InitTextureRegs(&e.t);
     e.mem = f.imageSize + f.mipmapSize;
-    f.image = memalign(f.alignment, e.mem);
+    f.image = mem::host_alloc(f.alignment, e.mem);
+    if (!f.image) {  // the cache's limit is a budget, not what's left: half of what no queued draw reads goes, and it's asked again
+        evict_textures(tex_memory / 2);
+        f.image = mem::host_alloc(f.alignment, e.mem);
+    }
     if (!f.image) FATAL("out of memory for a %u byte texture\n", e.mem);
     junk(f.image, e.mem, 2);
     if (e.gpu) for_gpu_writes(f.image, e.mem);  // the CPU decoder's writes are flushed as it goes; the GPU's decode isn't
