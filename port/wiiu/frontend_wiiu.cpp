@@ -763,6 +763,20 @@ int main(int argc, char **argv) {
         fclose(f);
     }
     if (wiiu::test_run()) LOG("[test] a test run from the PC: this boot has a save of its own\n");
+    // debug aid: "env.txt" in the data folder sets the runtime's own test switches, a NAME=value on each line. RECOMP_ROMFS_SWAP=<file>=<other>
+    // (services/fs.cpp) loads a level in place of the one a test route enters: a tower or a castle no route reaches by playing.
+    if (FILE *f = fopen((wiiu::data_dir() + "/env.txt").c_str(), "r")) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (char *eq = strchr(line, '=')) {
+                *eq = 0;
+                setenv(line, eq + 1, 1);
+                LOG("[test] %s is %s\n", line, eq + 1);
+            }
+        }
+        fclose(f);
+    }
     LOG("[wiiu] guest memory at %p\n", g_mem);
     settings_load();
     // The console's Miis, one per account: the game finds them in Mii Maker and as the player's Mii (services/misc.cpp, fs.cpp). On since

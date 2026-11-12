@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [--bless] [game ... | all]
-"all" is every game this PC has: the nine ports (GAMES, built by tools/win/build3ds.py) and every game in games/sources.json, built from its
-dump by the builder's pipeline as a tester's would be. sources.json is this PC's own (git-ignored):
+"all" is every game this PC has: the nine ports (GAMES, built by tools/win/build3ds.py), the scenes of them a route can't play its way to
+(SCENES: NSMB2's tower and castle) and every game in games/sources.json, built from its dump by the builder's pipeline as a tester's would be.
+sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
 has none) on a blank save, and a restart on what that saved.
@@ -23,7 +24,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.insert(0, os.path.dirname(__file__))
 from test_routes import GENERIC, ROUTES
@@ -33,7 +34,11 @@ CEMU = ROOT + '/build_win/cemu'
 GAMES = {'sticker_star': '77', 'nsmb2': '78', 'dream_team': '79', 'paper_jam': '80', 'superstar_saga': '83', 'bowsers_inside': '84', 'layton_azran': '85', 'layton_mask': '86', 'tomodachi': '67'}
 OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/layton_azran', 'tomodachi': 'build'}
 SOURCES = ROOT + '/games/sources.json'
-CRASH = r'FATAL|no recompiled code at|\[crash\]'  # the game's log on a crash of its own
+# A scene is a port run once more with switches of the runtime set (env.txt in its data folder, frontend_wiiu.cpp): a level a route can't reach
+# by playing, loaded in place of the one it enters. NSMB2's files: <world>-14 is a world's tower, -16 its castle, -12 its ghost house.
+SCENES = {'nsmb2_tower': ('nsmb2', {'RECOMP_ROMFS_SWAP': 'Course/1-1.sarc=Course/1-14.sarc'}),
+          'nsmb2_castle': ('nsmb2', {'RECOMP_ROMFS_SWAP': 'Course/1-1.sarc=Course/1-16.sarc'})}
+CRASH =r'FATAL|no recompiled code at|\[crash\]'  # the game's log on a crash of its own
 
 
 @dataclass
@@ -45,6 +50,7 @@ class Target:
     data: str      # its folder in games/, for screenshots and the shaders a run missed
     interp: bool = False  # Cemu's own recompiler can't run this one's code: its interpreter does
     route: str = ''       # whose route in test_routes.py it plays, if not one under its own name
+    env: dict = field(default_factory=dict)  # a scene's switches (SCENES)
 
     @property
     def common(self):
@@ -215,9 +221,13 @@ def judge(t, seconds, flags):
         f.write('\n'.join(ROUTES.get(t.route or t.name, GENERIC)) + '\n')
     for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp)
         open(f'{d}/{flag}', 'w').close()
+    if t.env:
+        with open(d + '/env.txt', 'w', newline='\n') as f:
+            f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
     log = d + '/log.txt'
     interp = t.interp
-    for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4))):
+    # a scene is its level alone: a restart would stop before the route is back in it
+    for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4)))[:1 if t.env else 2]:
         read_log = lambda: open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
         saved_before = bool(save_files(t))
         said = cemu(t, secs, interp)
@@ -241,6 +251,9 @@ def judge(t, seconds, flags):
             os.makedirs(kept(t, 'check_logs'), exist_ok=True)
             with open(f'{kept(t, "check_logs")}/{name.replace(" ", "_")}.txt', 'w', encoding='utf-8', newline='\n') as f:
                 f.write(text)
+        for k, v in t.env.items():
+            if f'[test] {k} is {v}' not in text or (k == 'RECOMP_ROMFS_SWAP' and '[fs] romfs swap' not in text):
+                faults.append(f'{name}: {k} did not take: this is not the scene')
         for pat, what in ((CRASH, 'crash'), (r'\[lazy\] no code', 'code the translation missed')):
             n = len(re.findall(pat, text))
             if n:
@@ -311,13 +324,18 @@ def main():
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     args = p.parse_args()
     src = sources()
-    games = list(GAMES) + list(src['games']) if args.games == ['all'] else args.games
+    games = list(GAMES) + list(SCENES) + list(src['games']) if args.games == ['all'] else args.games
     built = args.no_build or args.bless
     bad = 0
-    for game in games:
+    for i, game in enumerate(games):
         started = time.time()
         if game in GAMES:
             t = port(game) if built else build_port(game)
+        elif game in SCENES:
+            of, env = SCENES[game]
+            t = port(of) if built or of in games[:i] else build_port(of)  # the port as this run has built it already
+            if not isinstance(t, str):
+                t.name, t.route, t.env = game, of, env
         elif game in src['games']:
             t = (built_from_dump(game) or 'not built yet') if built else build_from_dump(game, src['games'][game], src['otp'])
         else:
