@@ -628,7 +628,7 @@ def prepare_logs(g):
     for other in sorted(glob.glob(ROOT + '/games/*/')):
         other = other.rstrip('/\\').replace('\\', '/')
         name = os.path.basename(other)
-        if other == g.dir:
+        if other == g.dir or name == getattr(g, 'twin', None):  # (a cold build's own folder: builder/pipeline.py --cold)
             continue
         # fs_log.bin and the *_fs.bin files hold fragment states alone; the other_ ones are that game's own copies (taking them nested the names without
         # end), and its models are its own
