@@ -38,5 +38,15 @@ try:
     app.fresh_cache(engine, work)
     assert not os.path.exists(cache), 'another engine starts it over again'
     print('fresh_cache ok')
+    # what a build prints reaches the window as UTF-8 whatever the PC's code page: a name with ★ or ™ used to end the build
+    import subprocess
+    import sys
+    script = os.path.join(base, 'say.py')
+    with open(script, 'w', encoding='utf-8') as f:
+        f.write('print("Kumamon\\u2605 SUPER STREET FIGHTER\\u2122 \\u30df\\u30a4")\n')
+    env = {k: v for k, v in os.environ.items() if not k.startswith('PYTHON')}
+    r = subprocess.run([sys.executable, '-X', 'utf8=0', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py'), script], capture_output=True, env=env)
+    assert r.returncode == 0 and r.stdout.decode('utf-8').strip() == 'Kumamon★ SUPER STREET FIGHTER™ ミイ', (r.returncode, r.stdout, r.stderr)
+    print('output encoding ok')
 finally:
     shutil.rmtree(base)

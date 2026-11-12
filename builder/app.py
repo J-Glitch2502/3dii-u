@@ -109,6 +109,11 @@ def headless(work):
     standalone app would show it in a box of its own and wait there for someone to close it, with the build hanging behind it."""
     try:
         quiet_children()
+        # The window reads this as UTF-8. Left to Windows, Python writes the PC's own code page, and the first character that lacks (the ★
+        # in Kumamon's name, the ™ in Street Fighter's: two testers, 2026-11-11) ends the build with an encoding error.
+        for s in (sys.stdout, sys.stderr):
+            if s:
+                s.reconfigure(encoding='utf-8', errors='backslashreplace')
         work()
     except SystemExit:
         raise
