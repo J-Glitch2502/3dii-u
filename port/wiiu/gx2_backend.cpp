@@ -46,6 +46,7 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "loader.h"
+#include "present_rule.h"
 #include "shader_compile.h"
 #include "shadergen.h"
 #include "swkbd.h"
@@ -2597,6 +2598,7 @@ void present() {
 }
 
 bool screen_fresh;
+PresentRule present_rule;  // when a finished frame is shown (present_rule.h, gfx_pump)
 
 void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_hi = 1, float u_hi = 1) {
     GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, tex->surface.image, tex->surface.imageSize);
@@ -2619,6 +2621,7 @@ void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_
     GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
     state_lost = true;
     screen_fresh = true;
+    present_rule.drew(which);
 }
 
 // ---- the options menu: drawn over the bottom screen on the GamePad, with a small built-in font
@@ -3454,8 +3457,16 @@ static std::atomic<bool> report_due;
 static std::atomic<float> report_draws_per_flip;
 static void write_report();
 
-void gfx_pump() {
-    if (!vblank_pending) return;
+// (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
+void gfx_pump(bool quiet) {
+    if (!vblank_pending) {
+        // the menu and the keyboard are drawn at a VBlank's look only, so while one is up nothing is shown in between
+        if (!menu_is_open && !kb_active && present_rule.between(quiet)) {
+            screen_fresh = false;
+            present();
+        }
+        return;
+    }
     vblank_pending = false;
     install_compiled();
     if (report_due.exchange(false)) write_report();
@@ -3467,7 +3478,7 @@ void gfx_pump() {
         draw_keyboard();
         screen_fresh = true;
     }
-    if (screen_fresh) {
+    if (present_rule.vblank(screen_fresh)) {
         screen_fresh = false;
         present();
     }
@@ -3511,6 +3522,7 @@ void gfx_reacquire() {
     restore_context();
     vblank_pending = false;
     screen_fresh = false;
+    present_rule.reset();
 }
 
 void gfx_note_busy(u32 us) { gpu_busy_us = gpu_busy_us + us; }

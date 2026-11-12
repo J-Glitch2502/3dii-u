@@ -203,10 +203,13 @@ static int gpu_thread(int, void *) {
             gpu_parked = false;
             continue;
         }
-        OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
+        // quiet: two milliseconds went by with nothing asked of the GPU, and nothing came in at the last moment either, which is when a
+        // finished frame may be shown
+        const bool waited = !OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
+        const u64 done = kernel::gx_stats.cmdlists + kernel::gx_stats.transfers;
         const OSTime t0 = kMeasure ? OSGetSystemTime() : 0;
         kernel::gsp_process_gx();
-        if (!gpu_pause) wiiu::gfx_pump();
+        if (!gpu_pause) wiiu::gfx_pump(waited && done == kernel::gx_stats.cmdlists + kernel::gx_stats.transfers);
         if (kMeasure) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
     if (!gpu_parked) wiiu::gfx_shutdown();

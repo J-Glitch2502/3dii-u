@@ -18,10 +18,18 @@ def vertex_arrays():
                                  f'-I{build3ds.RT}/gpu', '-include', f'{build3ds.PORT}/pc/shim.h', '-static', ROOT + '/tools/test_vertex_arrays.cpp', '-o', exe], [exe]]
 
 
+def present_rule():
+    """port/wiiu/present_rule.h against made-up frame times, built for this PC"""
+    exe = build3ds.WORK + '/selftest/test_present_rule.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_present_rule.cpp', '-lpthread', '-o', exe], [exe]]
+
+
 def main():
     py = sys.executable
     checks = {
         'vertex arrays': vertex_arrays(),
+        'present rule': present_rule(),
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
         'game detection': [[py, ROOT + '/tools/win/test_detect.py']],
