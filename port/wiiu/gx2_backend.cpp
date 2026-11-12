@@ -56,6 +56,10 @@
 
 extern "C" void *GfxHeapAllocMEM1(uint32_t size, uint32_t alignment) __attribute__((weak));
 extern "C" void GfxHeapFreeMEM1(void *block) __attribute__((weak));
+// in gx2.rpl, and wut's import library, but not its headers
+extern "C" void GX2SampleTopGPUCycle(uint64_t *cycle);
+extern "C" void GX2SampleBottomGPUCycle(uint64_t *cycle);
+extern "C" uint64_t GX2GPUTimeToCPUTime(uint64_t time);
 
 namespace wiiu {
 static void relieve_mem1();  // fast memory found full the first time (beside tv_buffer_to_mem2, which it uses)
@@ -76,6 +80,110 @@ inline OSTime prof_now() { return kMeasure ? OSGetSystemTime() : 0; }
 inline void prof_add(int k, OSTime since) {
     if (kMeasure) prof[k] += (u32)(OSGetSystemTime() - since);
 }
+// ---- the GPU's own time, per pass: where the console's GPU spends a frame (the "[prof] GPU" line)
+// A pass is the draws into one target, a clear, a copy, or the present. Each starts with two stamps from the GPU's clock: the cycle its command processor
+// reached it (top of the pipe) and the cycle everything before it had finished (bottom). A pass took from the later of its own two to the next pass's
+// bottom, which leaves out time the GPU sat waiting for commands. Read back three flips later, when the GPU is done with them.
+enum { GT_DRAW, GT_FILL, GT_TRANSFER, GT_COPY, GT_LCD, GT_PRESENT, GT_END, GT_KINDS };
+const char *const gt_kind_name[GT_KINDS] = {"draw", "clear", "transfer", "copy", "lcd", "present", "end"};
+constexpr u32 GT_FRAMES = 4, GT_MARKS = 128, GT_SUMS = 48;
+struct GtFrame {
+    u64 *top = nullptr, *bot = nullptr;  // in memory the GPU writes
+    u32 tag[GT_MARKS];
+    u8 kind[GT_MARKS];
+    u32 n = 0;
+};
+GtFrame gt[GT_FRAMES];
+u32 gt_cur;
+bool gt_on = true, gt_broken;
+struct GtSum {
+    u32 tag;
+    u8 kind;
+    u64 ticks;
+    u32 count;
+};
+GtSum gt_sum[GT_SUMS];  // since the last report: written by the GPU thread, read by the report's (a stat, so a torn read now and then doesn't matter)
+volatile u32 gt_nsum, gt_frames;
+volatile u64 gt_busy, gt_span;
+volatile bool gt_reset;
+OSTime gt_last_end;
+
+void gt_mark(u8 kind, u32 tag) {
+    if (!kMeasure || !gt_on || gt_broken) return;
+    GtFrame &f = gt[gt_cur];
+    if (!f.top) {
+        f.top = (u64 *)MEMAllocFromDefaultHeapEx(GT_MARKS * 16, 0x100);
+        if (!f.top) {
+            gt_broken = true;
+            return;
+        }
+        f.bot = f.top + GT_MARKS;
+        memset(f.top, 0, GT_MARKS * 16);
+        DCFlushRange(f.top, GT_MARKS * 16);
+    }
+    if (f.n && f.kind[f.n - 1] == kind && f.tag[f.n - 1] == tag) return;  // the same pass, going on
+    if (f.n >= GT_MARKS - 1 && kind != GT_END) return;
+    if (f.n >= GT_MARKS) return;
+    GX2SampleTopGPUCycle(&f.top[f.n]);
+    GX2SampleBottomGPUCycle(&f.bot[f.n]);
+    f.kind[f.n] = kind;
+    f.tag[f.n] = tag;
+    f.n++;
+}
+
+void gt_add(u8 kind, u32 tag, u64 ticks) {
+    const u32 n = gt_nsum;
+    for (u32 i = 0; i < n; i++)
+        if (gt_sum[i].kind == kind && gt_sum[i].tag == tag) {
+            gt_sum[i].ticks += ticks;
+            gt_sum[i].count++;
+            return;
+        }
+    if (n < GT_SUMS) {
+        gt_sum[n] = {tag, kind, ticks, 1};
+        gt_nsum = n + 1;
+    }
+}
+
+// At the end of a present, once the GPU has finished the frame before last: the oldest frame's stamps are read, and its slot is the next frame's.
+void gt_flip(u32 first_target) {
+    if (!kMeasure || !gt_on || gt_broken) return;
+    gt_mark(GT_END, 0);
+    gt_cur = (gt_cur + 1) % GT_FRAMES;
+    GtFrame &f = gt[gt_cur];
+    if (gt_reset) {
+        gt_nsum = 0;
+        gt_frames = 0;
+        gt_busy = gt_span = 0;
+        gt_reset = false;
+    }
+    if (f.n >= 2 && f.top) {
+        DCInvalidateRange(f.top, GT_MARKS * 16);
+        bool ok = true;
+        for (u32 i = 0; i < f.n; i++)
+            if (!f.top[i] || !f.bot[i]) ok = false;  // not written: the GPU isn't done after all
+        if (ok) {
+            u64 busy = 0;
+            for (u32 i = 0; i + 1 < f.n; i++) {
+                const OSTime from = (OSTime)GX2GPUTimeToCPUTime(std::max(f.top[i], f.bot[i]));
+                const OSTime to = (OSTime)GX2GPUTimeToCPUTime(f.bot[i + 1]);
+                const u64 t = to > from ? (u64)(to - from) : 0;
+                busy += t;
+                gt_add(f.kind[i], f.tag[i], t);
+            }
+            const OSTime end = (OSTime)GX2GPUTimeToCPUTime(f.bot[f.n - 1]);
+            if (gt_last_end && end > gt_last_end) gt_span = gt_span + (u64)(end - gt_last_end);
+            gt_last_end = end;
+            gt_busy = gt_busy + busy;
+            gt_frames = gt_frames + 1;
+        }
+        memset(f.top, 0, GT_MARKS * 16);
+        DCFlushRange(f.top, GT_MARKS * 16);
+    }
+    f.n = 0;
+    gt_mark(GT_DRAW, first_target);  // draws before the first change of target go to the target still bound
+}
+
 OSTime prof_t;
 inline void lap_start() {
     if (kMeasure && prof_laps) prof_t = OSGetSystemTime();
@@ -911,6 +1019,7 @@ void restore_context() {
 }
 
 void apply_fill(Surface &s, const Fill &f) {
+    gt_mark(GT_FILL, s.addr);
     take_dyn_level(s);
     if (s.depth) {
         const u32 v = f.value;
@@ -1638,6 +1747,7 @@ void bind_targets(const RTConfig &rt) {
         if (d) GX2SetDepthBuffer(&d->db);
         cur_depth = d;
     }
+    gt_mark(GT_DRAW, c->addr);
 }
 
 // A draw is about to use the depth buffer just bound. If it's in the shared block, it needs its pending clear now. If it has neither that nor the block's contents, the game
@@ -2925,6 +3035,7 @@ void dyn_res_update() {
 
 void present() {
     const OSTime tp = prof_now();
+    gt_mark(GT_PRESENT, 0);
     if (dump_enabled && st_flips % 120 == 0) {
         dump_surface(tv_cb->surface, (wiiu::data_dir() + "/tv.ppm").c_str(), 2);
         dump_surface(drc_cb->surface, (wiiu::data_dir() + "/drc.ppm").c_str(), 1);
@@ -2967,6 +3078,7 @@ void present() {
     st_flips++;
     use_counter++;
     ring_next_segment();
+    gt_flip(cur_color ? cur_color->addr : 0);
     dyn_res_update();
     vtx_cache_flip();
     prof_add(P_PRESENT, tp);
@@ -3096,6 +3208,7 @@ struct LastTransfer {
 // double width, scales it down into a buffer, and copies that into the target it draws the 2D on. Through guest memory that would be a
 // readback every frame at the original resolution, and Cemu doesn't read the GPU's work back at all.
 static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags) {
+    gt_mark(GT_TRANSFER, out_paddr);
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w0 = out_dims & 0xffff, out_h0 = out_dims >> 16;
     const u32 scaling = (flags >> 24) & 3;
     const u32 out_w = out_w0 >> (scaling != 0), out_h = out_h0 >> (scaling == 2);
@@ -3155,6 +3268,7 @@ u32 recent_top[4], recent_top_stride, recent_top_bpp, recent_top_fmt;
 // rows from at or before the copy's first, down to the LCD's last), or a new one. The TV shows the buffer from there (show_lcd_from_memory).
 static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap) {
     if (!linear_on_gpu) return false;
+    gt_mark(GT_COPY, out_paddr);
     const u32 in_w = (in_width_gap & 0xffff) * 16, in_gap = (in_width_gap >> 16) * 16;
     const u32 out_w = (out_width_gap & 0xffff) * 16, out_gap = (out_width_gap >> 16) * 16;
     if (!in_w || in_w != out_w || size % in_w) return false;
@@ -3940,6 +4054,7 @@ static void draw_keyboard() {
 // A game writes the buffer the LCD doesn't show and swaps to it later, often after the next VBlank: what's shown is whichever buffer the LCD shows now,
 // as last written, each time that changes.
 static void show_lcd_from_memory() {
+    gt_mark(GT_LCD, 0);
     static u32 shown_pa, shown_seq;
     static u64 shown_drawn;
     const kernel::FramebufferInfo f = kernel::gsp_framebuffer(0);
@@ -4124,6 +4239,7 @@ bool gfx_set(const char *name, u32 v) {
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
+    else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
     else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way
@@ -4206,6 +4322,21 @@ static void write_report() {
     }
     memset(ds_churn, 0, sizeof ds_churn);
     ds_built = 0;
+    if (gt_frames && !gt_reset) {  // the GPU's own time per flip, the costliest passes first
+        const float n = (float)gt_frames;
+        auto ms = [&](u64 t) { return (float)OSTicksToMicroseconds(t) / 1000.0f / n; };
+        GtSum sum[GT_SUMS];
+        const u32 k = std::min<u32>((u32)gt_nsum, GT_SUMS);
+        memcpy(sum, gt_sum, k * sizeof *sum);
+        std::sort(sum, sum + k, [](const GtSum &a, const GtSum &b) { return a.ticks > b.ticks; });
+        char line[400] = "";
+        int w = 0;
+        for (u32 i = 0; i < k && i < 12 && w < 360; i++) {
+            w += snprintf(line + w, sizeof line - w, " | %s %08x %.2f ms (%.1fx)", gt_kind_name[sum[i].kind], sum[i].tag, ms(sum[i].ticks), sum[i].count / n);
+        }
+        LOG("[prof] GPU per flip: busy %.1f ms of %.1f ms, over %u flips%s\n", ms(gt_busy), ms(gt_span), (u32)gt_frames, line);
+        gt_reset = true;
+    } else if (gt_broken) LOG("[prof] GPU per flip: no memory for its stamps\n");
     LOG("[gx2] %u read backs, %u gpu copies, last upload %08x %ux%u fmt %u levels %u dirty %d\n", st_readbacks, st_gpu_copies, last_reupload.addr, last_reupload.w, last_reupload.h, last_reupload.fmt,
         last_reupload.levels, last_reupload.dirty);
     st_readbacks = st_gpu_copies = 0;
