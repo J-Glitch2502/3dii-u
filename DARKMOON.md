@@ -194,6 +194,22 @@ ignores other targets it overlaps in part unless a texture lies there, and a fil
 fill left, nothing else having written it since, is skipped. In the trace every fill is on the GPU or skipped; on the console
 `memory_fill` was 11% of the GPU thread in the intro. Not measured on the console yet.
 
+## Nov 12-13: main merged in, and a crash at start (open)
+
+`darkmoon` now has Josiah's main of Nov 12 merged in (491ff97, 76590ad, c3c0466; not pushed: GitHub refuses Senne's account
+since the repository moved to J-Glitch2502/3dii-u, 403). Conflicts: the DSP (main's "seen" with our "fresh": fresh only if seen),
+main's whole-array vertex copies through our vertex cache, the shader cache (per set, with main's header), set_state/gfx_pump.
+Builds no longer measure unless asked: `tools/win/builder_measuring.bat` (THREEDII_MEASURE=console) packs a measuring build for
+the console; the Cemu scripts set THREEDII_MEASURE=1 (out_measure). A Cemu-only measuring build skips the otp check.
+
+**The merged build crashes in Cemu at frame ~330, every time**, before any picture: `FATAL: undefined instruction 81200a76 at
+003b4cf4 (lr=003fd8e0)`. That's the game's own `bkpt` in a bump allocator (f_003b4cc8: out of room), asked for count*4 bytes by
+an array copy (f_003fd8a0), so a count is garbage. Not the cause (each tried alone, crash stayed): main's file reads letting
+other threads run (run_blocked), the DSP merge (pre-merge DSP back), and probably not the unpacked shared font (that run died in
+Cemu itself, inconclusive). Being tried when the PC went off: the game code at -O2 instead of main's new -Os (build3ds.py
+GAME_OPT). Next: that test; then bisect main's commits (y2r, gpu.cpp register runs, kernel lock_soon, frontend core changes).
+**Don't build the merged darkmoon for the console until this is found**; 34ad909 is the last good one.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),
