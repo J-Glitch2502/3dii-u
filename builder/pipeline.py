@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -386,10 +385,6 @@ def main():
 
     PROGRESS.stage('Packing the WUP')
     wup = os.path.join(a.out or game_dir, info['folder'])
-    for _ in range(120):  # the packer holds the whole game in memory
-        if b3.free_mb() > 1500:
-            break
-        time.sleep(15)
     shutil.rmtree(wup, ignore_errors=True)
     r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'pack_game_wup.py'), a.otp, os.path.join(out, 'title'), wup], cwd=ROOT,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')

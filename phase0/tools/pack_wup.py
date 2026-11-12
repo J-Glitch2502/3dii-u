@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Packs a title's code/content/meta folders into a WUP folder for WUP Installer GX2, then proves the result by decrypting
-everything it wrote and comparing it back. The layout follows NUSPacker's (Maschell, GPL-3.0), which I read but don't run.
+everything it wrote and comparing it back. Both go through the files a block at a time, so a game of any size packs in little memory. The layout follows NUSPacker's (Maschell, GPL-3.0), which I read but don't run.
 
 pack_wup.py <title dir> <output dir>. The common key arrives as hex on stdin, so it's never in argv, a file or a log."""
 import hashlib
@@ -48,13 +48,11 @@ def tree_level(lower, block_count, level):
     return out
 
 
-def hash_tree(data):
-    blocks = [data[i:i + BLOCK_DATA].ljust(BLOCK_DATA, b'\0') for i in range(0, max(len(data), 1), BLOCK_DATA)]
-    h0 = [sha1(b) for b in blocks]
-    h1 = tree_level(h0, len(blocks), 1)
-    h2 = tree_level(h1, len(blocks), 2)
-    h3 = tree_level(h2, len(blocks), 3)
-    return blocks, h0, h1, h2, b''.join(h3)
+def hash_tree(h0):
+    h1 = tree_level(h0, len(h0), 1)
+    h2 = tree_level(h1, len(h0), 2)
+    h3 = tree_level(h2, len(h0), 3)
+    return h1, h2, b''.join(h3)
 
 
 def block_hashes(block, h0, h1, h2):
@@ -64,23 +62,51 @@ def block_hashes(block, h0, h1, h2):
     return out.ljust(BLOCK_HASHES, b'\0')
 
 
-def encrypt_hashed(title_key, content_id, data):
-    blocks, h0, h1, h2, h3 = hash_tree(data)
-    out = bytearray()
-    for n, plain in enumerate(blocks):
+# ---- a content's bytes, a piece at a time: a game is gigabytes, and a PC with less free memory than that packed nothing (a tester's
+# Pokemon Super Mystery Dungeon stopped here with MemoryError, 2026-11-12)
+def pieces(title, files):
+    """the files of a content one after another, each padded to the file table's alignment"""
+    for d, n in files:
+        size = 0
+        with open(os.path.join(title, d, n), 'rb') as f:
+            while chunk := f.read(1 << 20):
+                size += len(chunk)
+                yield chunk
+        if size % FST_ALIGN_FILE:
+            yield bytes(-size % FST_ALIGN_FILE)
+
+
+def blocks(parts, size, never_none=False):
+    """the same bytes cut into blocks of `size`, the last one padded with zeros (never_none: an empty content is one block of zeros)"""
+    held, any_block = bytearray(), False
+    for p in parts:
+        held += p
+        while len(held) >= size:
+            yield bytes(held[:size])
+            del held[:size]
+            any_block = True
+    if held or (never_none and not any_block):
+        yield bytes(held).ljust(size, b'\0')
+
+
+def encrypt_hashed(title_key, content_id, parts, out):
+    """twice through the content: every block's hash first, as each block carries its neighbours' hashes"""
+    h0 = [sha1(b) for b in blocks(parts(), BLOCK_DATA, True)]
+    h1, h2, h3 = hash_tree(h0)
+    for n, plain in enumerate(blocks(parts(), BLOCK_DATA, True)):
         hashes = bytearray(block_hashes(n, h0, h1, h2))
         data_iv = bytes(hashes[(n % 16) * 20:(n % 16) * 20 + 16])  # this block's own H0 is its data IV
         hashes[1] ^= content_id & 0xFF
-        out += cbc(title_key, content_iv(content_id), bytes(hashes))
-        out += cbc(title_key, data_iv, plain)
-    return bytes(out), h3
+        out.write(cbc(title_key, content_iv(content_id), bytes(hashes)))
+        out.write(cbc(title_key, data_iv, plain))
+    return len(h0) * (BLOCK_HASHES + BLOCK_DATA), h3
 
 
 # ---- which file goes in which content: NUSPacker's standard rules, in its order
 class Content:
     def __init__(self, cid, hashed, group, parent, flags):
         self.id, self.hashed, self.group, self.parent, self.flags = cid, hashed, group, parent, flags
-        self.files, self.plain, self.encrypted, self.h3, self.digest = [], b'', b'', None, b''
+        self.files, self.size, self.h3, self.digest = [], 0, None, b''  # size: of the encrypted content
 
     @property
     def type(self):
@@ -124,24 +150,25 @@ def assign_contents(title, group, parent_id):
 def build_contents(title, contents, title_key, out_dir):
     offsets = {}
     for c in contents[1:]:
-        plain = bytearray()
+        at = 0
         for d, n in c.files:
-            with open(os.path.join(title, d, n), 'rb') as f:
-                body = f.read()
-            offsets[(d, n)] = (c, len(plain), len(body))
-            plain += body.ljust(align(len(body), FST_ALIGN_FILE), b'\0')
-        c.plain = bytes(plain)
-        if c.hashed:
-            c.encrypted, c.h3 = encrypt_hashed(title_key, c.id, c.plain)
-            c.digest = sha1(c.h3)
-            with open(os.path.join(out_dir, f'{c.id:08X}.h3'), 'wb') as f:
-                f.write(c.h3)
-        else:
-            padded = c.plain.ljust(align(len(c.plain), PAD_UNIT), b'\0')
-            c.encrypted = cbc(title_key, content_iv(c.id), padded)
-            c.digest = sha1(padded)
-        with open(os.path.join(out_dir, f'{c.id:08X}.app'), 'wb') as f:
-            f.write(c.encrypted)
+            size = os.path.getsize(os.path.join(title, d, n))
+            offsets[(d, n)] = (c, at, size)
+            at += align(size, FST_ALIGN_FILE)
+        parts = lambda: pieces(title, c.files)
+        with open(os.path.join(out_dir, f'{c.id:08X}.app'), 'wb') as out:
+            if c.hashed:
+                c.size, c.h3 = encrypt_hashed(title_key, c.id, parts, out)
+                c.digest = sha1(c.h3)
+                with open(os.path.join(out_dir, f'{c.id:08X}.h3'), 'wb') as f:
+                    f.write(c.h3)
+            else:
+                enc, digest = Cipher(algorithms.AES(title_key), modes.CBC(content_iv(c.id))).encryptor(), hashlib.sha1()
+                for b in blocks(parts(), PAD_UNIT):
+                    digest.update(b)
+                    out.write(enc.update(b))
+                    c.size += len(b)
+                c.digest = digest.digest()
     return offsets
 
 
@@ -181,7 +208,7 @@ def build_fst(contents, tree, offsets):
             headers += struct.pack('>IIQIB', 0, 0, 0, 0, 0).ljust(0x20, b'\0')
             offset = 2
             continue
-        units = len(c.encrypted) // PAD_UNIT
+        units = c.size // PAD_UNIT
         written = max(units - ((units // 64) + 1) * 2, 0) if c.hashed else units
         headers += struct.pack('>IIQIB', offset, written, c.parent, c.group, 2 if c.hashed else 1).ljust(0x20, b'\0')
         offset += units
@@ -192,7 +219,7 @@ def build_fst(contents, tree, offsets):
 
 # ---- metadata files
 def build_tmd(contents, title_id, group, app_type, os_version, title_version=0):
-    records = b''.join(struct.pack('>IHHQ', c.id, c.id, c.type, len(c.encrypted)) + c.digest.ljust(0x20, b'\0') for c in contents)
+    records = b''.join(struct.pack('>IHHQ', c.id, c.id, c.type, c.size) + c.digest.ljust(0x20, b'\0') for c in contents)
     infos = struct.pack('>HH', 0, len(contents)) + hashlib.sha256(records).digest()
     infos = infos.ljust(0x24 * 0x40, b'\0')
     issuer = b'Root-CA00000003-CP0000000b'.ljust(0x40, b'\0')
@@ -230,6 +257,49 @@ def build_cert():
 
 
 # ---- proof: read the output back the way the console would
+def decrypted(out_dir, cid, ctype, size, digest, title_key):
+    """a content's plain bytes block by block, each checked against its hash as it comes"""
+    path = os.path.join(out_dir, f'{cid:08X}.app')
+    assert os.path.getsize(path) == size, f'content {cid} size'
+    with open(path, 'rb') as f:
+        if ctype == TYPE_HASHED:
+            with open(os.path.join(out_dir, f'{cid:08X}.h3'), 'rb') as h:
+                assert sha1(h.read()) == digest, f'content {cid} h3'
+            for n in range(size // 0x10000):
+                block = f.read(0x10000)
+                hashes = bytearray(cbc(title_key, content_iv(cid), block[:BLOCK_HASHES], decrypt=True))
+                hashes[1] ^= cid & 0xFF
+                data = cbc(title_key, bytes(hashes[(n % 16) * 20:(n % 16) * 20 + 16]), block[BLOCK_HASHES:], decrypt=True)
+                assert sha1(data) == bytes(hashes[(n % 16) * 20:(n % 16) * 20 + 20]), f'content {cid} block {n}'
+                yield data
+        else:
+            assert ctype == TYPE_PLAIN and size % PAD_UNIT == 0
+            dec, whole = Cipher(algorithms.AES(title_key), modes.CBC(content_iv(cid))).decryptor(), hashlib.sha1()
+            while block := f.read(PAD_UNIT):
+                data = dec.update(block)
+                whole.update(data)
+                yield data
+            assert whole.digest() == digest, f'content {cid} hash'
+
+
+def same_files(parts, files, title):
+    """the files a content holds, each at its place in the content's bytes, against the files they were made from"""
+    held, start = b'', 0  # what's read of the content and not yet compared, and where in the content it starts
+    for off, size, d, n in sorted(files):
+        with open(os.path.join(title, d, n), 'rb') as f:
+            assert os.fstat(f.fileno()).st_size == size, f'{d}/{n} size'
+            while size:
+                if off >= start + len(held):
+                    start, held = start + len(held), next(parts, None)
+                    assert held is not None, f'{d}/{n} ends past its content'
+                    continue
+                got = held[off - start:off - start + size]
+                assert got == f.read(len(got)), f'{d}/{n} differs after a round trip'
+                off, size = off + len(got), size - len(got)
+    for _ in parts:  # the rest still has its hashes checked
+        pass
+
+
 def verify(out_dir, title, tree, common_key, title_id):
     read = lambda n: open(os.path.join(out_dir, n), 'rb').read()
     tik, tmd = read('title.tik'), read('title.tmd')
@@ -248,34 +318,15 @@ def verify(out_dir, title, tree, common_key, title_id):
     for i in range(count):
         cid, idx, ctype, size = struct.unpack('>IHHQ', records[i * 0x30:i * 0x30 + 16])
         assert cid == idx == i
-        raw = read(f'{cid:08X}.app')
-        assert len(raw) == size, f'content {cid} size'
-        digest = records[i * 0x30 + 16:i * 0x30 + 36]
-        if ctype == TYPE_HASHED:
-            h3 = read(f'{cid:08X}.h3')
-            assert sha1(h3) == digest, f'content {cid} h3'
-            plain = bytearray()
-            for n in range(size // 0x10000):
-                block = raw[n * 0x10000:(n + 1) * 0x10000]
-                hashes = bytearray(cbc(title_key, content_iv(cid), block[:BLOCK_HASHES], decrypt=True))
-                hashes[1] ^= cid & 0xFF
-                data = cbc(title_key, bytes(hashes[(n % 16) * 20:(n % 16) * 20 + 16]), block[BLOCK_HASHES:], decrypt=True)
-                assert sha1(data) == bytes(hashes[(n % 16) * 20:(n % 16) * 20 + 20]), f'content {cid} block {n}'
-                plain += data
-            recs[cid] = bytes(plain)
-        else:
-            assert ctype == TYPE_PLAIN and size % PAD_UNIT == 0
-            plain = cbc(title_key, content_iv(cid), raw, decrypt=True)
-            assert sha1(plain) == digest, f'content {cid} hash'
-            recs[cid] = plain
+        recs[cid] = (ctype, size, records[i * 0x30 + 16:i * 0x30 + 36])
 
-    fst = recs[0]
+    fst = b''.join(decrypted(out_dir, 0, *recs[0], title_key))
     assert fst[:4] == b'FST\0' and struct.unpack('>I', fst[8:12])[0] == count
     base = 0x20 + 0x20 * count
     total = struct.unpack('>I', fst[base + 8:base + 12])[0]
     strings = fst[base + total * 0x10:]
     name_at = lambda off: strings[off:strings.index(b'\0', off)].decode()
-    found, folder, end = {}, None, 0
+    held, folder, end = {}, None, 0
     for i in range(1, total):
         w, a, b, flags, cid = struct.unpack('>IIIHH', fst[base + i * 0x10:base + i * 0x10 + 0x10])
         nm = name_at(w & 0xFFFFFF)
@@ -284,12 +335,13 @@ def verify(out_dir, title, tree, common_key, title_id):
             folder, end = nm, b
         else:
             assert i < end and folder, f'{nm} is outside any folder'
-            found[(folder, nm)] = recs[cid][a << 5:(a << 5) + b]
+            held.setdefault(cid, []).append((a << 5, b, folder, nm))
+    found = {(d, n) for files in held.values() for _, _, d, n in files}
     want = {(d, n) for d, names in tree.items() for n in names}
-    assert set(found) == want, set(found) ^ want
-    for (d, n), body in found.items():
-        with open(os.path.join(title, d, n), 'rb') as f:
-            assert body == f.read(), f'{d}/{n} differs after a round trip'
+    assert found == want and sum(map(len, held.values())) == len(want), found ^ want
+    assert set(held) == set(recs) - {0}, 'a content holds no file'
+    for cid, files in held.items():
+        same_files(decrypted(out_dir, cid, *recs[cid], title_key), files, title)
     return len(found), count
 
 
@@ -321,10 +373,9 @@ def main():
     offsets = build_contents(title, contents, title_key, out_dir)
 
     fst = build_fst(contents, tree, offsets)
-    contents[0].encrypted = cbc(title_key, content_iv(0), fst)
-    contents[0].digest = sha1(fst)
+    contents[0].size, contents[0].digest = len(fst), sha1(fst)
     with open(os.path.join(out_dir, '00000000.app'), 'wb') as f:
-        f.write(contents[0].encrypted)
+        f.write(cbc(title_key, content_iv(0), fst))
 
     with open(os.path.join(out_dir, 'title.tmd'), 'wb') as f:
         f.write(build_tmd(contents, title_id, group, app_type, os_version, title_version))

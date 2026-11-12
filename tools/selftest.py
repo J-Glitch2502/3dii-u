@@ -40,6 +40,7 @@ def main():
         'frame cap': frame_cap(),
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
+        'WUP packer': [[py, ROOT + '/tools/test_pack_wup.py']],
         'game detection': [[py, ROOT + '/tools/win/test_detect.py']],
         'shader logs': [[py, ROOT + '/builder/test_shaderlogs.py']],
         'user files': [[py, ROOT + '/builder/test_user_files.py']],
