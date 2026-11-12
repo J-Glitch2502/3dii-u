@@ -377,6 +377,13 @@ def main():
     PROGRESS.stage('Making the title')
     make_title(game_dir, out, info, a.art)
 
+    if b3.MEASURE:  # the checks' own kind of build, for Cemu (build3ds.py): never packed, so none can reach a console
+        print('a measuring build: not packed', flush=True)
+        PROGRESS.done, PROGRESS.share = 100, 0
+        PROGRESS.at(1)
+        print(f'@done {out}', flush=True)
+        return
+
     PROGRESS.stage('Packing the WUP')
     wup = os.path.join(a.out or game_dir, info['folder'])
     for _ in range(120):  # the packer holds the whole game in memory

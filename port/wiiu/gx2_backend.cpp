@@ -65,18 +65,30 @@ namespace {
 // ---------------------------------------------------------------- timers: where a draw's time goes, for the log
 enum { P_KEY, P_BIND, P_PS, P_STATE, P_UNI, P_TEX, P_VSUNI, P_RANGE, P_ATTR, P_DRAW, P_HASH, P_WAIT, P_PRESENT, P_SYNC, P_TEXUP, P_TEXFL, P_COUNT };
 u32 prof[P_COUNT], st_syncs, st_luts, st_flushes, st_rehashes;
-// waits for the GPU to finish everything so far, which is what really costs when it happens during a frame
-inline void draw_done() {
-    const OSTime t = OSGetSystemTime();
-    GX2DrawDone();
-    prof[P_SYNC] += (u32)(OSGetSystemTime() - t);
-    st_syncs++;
+// The clock is read for these only in a build that measures (kMeasure): the time now, the time since then added to one of the counters
+// above, and a draw's steps one after another (lap). "nolaps" in the data folder leaves the steps out of a measuring build, to see
+// what reading the clock a dozen times a draw costs.
+bool prof_laps = true;
+inline OSTime prof_now() { return kMeasure ? OSGetSystemTime() : 0; }
+inline void prof_add(int k, OSTime since) {
+    if (kMeasure) prof[k] += (u32)(OSGetSystemTime() - since);
 }
 OSTime prof_t;
+inline void lap_start() {
+    if (kMeasure && prof_laps) prof_t = OSGetSystemTime();
+}
 inline void lap(int k) {
+    if (!kMeasure || !prof_laps) return;
     const OSTime n = OSGetSystemTime();
     prof[k] += (u32)(n - prof_t);
     prof_t = n;
+}
+// waits for the GPU to finish everything so far, which is what really costs when it happens during a frame
+inline void draw_done() {
+    const OSTime t = prof_now();
+    GX2DrawDone();
+    prof_add(P_SYNC, t);
+    st_syncs++;
 }
 
 // ---------------------------------------------------------------- per-frame memory
@@ -98,8 +110,8 @@ void ring_next_segment() {
     const OSTime tw = OSGetSystemTime();
     if (ring_fence[ring_seg]) GX2WaitTimeStamp(ring_fence[ring_seg]);
     const u32 waited = (u32)(OSGetSystemTime() - tw);
-    prof[P_WAIT] += waited;
-    dyn_waited += waited;
+    if (kMeasure) prof[P_WAIT] += waited;
+    dyn_waited += waited;  // (this one the picture's size goes by: dyn_res_update)
     ring_off = RING_SIZE / 3 * ring_seg;
     ring_end = ring_off + RING_SIZE / 3;
     GX2Invalidate(GX2_INVALIDATE_MODE_ATTRIBUTE_BUFFER, ring, RING_SIZE);  // the GPU may have cached this memory's old contents
@@ -976,16 +988,16 @@ bool replace_image(Tex &e) {
         memset(e.lag_rows, 0xff, sizeof e.lag_rows);  // nothing in it yet
     }
     if (e.spare_used_until && GX2GetRetiredTimeStamp() < e.spare_used_until) {
-        const OSTime t = OSGetSystemTime();
+        const OSTime t = prof_now();
         GX2WaitTimeStamp(e.spare_used_until);
-        prof[P_SYNC] += (u32)(OSGetSystemTime() - t);
+        prof_add(P_SYNC, t);
         st_syncs++;
     }
     std::swap(f.image, e.spare);
     if (f.mipmapSize) f.mipmaps = (u8 *)f.image + f.imageSize;
-    const OSTime t = OSGetSystemTime();
+    const OSTime t = prof_now();
     GX2Flush();
-    prof[P_TEXFL] += (u32)(OSGetSystemTime() - t);
+    prof_add(P_TEXFL, t);
     e.spare_used_until = GX2GetLastSubmittedTimeStamp();
     return true;
 }
@@ -994,7 +1006,7 @@ bool replace_image(Tex &e) {
 // scrolled-in tiles into a 1 MB atlas nearly every frame, at scattered rows, and decoding all of it each time took 77 ms on the console.
 void gpu_decode(Tex &e, const u32 *rows);
 void upload_texture(Tex &e, const u32 *rows = nullptr) {
-    const OSTime t0 = OSGetSystemTime();
+    const OSTime t0 = prof_now();
     GX2Surface &f = e.t.surface;
     const u8 *src = pptr(e.addr);
     if (!src) return;
@@ -1030,9 +1042,11 @@ void upload_texture(Tex &e, const u32 *rows = nullptr) {
         st_upload_bytes += e.bytes;
     }
     st_uploads++;
-    const u32 dt = (u32)(OSGetSystemTime() - t0);
-    prof[P_TEXUP] += dt;
-    st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
+    if (kMeasure) {
+        const u32 dt = (u32)(OSGetSystemTime() - t0);
+        prof[P_TEXUP] += dt;
+        st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
+    }
 }
 
 GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
@@ -1054,7 +1068,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
         e.last_use = use_counter;
         if (e.heap_flushes != heap_flushes) {
             e.heap_flushes = heap_flushes;
-            const OSTime th = OSGetSystemTime();
+            const OSTime th = prof_now();
             if (sample_guest(pptr(addr), e.bytes) != e.sample) {
                 e.maybe_dirty = true;
             } else if (!e.hash_stale) {
@@ -1068,11 +1082,11 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
                     if (hash_slice(pptr(addr), e.bytes, k) != e.slice[k]) e.maybe_dirty = true;
                 }
             }
-            prof[P_HASH] += (u32)(OSGetSystemTime() - th);
+            prof_add(P_HASH, th);
         }
         if (e.dirty || e.maybe_dirty) {
             st_rehashes++;
-            const OSTime th = OSGetSystemTime();
+            const OSTime th = prof_now();
             const u32 sample = sample_guest(pptr(addr), e.bytes);
             // A full hash of a 1 MB texture takes about 4 ms on a console, which is wasted if a definite write or a different sample already says it changed
             const bool changed = e.dirty || sample != e.sample;
@@ -1081,7 +1095,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
             // Dream Team drew Goombas with Luigi's head that way (2026-11-08).
             const u32 hh = e.dirty ? 0 : hash_guest(pptr(addr), e.bytes, e.slice);
             e.sample = sample;
-            prof[P_HASH] += (u32)(OSGetSystemTime() - th);
+            prof_add(P_HASH, th);
             // A stale hash (the last upload took a definite write's word for it) with the same sample: the image is current, only the hash is
             // unknown, so it's taken now. Uploading instead redid NSMB2's whole 1 MB atlas after nearly every partial update.
             if (changed || (!e.hash_stale && hh != e.hash)) {
@@ -1835,7 +1849,7 @@ bool gx2_draw(const Gx2Draw &d) {
     const DrawState &ds = *d.ds;
     if (ds.skip || ds.shadow_mode || ds.gas || !ds.rt.color_addr || !pptr(ds.rt.color_addr) || (ds.rt.color_fmt & 0x80)) return true;
     if (gxt_cpu_vs) return false;  // debug aid: tells a wrong vertex shader from anything else
-    prof_t = OSGetSystemTime();
+    lap_start();
     // usually the same vertex program as the last draw
     static struct {
         const ShaderProgram *prog;
@@ -2174,7 +2188,7 @@ void metal_flush(const RTConfig &rt, const MBatch &mb) {
     for (const MSeg &seg : mb.segs) {
         const DrawState &ds = *seg.ds;
         if (ds.skip || ds.shadow_mode || ds.gas) continue;
-        prof_t = OSGetSystemTime();
+        lap_start();
         begin_draw_common(ds, find_ps(ds));
         static const V4 k_none[96] = {};
         set_vertex_uniforms(ds, k_none);
@@ -2511,7 +2525,7 @@ void dyn_res_update() {
 }
 
 void present() {
-    const OSTime tp = OSGetSystemTime();
+    const OSTime tp = prof_now();
     if (dump_enabled && st_flips % 120 == 0) {
         dump_surface(tv_cb->surface, (wiiu::data_dir() + "/tv.ppm").c_str(), 2);
         dump_surface(drc_cb->surface, (wiiu::data_dir() + "/drc.ppm").c_str(), 1);
@@ -2555,7 +2569,7 @@ void present() {
     use_counter++;
     ring_next_segment();
     dyn_res_update();
-    prof[P_PRESENT] += (u32)(OSGetSystemTime() - tp);
+    prof_add(P_PRESENT, tp);
 }
 
 bool screen_fresh;
@@ -3122,6 +3136,7 @@ void gfx_thread_init() {
         for (const auto &e : vs_table) vs_set_aside[e.first] = e.second.index;
         vs_table.clear();
     }
+    prof_laps = !wiiu::debug_flag("nolaps");
     if (wiiu::debug_flag("kstats")) kernel::kstats.ipc = true;  // SVCs, switches and service requests per frame, on the log
     if (wiiu::debug_flag("top1080")) {
         top_720 = false;

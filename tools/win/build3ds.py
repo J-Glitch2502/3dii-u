@@ -55,6 +55,10 @@ MIN_FREE_MB = 2500
 os.environ['DEVKITPRO'] = DKP
 os.environ['DEVKITPPC'] = DKP + '/devkitPPC'
 os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ['PATH']
+# A game is built without what only measures it: the clock reads behind the log's five-second lines, those lines, and the network console
+# (rt.h's kMeasure). THREEDII_MEASURE in the environment builds with them, for the checks in Cemu (check_ports.py --measure): the runtime
+# then has a folder of its own, so the two kinds never mix, and nothing built that way is packed for a console.
+MEASURE = bool(os.environ.get('THREEDII_MEASURE'))
 
 
 class MemoryStatus(ctypes.Structure):
@@ -364,7 +368,7 @@ def runtime_flags(extra):
     return ['-std=c++20', '-O2', '-g0', '-w', '-mcpu=750', '-meabi', '-mhard-float', '-ffunction-sections', '-fno-strict-aliasing', '-fno-exceptions', '-fno-if-conversion',
             '-fno-if-conversion2', '-D__WIIU__', '-D__WUT__', '-DESPRESSO', f'-I{PORT}/wiiu', f'-I{PORT}', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu', f'-I{RT}/services',
             f'-I{CAFEGLSL_PPC}/include',
-            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h'] + extra
+            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h'] + (['-DRECOMP_MEASURE'] if MEASURE else []) + extra
 
 
 def obj_name(src):
@@ -373,7 +377,7 @@ def obj_name(src):
 
 def build_runtime(g, args):
     """the runtime every game links: one build of it serves them all"""
-    obj_dir = f'{WORK}/rt_std'
+    obj_dir = f'{WORK}/rt_measure' if MEASURE else f'{WORK}/rt_std'
     os.makedirs(obj_dir, exist_ok=True)
     skip = {'frontend.cpp', 'main.cpp', 'host_sdl.cpp', 'watch.cpp', 'profile.cpp'}  # shadergen.cpp runs on the console too, for shader_compile.cpp
     sources = []
@@ -661,7 +665,7 @@ def build_shaders(g, args):
 def host_runtime(args):
     obj_dir = WORK + '/pc_rt'
     os.makedirs(obj_dir, exist_ok=True)
-    flags = HOST_CXX + ['-std=c++20', '-O1', '-g', '-w', '-DRECOMP_VS_LOG', '-D_FILE_OFFSET_BITS=64', f'-I{PORT}/pc/win', f'-I{PORT}/wiiu', f'-I{PORT}/pc', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu',
+    flags = HOST_CXX + ['-std=c++20', '-O1', '-g', '-w', '-DRECOMP_VS_LOG', '-DRECOMP_MEASURE', '-D_FILE_OFFSET_BITS=64', f'-I{PORT}/pc/win', f'-I{PORT}/wiiu', f'-I{PORT}/pc', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu',
                         f'-I{RT}/services', '-include', f'{PORT}/pc/shim.h', '-DRECOMP_GAME="tomodachi"', f'-DRECOMP_SOURCE_DIR="{ROOT}/third_party/3dsrecomp"'] + shlex.split(args.extra_flags or '')
     skip = {'frontend.cpp', 'main.cpp', 'host_sdl.cpp', 'watch.cpp'}
     sources = []
@@ -805,6 +809,8 @@ def build_title(g, args):
 
 
 def pack(g, otp):
+    if MEASURE:
+        sys.exit('THREEDII_MEASURE is set: that build measures itself and is for Cemu only. Build the game again without it, then pack.')
     title = g.out + '/title'
     target = f'{ROOT}/dist/{known_game(g.name)["folder"]}'  # as tools/ship_card.py names them
     r = subprocess.run([sys.executable, ROOT + '/tools/pack_game_wup.py', otp, title, target], cwd=ROOT)

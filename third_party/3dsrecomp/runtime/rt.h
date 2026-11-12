@@ -20,6 +20,14 @@ extern std::string g_save_base;  // save/ (or Application Support/3dsrecomp in a
 extern int g_verbose;
 extern u64 g_frame;  // VBlanks since boot (for logs)
 #define VLOG(...) do { if (g_verbose) rt_log(__VA_ARGS__); } while (0)
+// A game is built without what only measures it: the clock reads and counts behind the five-second lines on the log, those lines, and
+// the PC's way in over the network (the user, 2026-11-11: nothing in a game that is only there to measure it). The checks in Cemu and
+// the PC build are built with RECOMP_MEASURE and have all of it.
+#ifdef RECOMP_MEASURE
+constexpr bool kMeasure = true;
+#else
+constexpr bool kMeasure = false;
+#endif
 
 #ifdef __WIIU__
 #define EXEFS_PREFIX "/exefs_"  // the title's content folder is flat

@@ -6,6 +6,8 @@ sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
 has none) on a blank save, and a restart on what that saved, which ends by quitting the game as a player does: it has to close.
+The games are built as the builder makes them, without what only measures a game: then a log has no frame rates or costs, and the pictures,
+the crashes, the sound's gaps and the rest decide. --measure builds and checks the measuring kind, which has them, and the scenes.
 Each leg's screenshots, of the TV and of the GamePad, are kept in games/<folder>/check_shots/<game>/<leg> and held to the good runs in
 games/<folder>/good_shots/<game>/<leg>: a game fails when, against the nearest good run, two or more pictures of a screen are in one and not in
 the other (pictures()), and so also when it draws nothing where a good run drew. A game with no good run says so. --bless runs nothing: it keeps
@@ -220,7 +222,7 @@ def save_files(t):
     return got
 
 
-def judge(t, seconds, flags):
+def judge(t, seconds, flags, measured=False):
     faults, notes = [], []
     d = t.common
     shutil.rmtree(d, ignore_errors=True)
@@ -313,7 +315,7 @@ def judge(t, seconds, flags):
         if fps:
             s = sorted(fps)
             notes.append(f'{name}: {s[len(s) // 2]:.0f} fps (low {s[0]:.0f}), {ps[-1] if ps else 0} fragment misses, {sum(map(int, cpu))} draws shaded by the CPU, {len(flushes)} flushes')
-        else:
+        elif measured:
             faults.append(f'{name}: nothing drawn')
         fault, note = pictures(t, name.replace(' ', '_'))
         if fault:
@@ -340,15 +342,20 @@ def main():
     p.add_argument('--flag', action='append', default=[], help='a debug file in the data folder, like top1080')
     p.add_argument('--route', help="a route of test_routes.py for every game named, instead of its own: nsmb2_stand to time a level's first screen")
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
+    p.add_argument('--measure', action='store_true', help="the measuring kind of build (build3ds.py's THREEDII_MEASURE): frame rates and costs on the log, and the scenes")
     args = p.parse_args()
+    if args.measure:
+        os.environ['THREEDII_MEASURE'] = '1'  # the builds this run starts inherit it
     src = sources()
-    games = list(GAMES) + list(SCENES) + list(src['games']) if args.games == ['all'] else args.games
+    games = list(GAMES) + (list(SCENES) if args.measure else []) + list(src['games']) if args.games == ['all'] else args.games
     built = args.no_build or args.bless
     bad = 0
     ports_built = set()
     for game in games:
         started = time.time()
-        if game in GAMES or game in SCENES:
+        if game in SCENES and not args.measure:
+            t = 'a scene needs --measure: its switches reach the game through the measuring build alone'
+        elif game in GAMES or game in SCENES:
             of, env = SCENES.get(game, (game, {}))
             t = port(of) if built or of in ports_built else build_port(of)  # a scene's port as this run has built it already
             if not isinstance(t, str):
@@ -365,7 +372,7 @@ def main():
         if args.bless and not isinstance(t, str):
             print(f'{game}: {bless(t)}', flush=True)
             continue
-        faults, notes = ([t], []) if isinstance(t, str) else judge(t, args.seconds, args.flag)
+        faults, notes = ([t], []) if isinstance(t, str) else judge(t, args.seconds, args.flag, args.measure)
         bad += bool(faults)
         print(f'{"FAIL" if faults else "ok  "} {game} ({int(time.time() - started)} s): ' + '; '.join(notes), flush=True)
         for f in faults:

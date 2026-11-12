@@ -204,10 +204,10 @@ static int gpu_thread(int, void *) {
             continue;
         }
         OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
-        const OSTime t0 = OSGetSystemTime();
+        const OSTime t0 = kMeasure ? OSGetSystemTime() : 0;
         kernel::gsp_process_gx();
         if (!gpu_pause) wiiu::gfx_pump();
-        wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
+        if (kMeasure) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
     if (!gpu_parked) wiiu::gfx_shutdown();
     gpu_parked = true;
@@ -309,8 +309,10 @@ static int hid_thread(int, void *) {
         }
         wiiu::input_override(buttons, touch, tx, ty);
         kernel::hid_update(buttons, cx, cy, touch, tx, ty);
-        all_samples = all_samples + 1;
-        if (kernel::guest_idle()) idle_samples = idle_samples + 1;
+        if (kMeasure) {
+            all_samples = all_samples + 1;
+            if (kernel::guest_idle()) idle_samples = idle_samples + 1;
+        }
         OSSleepTicks(OSMicrosecondsToTicks(4273));  // 234 Hz, as on the 3DS
     }
     return 0;
@@ -517,7 +519,7 @@ static int card_thread(int, void *) {
             want_hang_dump = 0;
             dump_hang(seconds);
         }
-        if (pass % 300 == 0) {
+        if (kMeasure && pass % 300 == 0) {
             const struct mallinfo m = mallinfo();
             LOG("[wiiu] memory: %u KB in use, %u KB taken from the system, top at %p\n", (u32)m.uordblks >> 10, (u32)m.arena >> 10, sbrk(0));
         }
@@ -643,7 +645,7 @@ void frontend_run() {
             update_shared_page_time();
             next_clock = OSGetSystemTime() + OSSecondsToTicks(1);
         }
-        if (frames % 300 == 0) {
+        if (kMeasure && frames % 300 == 0) {
             const u32 idle = all_samples ? idle_samples * 100 / all_samples : 0;
             LOG("[wiiu] frame %llu: gx lists %llu, transfers %llu, guest threads idle %u%%\n", (unsigned long long)frames, (unsigned long long)kernel::gx_stats.cmdlists,
                 (unsigned long long)kernel::gx_stats.transfers, idle);
@@ -731,7 +733,7 @@ int main(int argc, char **argv) {
     host_threads[0] = OSGetCurrentThread();
     trace_stage = "starting the watchdog";
     spawn(watchdog_thread, 0, 13, 64 << 10, "watchdog");
-    spawn(wiiu::net_thread, 0, 12, 64 << 10, "net");
+    if (kMeasure) spawn(wiiu::net_thread, 0, 12, 64 << 10, "net");
     trace_stage = "system libraries";
     WHBProcInit();
     // WHB registers its own at priority 100 from the GPU thread, on core 2. Each core has its own list, highest first: the GPU stops before WHB's goes, and starts after WHB's has made the screens again.
@@ -768,7 +770,7 @@ int main(int argc, char **argv) {
     if (wiiu::test_run()) LOG("[test] a test run from the PC: this boot has a save of its own\n");
     // debug aid: "env.txt" in the data folder sets the runtime's own test switches, a NAME=value on each line. RECOMP_ROMFS_SWAP=<file>=<other>
     // (services/fs.cpp) loads a level in place of the one a test route enters: a tower or a castle no route reaches by playing.
-    if (FILE *f = fopen((wiiu::data_dir() + "/env.txt").c_str(), "r")) {
+    if (FILE *f = kMeasure ? fopen((wiiu::data_dir() + "/env.txt").c_str(), "r") : nullptr) {
         char line[512];
         while (fgets(line, sizeof line, f)) {
             line[strcspn(line, "\r\n")] = 0;

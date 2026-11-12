@@ -10,8 +10,10 @@ VtxCpuStats vtx_cpu;
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
-    double t0 = now_ms();
-    ~VtxCpuTimer() { vtx_cpu.ms[why] += now_ms() - t0; }
+    double t0 = kMeasure ? now_ms() : 0;
+    ~VtxCpuTimer() {
+        if (kMeasure) vtx_cpu.ms[why] += now_ms() - t0;
+    }
 };
 
 // ---------------------------------------------------------------- vertex loader
