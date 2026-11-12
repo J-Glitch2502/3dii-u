@@ -491,12 +491,7 @@ ScreenCycle cycle[2];  // the top screen's and the bottom's
 // at a screen's transfer: true if the frame it ends was left out
 bool frame_left_out(Surface &s, int which) {
     s.lcds |= 1 << which;
-    if (which == 1 && s.lcds == 3) {
-        // the top screen's frames have stopped coming (a game that leaves its top screen as it is): the bottom's go on by themselves
-        const bool out = cycle[0].skip;
-        if (out && g_frame - cycle[0].last >= 2) cycle[0].skip = false;
-        return out;
-    }
+    if (which == 1 && s.lcds == 3) return cycle[0].skip;
     ScreenCycle &c = cycle[which];
     const bool was = c.skip, fast = g_frame - c.last < 2;
     c.last = g_frame;
