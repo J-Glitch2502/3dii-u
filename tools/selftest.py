@@ -25,11 +25,19 @@ def present_rule():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_present_rule.cpp', '-lpthread', '-o', exe], [exe]]
 
 
+def frame_cap():
+    """port/wiiu/frame_cap.h against made-up games, built for this PC"""
+    exe = build3ds.WORK + '/selftest/test_frame_cap.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_frame_cap.cpp', '-lpthread', '-o', exe], [exe]]
+
+
 def main():
     py = sys.executable
     checks = {
         'vertex arrays': vertex_arrays(),
         'present rule': present_rule(),
+        'frame cap': frame_cap(),
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
         'game detection': [[py, ROOT + '/tools/win/test_detect.py']],

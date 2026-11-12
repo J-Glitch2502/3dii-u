@@ -46,6 +46,7 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "loader.h"
+#include "frame_cap.h"
 #include "present_rule.h"
 #include "shader_compile.h"
 #include "shadergen.h"
@@ -469,44 +470,30 @@ Surface *cur_color, *cur_depth;
 inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
 std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
 
-// Thirty frames a second. Of a game that makes a frame for every VBlank, every other frame of each screen is left out: nothing is drawn to
-// that screen's surface from the transfer before it to its own (gx2_skip_draw, metal_flush), its clear is dropped, and its transfer shows
-// nothing, so the frame before stays up for both VBlanks. The game itself runs as it did: its lists are read, its other targets drawn, its
-// interrupts sent. Only half the drawing is done, which is what holds a game back when it can't keep up.
-// Which frames: once a frame has come less than two VBlanks after the one before, the frame after each drawn one is left out. The left-out
-// frames say whether to go on: they cost nothing to draw, so one that takes two VBlanks to come is the game's own pace (a game or a scene
-// made for thirty), and the leaving out stops.
-// Only a picture the game is sure to draw again: one whose frame is left out and never drawn again would be lost for good (a menu drawn
-// once and then only sent). A surface both screens are drawn in has to be drawn afresh for each (New Super Mario Bros. 2), and it goes by
-// the top screen's frames, as which screen a draw there is for isn't known until its transfer. A screen's own surface counts while the
-// game has cleared it in each of its last eight frames: what is wiped every frame is drawn every frame.
-// shortcut: a game that stops drawing altogether right after a left-out frame (a long load) keeps the frame before it on that screen until
-// it draws again; if one shows that (a fade's last step), keep the left-out frame's lists and draw them late.
-struct ScreenCycle {
-    u64 last = 0;  // the VBlank its last frame came at
-    bool skip = false, engaged = false;
-};
-ScreenCycle cycle[2];  // the top screen's and the bottom's
+// Thirty frames a second: every other frame of a game that makes sixty is left undrawn. frame_cap.h has the rule, which frames and why;
+// here is what it is told about a screen's surface, and where its answer is used: nothing is drawn to a surface whose frame is left out
+// (gx2_skip_draw, metal_flush), its clear is dropped (gx2_memory_fill), and its transfer shows nothing (metal_defer_transfer).
+// Only a picture the game is sure to draw again is ever left out: a surface both screens are drawn in has to be drawn afresh for each
+// (New Super Mario Bros. 2), and a screen's own surface counts while the game has cleared it in each of its last eight frames, as what is
+// wiped every frame is drawn every frame.
+FrameCap cap;
 
 // at a screen's transfer: true if the frame it ends was left out
 bool frame_left_out(Surface &s, int which) {
     s.lcds |= 1 << which;
-    if (which == 1 && s.lcds == 3) return cycle[0].skip;
-    ScreenCycle &c = cycle[which];
-    const bool was = c.skip, fast = g_frame - c.last < 2;
-    c.last = g_frame;
-    if (was || fast) c.engaged = fast;
-    s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
-    s.cleared = false;
-    c.skip = !was && c.engaged && (s.lcds == 3 || s.steady >= 8);
-    return was;
+    const bool shared = s.lcds == 3;
+    if (which == 0 || !shared) {  // a bottom screen drawn in the top's surface goes by the top's frames
+        s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
+        s.cleared = false;
+    }
+    return cap.frame_ends(which, shared, shared || s.steady >= 8, OSTicksToMicroseconds((u64)OSGetSystemTime()));
 }
 
 // the screen's surface a draw is for, if the frame being made for that screen is left out
 Surface *left_out(u32 color_addr, u32 w, u32 h) {
-    if (!cycle[0].skip && !cycle[1].skip) return nullptr;
+    if (!cap.marking()) return nullptr;
     for (auto &s : surfaces)
-        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && s->lcds && cycle[s->lcds == 2].skip) return s.get();
+        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && cap.drops(s->lcds)) return s.get();
     return nullptr;
 }
 GX2ContextState *ctx;
@@ -2440,7 +2427,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
     for (auto &s : surfaces)
         if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
             s->cleared = true;
-            left |= cycle[s->lcds == 2].skip;
+            left |= cap.drops(s->lcds);
         }
     if (gx2_skip_pass || left) return true;
     const Fill f{start, end, value, control};
