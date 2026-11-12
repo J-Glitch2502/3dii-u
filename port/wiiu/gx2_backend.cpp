@@ -468,6 +468,7 @@ GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
 bool state_lost = true;  // the GPU's state no longer matches what was last set
+bool state_sent_valid;   // set_state's record of what it last sent still holds (StateSent)
 
 #ifdef GX2_JUNK  // test builds: fresh host memory filled with noise, as a console's is, so that Cemu shows what starts uninitialized. 1 surfaces, 2 textures, 4 the ring
 static void *junk(void *p, u32 n, u32 bit) {
@@ -1382,6 +1383,7 @@ void bind_targets(const RTConfig &rt) {
         cur_color = c;
         GX2SetViewport(0, 0, (float)c->sw, (float)c->sh, 0, 1);
         GX2SetScissor(0, 0, c->sw, c->sh);
+        state_sent_valid = false;  // those two aren't the draw's, even if this target is the one its state was last sent for
     }
     if (d != cur_depth) {
         if (cur_depth) flush_surface(*cur_depth);
@@ -1413,8 +1415,7 @@ void take_depth_block(const RTConfig &rt) {
     bind_targets(rt);
 }
 
-void set_state(const DrawState &ds) {
-    Surface &c = *cur_color;
+void send_state(const DrawState &ds, Surface &c, bool has_depth, bool stencil) {
     const float Sx = c.sx, Sy = c.sy;
     // At 4.5 times the 3DS's size every other 3DS pixel edge lands on the centre of a TV pixel, where two quads meeting at that edge can both leave the pixel to the other: the
     // console drew Dream Team's text boxes with a thin line where their pieces meet, and Cemu's GPU never did. A quarter of a pixel moves every edge off the centres.
@@ -1466,13 +1467,60 @@ void set_state(const DrawState &ds) {
     // depth and stencil
     static const GX2CompareFunction k_cmp[8] = {GX2_COMPARE_FUNC_NEVER, GX2_COMPARE_FUNC_ALWAYS, GX2_COMPARE_FUNC_EQUAL, GX2_COMPARE_FUNC_NOT_EQUAL,
                                                 GX2_COMPARE_FUNC_LESS, GX2_COMPARE_FUNC_LEQUAL, GX2_COMPARE_FUNC_GREATER, GX2_COMPARE_FUNC_GEQUAL};
-    const bool has_depth = cur_depth != nullptr;
-    const bool stencil = ds.stencil && has_depth;
     // The PICA writes depth with its test off, and games clear depth that way. On GX2 no test means no writes, so the test stays on and always passes.
     GX2SetDepthStencilControl(has_depth && (ds.depth_test || ds.depth_write), has_depth && ds.depth_write, ds.depth_test ? k_cmp[ds.depth_func & 7] : GX2_COMPARE_FUNC_ALWAYS, stencil, stencil,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail);
     if (stencil) GX2SetStencilMask(ds.st_mask_in, ds.st_mask_w, ds.st_ref, ds.st_mask_in, ds.st_mask_w, ds.st_ref);
+}
+
+// Everything send_state gives the GPU comes from these. A draw whose values are the last draw's sends nothing: a batch of sprites or tiles
+// repeats them draw after draw, and each of the eight or so calls costs on a console whether or not it changes anything. The record is
+// dropped wherever something else sets render state (state_lost, a change of target) or leaves some of it changed behind a draw (an
+// outline's polygon offset).
+struct StateSent {
+    const Surface *c, *d;
+    float sx, sy, vp[4];
+    u32 row0, sw, sh, w, h;
+    s32 sc[4];
+    u32 color_mask, blend_color, st[3];
+    u8 scissor_mode, cull, color_write, blend, logic_op, f[6], depth_test, depth_write, depth_func, stencil, st_ops[4];
+};
+StateSent state_sent;
+
+void set_state(const DrawState &ds) {
+    Surface &c = *cur_color;
+    const bool has_depth = cur_depth != nullptr;
+    const bool stencil = ds.stencil && has_depth;
+    StateSent now;
+    memset(&now, 0, sizeof now);  // the padding too: the two are compared as bytes
+    now.c = &c;
+    now.d = cur_depth;
+    now.sx = c.sx, now.sy = c.sy;
+    now.vp[0] = ds.vp_x, now.vp[1] = ds.vp_y, now.vp[2] = ds.vp_hw, now.vp[3] = ds.vp_hh;
+    now.row0 = c.row0, now.sw = c.sw, now.sh = c.sh, now.w = c.w, now.h = c.h;
+    now.scissor_mode = (u8)ds.scissor_mode;
+    if (ds.scissor_mode == 3) now.sc[0] = ds.sc_x1, now.sc[1] = ds.sc_y1, now.sc[2] = ds.sc_x2, now.sc[3] = ds.sc_y2;
+    now.cull = (u8)ds.cull;
+    now.color_mask = ds.color_mask;
+    now.color_write = ds.color_write;
+    now.blend = ds.blend;
+    now.logic_op = (u8)ds.logic_op;
+    if (ds.blend) {
+        now.f[0] = (u8)ds.sf_rgb, now.f[1] = (u8)ds.df_rgb, now.f[2] = (u8)ds.eq_rgb, now.f[3] = (u8)ds.sf_a, now.f[4] = (u8)ds.df_a, now.f[5] = (u8)ds.eq_a;
+        now.blend_color = ds.blend_color;
+    }
+    now.depth_test = ds.depth_test, now.depth_write = ds.depth_write, now.depth_func = (u8)ds.depth_func;
+    now.stencil = stencil;
+    if (stencil) {
+        now.st_ops[0] = (u8)ds.st_func, now.st_ops[1] = (u8)ds.st_zpass, now.st_ops[2] = (u8)ds.st_zfail, now.st_ops[3] = (u8)ds.st_fail;
+        now.st[0] = ds.st_mask_in, now.st[1] = ds.st_mask_w, now.st[2] = ds.st_ref;
+    }
+    if (!state_sent_valid || memcmp(&now, &state_sent, sizeof now)) {
+        state_sent = now;
+        state_sent_valid = true;
+        send_state(ds, c, has_depth, stencil);
+    }
     if (ds.color_write) {
         c.written_since_flush = c.gpu_newer = true;
         if (cpu_reads(c) && !c.in_list) {
@@ -1792,6 +1840,7 @@ void begin_draw_common(const DrawState &ds, GX2PixelShader *ps) {
     if (state_lost) {
         GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
         state_lost = false;
+        state_sent_valid = false;
     }
     set_state(ds);
     GX2SetPixelShader(ps);
@@ -1951,6 +2000,7 @@ bool gx2_draw(const Gx2Draw &d) {
         const float away = (ds.depth_func & 7) >= 6 ? -1.0f : 1.0f;
         GX2SetPolygonOffset(64.0f * away, 12.0f * away, 64.0f * away, 12.0f * away, 0.0f);
         GX2SetPolygonControl(GX2_FRONT_FACE_CW, FALSE, FALSE, FALSE, GX2_POLYGON_MODE_TRIANGLE, GX2_POLYGON_MODE_TRIANGLE, TRUE, TRUE, FALSE);
+        state_sent_valid = false;  // the next draw's cull write has to go, to turn this off
         constexpr u32 size = (VS_BLOCK_WORDS + 8) * 4;
         u32 *u = (u32 *)ring_alloc((size + 255) & ~255u, 256);
         const u32 *src = (const u32 *)g.vs.f;
