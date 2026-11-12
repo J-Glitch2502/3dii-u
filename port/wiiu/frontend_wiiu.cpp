@@ -475,6 +475,7 @@ static void report_stuck(const char *what) {
 static int watchdog_thread(int, void *) {
     u64 last = ~0ull;
     u32 tenths = 0, seconds = 0, still = 0, next_dump = 10;
+    u32 asked = 0, quiet = 0;  // what the game had asked of the system a second ago, and for how many seconds that hasn't moved
     bool drawn = false;
     for (;;) {
         OSSleepTicks(OSMillisecondsToTicks(200));
@@ -500,7 +501,15 @@ static int watchdog_thread(int, void *) {
         }
         if (++tenths < 5) continue;
         tenths = 0;
-        if (++seconds >= 41 && !drawn && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
+        // Drawing nothing isn't being stopped. A game that asks nothing of the system for half a minute has stopped; one that goes on asking
+        // (reading its files, setting up its save on a first start, which a console's storage takes its time over) is at work, and gets three
+        // minutes before the screen says otherwise. Counted by drawing alone, any start slower than 30 s ended as "frozen": a tester's Mario
+        // Kart 7 ended 30 s after its second list on its first start, its last note the save it had just written, and started the second
+        // time (2026-11-12). Whether that one was at work or stopped, the screen couldn't say.
+        const u32 asking = kernel::svcs + (u32)kernel::gx_stats.transfers;
+        quiet = asking == asked ? quiet + 1 : 0;
+        asked = asking;
+        if (++seconds >= 41 && !drawn && (quiet >= 30 || seconds >= 180) && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
         const u64 lists = kernel::gx_stats.cmdlists;
         if (lists != last || gpu_pause || wiiu::menu_open() || wiiu::keyboard_open()) {
             if (lists && !drawn) {
@@ -515,7 +524,7 @@ static int watchdog_thread(int, void *) {
                 next_dump *= 2;
                 want_hang_dump = still + 1;
             }
-            if (still >= 30 && !wiiu::net_connected()) report_stuck("The game has frozen.");
+            if (still >= 30 && (quiet >= 30 || still >= 180) && !wiiu::net_connected()) report_stuck("The game has frozen.");
         }
     }
     return 0;

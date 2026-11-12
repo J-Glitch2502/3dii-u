@@ -220,4 +220,5 @@ struct BootInfo {
 void start(const BootInfo &bi);
 
 extern u32 heap_size, linear_used;
+extern volatile u32 svcs;  // system calls the game has made: while it moves the game is at work, whatever it draws (the Wii U's watchdog)
 }  // namespace kernel

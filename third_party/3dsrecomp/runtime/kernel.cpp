@@ -1181,6 +1181,8 @@ std::string kstats_report(u64 frames) {
     return out + "\n";
 }
 
+volatile u32 svcs;
+
 void svc_dispatch(CPU *c, u32 imm) {
     while (lock_wanted.load(std::memory_order_relaxed)) std::this_thread::yield();  // lock_soon's caller first
     Lock lk(kmutex);
@@ -1188,6 +1190,7 @@ void svc_dispatch(CPU *c, u32 imm) {
     t->in_svc = (s32)imm;
     t->in_service = nullptr;
     kstats.svc[imm & 127]++;
+    svcs = svcs + 1;
     flush_deferred();
     static int svclog = getenv("RECOMP_SVCLOG") ? atoi(getenv("RECOMP_SVCLOG")) : -1;
     if (svclog >= 0 && (svclog == 0 || current_thread()->id == (u32)svclog))
