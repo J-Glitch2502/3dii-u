@@ -1,8 +1,9 @@
-// port/wiiu/frame_cap.h against made-up games, used the way gx2_backend.cpp uses it: a draw to a surface is dropped while the rule says so,
-// and a transfer that ends a left-out frame shows nothing. What has to hold for every game here: a picture that is shown is that screen's
-// own and whole; a screen the game keeps drawing is never left standing; a game at sixty has half its frames drawn; a game made for
-// thirty keeps its frames, however unevenly they end. Cemu on a PC runs the games at full speed and even pace, so a console's timing can
-// only be played here. Built and run by tools/selftest.py.
+// port/wiiu/frame_cap.h against made-up games, used the way gx2_backend.cpp uses it: the drawing thread says when work comes after it has
+// waited, a draw to a surface is dropped while the rule says so, and a transfer that ends a left-out frame shows nothing. What has to
+// hold for every game here: a picture that is shown is that screen's own and whole; a screen the game keeps drawing is never left
+// standing; a game at sixty has half its frames drawn; a game made for thirty keeps its frames, however long they take to draw and
+// however unevenly they come. Cemu on a PC draws in no time and at an even pace, so a console's timing can only be played here.
+// Built and run by tools/selftest.py.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -13,12 +14,14 @@
 
 typedef unsigned long long u64;
 static const u64 VBLANK = 16683;  // microseconds
+static const u64 WAIT = 2000;     // the drawing thread has waited once it has had nothing to do for this long (frontend_wiiu.cpp)
 
-// The rule as it was first released (4063444): soon is "fewer than two VBlanks counted since the last frame ended", and a marking that
-// fails may be tried again at once. Kept here so the test can show it has the fault the clock and the rests are there for.
-struct CountedCap {
+// The rule as it was released twice on 2026-11-12 (edebc80): a frame came "soon" if it ended under 29 ms after the one before, and a
+// marking that failed before it had held rested. Kept so the test shows the fault that the game's own pace is there for.
+struct EndsCap {
     struct Screen {
-        u64 last = 0;
+        u64 last = 0, until = 0, rest = 0;
+        unsigned held = 0;
         bool skip = false, engaged = false;
     };
     Screen screen[2];
@@ -26,14 +29,30 @@ struct CountedCap {
     bool frame_ends(int which, bool shared, bool redrawn, u64 now) {
         if (which == 1 && shared) return screen[0].skip;
         Screen &c = screen[which];
-        const u64 count = now / VBLANK;
-        const bool was = c.skip, fast = count - c.last < 2;
-        c.last = count;
-        if (was || fast) c.engaged = fast;
+        const bool was = c.skip, fast = now - c.last < 29000;
+        c.last = now;
+        if (was) {
+            c.engaged = fast;
+            if (fast) {
+                if (++c.held == 30) c.rest = 0;
+            } else {
+                if (c.held < 30) {
+                    c.rest = c.rest ? std::min<u64>(c.rest * 2, 120000000) : 100000;
+                    c.until = now + c.rest;
+                }
+                c.held = 0;
+            }
+        } else if (fast && now >= c.until) {
+            c.engaged = true;
+        }
         c.skip = !was && c.engaged && redrawn;
         return was;
     }
 };
+static void arrived(EndsCap &, u64) {}
+static bool ended(EndsCap &cap, int which, bool shared, bool redrawn, u64 now) { return cap.frame_ends(which, shared, redrawn, now); }
+static void arrived(FrameCap &cap, u64 now) { cap.work_arrived(now); }
+static bool ended(FrameCap &cap, int which, bool shared, bool redrawn, u64) { return cap.frame_ends(which, shared, redrawn); }
 
 struct Surface {
     unsigned lcds = 0;
@@ -45,12 +64,12 @@ struct Game {
     int order = 0;         // 0: the top is drawn and sent first, 1: the bottom
     bool cleared = false;  // screens with surfaces of their own: the game clears them every frame
     int frames = 600;
-    std::function<u64(int)> period = [](int) { return VBLANK; };  // from a frame's start to the next one's, by frame number
-    std::function<u64(int)> draw_time = [](int) { return (u64)0; };  // what a drawn top screen takes, on a console that can't keep up
+    std::function<u64(int)> period = [](int) { return VBLANK; };  // from when a frame's work comes to when the next one's does, by frame number
+    std::function<u64(int)> draw_time = [](int) { return (u64)0; };  // what drawing a top screen takes: next to nothing in Cemu, 15 to 30 ms on a console
     int top_stops = 1 << 30, bottom_stops = 1 << 30;  // the frame from which the game leaves that screen as it is
     int bottoms = 1;     // bottom screens drawn and sent a frame
-    u64 screen_lag = 0;  // from the first screen's transfer to the second screen's first draw
-    u64 begin = 10 * VBLANK + 5000;  // when its first frame ends: 5 ms after a VBlank's moment
+    u64 screen_lag = 0;  // from the first screen's transfer to when the second screen's work comes
+    u64 begin = 10 * VBLANK + 5000;  // when its first frame's work comes: 5 ms after a VBlank's moment
 };
 
 struct Seen {
@@ -84,8 +103,8 @@ static Seen play(const Game &g) {
     Rule cap;
     Surface surfaces[2];
     Seen seen;
-    u64 now = g.begin;
-    int count[2] = {0, 0};  // frames made of each screen so far
+    u64 now = g.begin, busy_until = 0;  // the drawing thread is at work until then
+    int count[2] = {0, 0};              // frames made of each screen so far
     for (int f = 0; f < g.frames; f++) {
         const u64 start = now;
         bool first = true;
@@ -95,6 +114,7 @@ static Seen play(const Game &g) {
             for (int k = 0; k < (screen ? g.bottoms : 1); k++) {
                 if (!first) now += g.screen_lag;
                 first = false;
+                if (now >= busy_until + WAIT) arrived(cap, now);
                 Surface &s = surfaces[g.shared ? 0 : screen];
                 const int frame = count[screen]++;
                 bool dropped = false;
@@ -109,7 +129,8 @@ static Seen play(const Game &g) {
                 if (screen == 0 && !dropped) now += g.draw_time(f);
                 // the transfer, as metal_defer_transfer and frame_left_out make it
                 s.lcds |= 1u << screen;
-                const bool out = cap.frame_ends(screen, s.lcds == 3, s.lcds == 3 || g.cleared, now);
+                const bool out = ended(cap, screen, s.lcds == 3, s.lcds == 3 || g.cleared, now);
+                busy_until = now;
                 if (!out) {
                     if (s.screen != screen || s.frame != frame) fail("a picture shown that is another screen's or an older frame's", screen, frame);
                     if (s.parts != 2) fail("a picture shown with half its draws", screen, frame);
@@ -119,7 +140,7 @@ static Seen play(const Game &g) {
                 seen.shown[screen].push_back(!out);
             }
         }
-        now = std::max(now, start + g.period(f));
+        now = std::max(now, start + g.period(f));  // a game whose frame isn't drawn yet waits for it
     }
     return seen;
 }
@@ -146,6 +167,7 @@ int main() {
         for (int order = 0; order <= 1; order++) {
             const char *how = shared ? "one surface" : "two surfaces";
             const char *ord = order ? "bottom first" : "top first";
+            const bool say = shared && !order;  // the numbers once, for the commonest layout
             Game base;
             base.shared = shared;
             base.order = order;
@@ -164,29 +186,48 @@ int main() {
             s = play<FrameCap>(g);
             for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
 
-            // Super Mario 3D Land on a console: thirty a second, each frame ending within a millisecond or two of a VBlank's moment
-            snprintf(name, sizeof name, "thirty a second, ending near a VBlank's moment, %s, %s", how, ord);
+            // Super Mario 3D Land on a console (2026-11-12): made for thirty, 15 to 25 ms to draw a top screen. "Speed is fine, it just
+            // feels like 20fps": the rule that went by frames' ends kept half of them, as it has to here.
+            snprintf(name, sizeof name, "thirty a second, 15 to 25 ms to draw, %s, %s", how, ord);
             g = base;
             g.frames = 3000;
-            g.begin = 100 * VBLANK;  // on a VBlank's moment, and from there a millisecond and a half either side
-            g.period = [](int f) { return 2 * VBLANK - 1500 + noise(f, 1) % 3001 - (f ? noise(f - 1, 1) % 3001 : 1500) + 1500; };
-            const Seen counted = play<CountedCap>(g);
-            check(counted.lost(0) > 60, "the rule that counted VBlanks loses few frames here: the test no longer shows its fault");
-            if (shared && !order) printf("thirty a second ending near a VBlank's moment: the rule that counted VBlanks leaves out %d of %d frames\n", counted.lost(0), g.frames);
+            g.period = [](int) { return 2 * VBLANK; };
+            g.draw_time = [](int f) { return (u64)15000 + noise(f, 3) % 10001; };
+            const Seen old = play<EndsCap>(g);
+            check(old.lost(0) > 900, "the rule that went by frames' ends loses few frames here: the test no longer shows its fault");
+            s = play<FrameCap>(g);
+            if (say) printf("thirty a second, 15 to 25 ms to draw: the rule that went by frames' ends leaves out %d of %d, this one %d\n", old.lost(0), g.frames, s.lost(0));
+            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out for the time it takes to draw");
+
+            snprintf(name, sizeof name, "thirty a second that the console takes 30 ms to draw, %s, %s", how, ord);
+            g = base;
+            g.period = [](int) { return 2 * VBLANK; };
+            g.draw_time = [](int) { return (u64)30000; };
             s = play<FrameCap>(g);
             for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
 
-            // thirty a second with a late frame now and then (12 ms), and the frame after it early by as much
+            snprintf(name, sizeof name, "thirty a second that the console takes 40 ms to draw, so twenty-five, %s, %s", how, ord);
+            g = base;
+            g.period = [](int) { return 2 * VBLANK; };
+            g.draw_time = [](int) { return (u64)40000; };
+            s = play<FrameCap>(g);
+            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a game that can't keep its thirty was left out");
+
+            // thirty a second, each frame's work coming within a millisecond and a half of a VBlank's moment (what counting VBlanks got wrong)
+            snprintf(name, sizeof name, "thirty a second, uneven by a millisecond or two, %s, %s", how, ord);
+            g = base;
+            g.frames = 3000;
+            g.begin = 100 * VBLANK;
+            g.period = [](int f) { return 2 * VBLANK + noise(f, 1) % 3001 - (f ? noise(f - 1, 1) % 3001 : 1500); };
+            s = play<FrameCap>(g);
+            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
+
             snprintf(name, sizeof name, "thirty a second, a late frame every two seconds and the next one early, %s, %s", how, ord);
             g = base;
-            g.frames = 9000;  // five minutes
+            g.frames = 9000;
             g.period = [](int f) { return f % 60 == 30 ? 2 * VBLANK + 12000 : f % 60 == 31 ? 2 * VBLANK - 12000 : 2 * VBLANK; };
             s = play<FrameCap>(g);
-            for (int sc = 0; sc < 2; sc++) {
-                check(s.gap(sc, 0) <= 1, "two frames in a row left out");
-                check(s.lost(sc) <= 13, "more than thirteen frames of a thirty-a-second game left out in five minutes");
-                check(s.lost(sc, 4500) <= 2, "the rests don't grow: frames still left out often after two and a half minutes");
-            }
+            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
 
             // thirty a second that stalls for 100 ms every four seconds and makes its next three frames a VBlank apart to catch up
             snprintf(name, sizeof name, "thirty a second, a stall every four seconds and three quick frames after it, %s, %s", how, ord);
@@ -194,22 +235,7 @@ int main() {
             g.frames = 9000;
             g.period = [](int f) { return f % 120 == 60 ? (u64)100000 : f % 120 > 60 && f % 120 <= 63 ? VBLANK : 2 * VBLANK; };
             s = play<FrameCap>(g);
-            for (int sc = 0; sc < 2; sc++) {
-                check(s.gap(sc, 0) <= 1, "two frames in a row left out");
-                check(s.lost(sc) <= 30, "more than thirty frames of a thirty-a-second game left out in five minutes");
-                check(s.lost(sc, 4500) <= 4, "the rests don't grow: frames still left out often after two and a half minutes");
-            }
-
-            // a game at sixty that takes 40 ms over a frame every two seconds: it has held, so a stumble costs it no rest
-            snprintf(name, sizeof name, "sixty a second with a 40 ms frame every two seconds, %s, %s", how, ord);
-            g = base;
-            g.frames = 6000;
-            g.period = [](int f) { return f % 120 == 60 ? (u64)40000 : VBLANK; };
-            s = play<FrameCap>(g);
-            for (int sc = 0; sc < 2; sc++) {
-                check(s.gap(sc, W) <= 1, "a screen was left for more than one frame");
-                check(std::abs(s.count(sc, W, 6000) * 2 - (6000 - W)) <= 120, "a stumble stops the leaving out for long: far from half the frames drawn");
-            }
+            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
 
             snprintf(name, sizeof name, "sixty, then thirty from frame 200, %s, %s", how, ord);
             g = base;
@@ -217,7 +243,16 @@ int main() {
             s = play<FrameCap>(g);
             for (int sc = 0; sc < 2; sc++) {
                 check(s.gap(sc, 200) <= 1, "a screen was left standing once the game slowed down");
-                check(s.lost(sc, 203) == 0, "frames still left out three frames after the game slowed down");
+                check(s.lost(sc, 206) == 0, "frames still left out six frames after the game slowed down");
+            }
+
+            snprintf(name, sizeof name, "thirty, then sixty from frame 200, %s, %s", how, ord);
+            g = base;
+            g.period = [](int f) { return f < 200 ? 2 * VBLANK : VBLANK; };
+            s = play<FrameCap>(g);
+            for (int sc = 0; sc < 2; sc++) {
+                check(s.lost(sc, 0) - s.lost(sc, 200) == 0, "a frame left out while the game made thirty");
+                check(std::abs(s.count(sc, 220, 600) * 2 - 380) <= 2, "not half the frames drawn within twenty frames of the game making sixty");
             }
 
             snprintf(name, sizeof name, "twenty a second with the second screen two VBlanks behind the first, %s, %s", how, ord);
@@ -227,22 +262,29 @@ int main() {
             s = play<FrameCap>(g);
             for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a slow game was left out");
 
-            // a game made for sixty on a console that takes 30 ms to draw its top screen: the marked frames come at once, and the leaving
-            // out has to hold. A bottom screen with a surface of its own is paced by the top's drawing, and may be drawn every time.
-            snprintf(name, sizeof name, "sixty, then a console that takes 30 ms to draw the top screen, %s, %s", how, ord);
-            g = base;
-            g.draw_time = [](int f) { return f < 200 ? (u64)0 : (u64)30000; };
-            s = play<FrameCap>(g);
-            check(s.gap(0, W) == 1, "the top screen was left for more than one frame, or the leaving out stopped where it is needed");
-            check(std::abs(s.count(0, 200, 600) * 2 - 400) <= 2, "not half the top screen's frames drawn where the console can't keep up");
-            check(s.gap(1, W) <= 1, "the bottom screen was left for more than one frame");
+            // A game made for sixty on a console that takes 30 ms to draw its top screen (New Super Mario Bros. 2's castles): the left-out
+            // frames cost nothing, the game gets its sixty back, and the leaving out has to hold. A bottom screen with a surface of its own
+            // is paced by the top's drawing.
+            for (u64 ms : {20, 30, 40}) {
+                snprintf(name, sizeof name, "sixty, then a console that takes %d ms to draw the top screen, %s, %s", (int)ms, how, ord);
+                g = base;
+                g.draw_time = [ms](int f) { return f < 200 ? (u64)0 : ms * 1000; };
+                s = play<FrameCap>(g);
+                check(s.gap(0, W) == 1, "the top screen was left for more than one frame, or the leaving out stopped where it is needed");
+                check(std::abs(s.count(0, 200, 600) * 2 - 400) <= 2, "not half the top screen's frames drawn where the console can't keep up");
+                check(s.gap(1, W) <= 1, "the bottom screen was left for more than one frame");
+            }
 
-            snprintf(name, sizeof name, "a game made for thirty that the console takes 30 ms to draw, %s, %s", how, ord);
+            // a game at sixty that takes 40 ms over a frame every two seconds: one slow pace in many
+            snprintf(name, sizeof name, "sixty a second with a 40 ms frame every two seconds, %s, %s", how, ord);
             g = base;
-            g.period = [](int) { return 2 * VBLANK; };
-            g.draw_time = [](int) { return (u64)30000; };
+            g.frames = 6000;
+            g.period = [](int f) { return f % 120 == 60 ? (u64)40000 : VBLANK; };
             s = play<FrameCap>(g);
-            for (int sc = 0; sc < 2; sc++) check(s.lost(sc) == 0, "a frame of a thirty-a-second game was left out");
+            for (int sc = 0; sc < 2; sc++) {
+                check(s.gap(sc, W) <= 1, "a screen was left for more than one frame");
+                check(std::abs(s.count(sc, W, 6000) * 2 - (6000 - W)) <= 4, "a stumble stops the leaving out: not half the frames drawn");
+            }
 
             for (int phase = 0; phase <= 1; phase++) {
                 // frame_cap.h's second shortcut: in one surface the bottom screen stands once the top has stopped on a marked frame
@@ -268,10 +310,11 @@ int main() {
                 for (int sc = 0; sc < 2; sc++) {
                     check(s.shown[sc][p] || s.shown[sc][p - 1], "a pause began with a picture two frames old or older");
                     check(s.gap(sc, W) <= 1, "a screen was left for more than one frame");
+                    check(std::abs(s.count(sc, 260, 600) * 2 - 340) <= 2, "the leaving out didn't go on after the pauses");
                 }
             }
 
-            // a game made for sixty that takes two VBlanks for a frame now and then
+            // a game made for sixty that takes two VBlanks for a frame one time in three: whichever way it is taken, nothing shown wrong
             snprintf(name, sizeof name, "frames one or two VBlanks apart at random, %s, %s", how, ord);
             g = base;
             g.frames = 4000;

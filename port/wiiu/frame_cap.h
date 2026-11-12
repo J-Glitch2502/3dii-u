@@ -3,17 +3,17 @@
 // Of a game that makes a frame for every VBlank, every other frame of each screen is left out: nothing is drawn to that screen's surface
 // from the transfer before it to its own, its clear is dropped, and its transfer shows nothing, so the frame before stays up for both
 // VBlanks. The game itself runs as it did: its lists are read, its other targets drawn, its interrupts sent. Only half the drawing is
-// done, which is what holds a game back when it can't keep up.
-// Which frames: once a frame has ended soon after the one before (FAST), the frame after each drawn one is marked to be left out. A marked
-// frame says whether to go on: it costs nothing to draw, so one that still ends late is the game's own pace (a game or a scene made for
-// thirty), and the marking stops.
-// "Soon" is by the clock, not by counting VBlanks. A game at thirty whose frames end near a VBlank's moment has them counted one, two and
-// three VBlanks apart though they are 33 ms apart every time, and going by the count took that for sixty again and again: each time one
-// frame of a thirty-a-second game was left out, and the picture stood for four VBlanks and then jumped (Super Mario 3D Land on a console,
-// 2026-11-12: "the screen is jerking back", all the time). A frame of thirty that comes early after a late one can still look like sixty
-// for a moment, so marking that fails before it has held (HOLDS marked frames in a row that ended soon) rests, twice as long each time
-// it fails so again: a game made for thirty loses a frame a dozen times in its first minutes, then one in two minutes. A game at sixty
-// holds, and what it stumbles over after that (a load, a slow frame of its own) costs it no rest.
+// done, which is what holds a game back when it can't keep up. A game made for thirty is left as it is: half of thirty is fifteen.
+//
+// So the one thing to know is the game's own pace, and the only place it shows is where the drawing thread was waiting for the game: a
+// frame whose first work came after such a wait began when the game chose, and from one such beginning to the next is the game's pace,
+// whatever the drawing in between took (over two frames, where the one between was still being drawn when its work came). Six of the last
+// eight paces under SIXTY, and the game is one that makes sixty.
+// It used to go by when frames ended. A frame that is left out ends as soon as its work comes, which is the game's 33 ms after the frame
+// before it began but only 33 ms less that frame's drawing time after it ended: on a console, where drawing takes 15 to 25 ms of a
+// frame, every game made for thirty looked like one of sixty and kept half its frames (Super Mario 3D Land, 2026-11-12: "speed is fine,
+// it just feels like 20fps"). In Cemu drawing takes no time to speak of, and it never showed.
+//
 // A surface both screens are drawn in goes by the top screen's frames, as which screen a draw there is for isn't known until its transfer.
 // shortcut: a game that stops drawing altogether right after a marked frame (a long load) keeps the frame before it on that screen until
 // it draws again; if one shows that (a fade's last step), keep the marked frame's lists and draw them late.
@@ -22,19 +22,26 @@
 #pragma once
 
 struct FrameCap {
-    static constexpr unsigned long long FAST = 29000;  // microseconds: 1.75 VBlanks. Frames at sixty end 17 ms apart, at thirty 33
-    static constexpr unsigned long long REST = 100000, LONGEST_REST = 120000000;
-    static constexpr unsigned HOLDS = 30;  // marked frames: a second of a game at sixty
+    static constexpr unsigned long long SIXTY = 30000;   // microseconds from one frame's beginning to the next: more than 33 a second
+    static constexpr unsigned long long PAUSE = 100000;  // longer than this between two is a load, and says nothing about the pace
 
     struct Screen {
-        unsigned long long last = 0;   // when its last frame ended, in microseconds
-        unsigned long long until = 0;  // no marking before then
-        unsigned long long rest = 0;   // how long the last marking that failed at once made it wait
-        unsigned held = 0;             // marked frames in a row that ended soon
-        bool skip = false;             // the frame being made for it is marked: its draws are dropped
-        bool engaged = false;          // its frames have been ending soon after one another
+        unsigned long long anchor = 0;  // when the last of its frames to begin after a wait began; 0 before the first
+        unsigned frames = 0;            // its frames that have ended since
+        unsigned seen = 0;              // how many times work had come after a wait when that one ended
+        unsigned char paces = 0;        // the last eight paces, a bit each: set for one under SIXTY
+        bool sixty = false;             // six of the eight: the game makes a frame of this screen for every VBlank
+        bool skip = false;              // the frame being made for it is marked: its draws are dropped
     };
-    Screen screen[2];  // the top screen's and the bottom's
+    Screen screen[2];                   // the top screen's and the bottom's
+    unsigned long long arrived_at = 0;  // when the drawing thread last got work after waiting for the game, in microseconds
+    unsigned arrivals = 0;              // and how many times it has
+
+    // the drawing thread, which had been waiting with nothing to do, has work again
+    void work_arrived(unsigned long long now) {
+        arrived_at = now;
+        arrivals++;
+    }
 
     bool marking() const { return screen[0].skip || screen[1].skip; }
 
@@ -44,27 +51,23 @@ struct FrameCap {
 
     // A screen's transfer ends a frame of it: true if that frame was left out, and nothing is to be shown. shared: both screens are drawn
     // in the transfer's surface; redrawn: the game is sure to draw this picture again next frame (a frame left out and never drawn again
-    // would be lost for good: a menu drawn once, then only sent); now: the time in microseconds.
-    bool frame_ends(int which, bool shared, bool redrawn, unsigned long long now) {
+    // would be lost for good: a menu drawn once, then only sent).
+    bool frame_ends(int which, bool shared, bool redrawn) {
         if (which == 1 && shared) return screen[0].skip;
         Screen &c = screen[which];
-        const bool was = c.skip, fast = now - c.last < FAST;
-        c.last = now;
-        if (was) {
-            c.engaged = fast;
-            if (fast) {
-                if (++c.held == HOLDS) c.rest = 0;
-            } else {
-                if (c.held < HOLDS) {
-                    c.rest = c.rest ? (c.rest * 2 < LONGEST_REST ? c.rest * 2 : LONGEST_REST) : REST;
-                    c.until = now + c.rest;
-                }
-                c.held = 0;
+        c.frames++;
+        if (c.seen != arrivals) {  // work came after a wait since its last frame ended: this frame began when the game chose
+            const unsigned long long pace = c.anchor ? (arrived_at - c.anchor) / c.frames : PAUSE;
+            if (pace < PAUSE) {
+                c.paces = (unsigned char)(c.paces << 1 | (pace < SIXTY));
+                c.sixty = __builtin_popcount(c.paces) >= 6;
             }
-        } else if (fast && now >= c.until) {
-            c.engaged = true;
+            c.anchor = arrived_at;
+            c.frames = 0;
+            c.seen = arrivals;
         }
-        c.skip = !was && c.engaged && redrawn;
+        const bool was = c.skip;
+        c.skip = !was && c.sixty && redrawn;
         return was;
     }
 };

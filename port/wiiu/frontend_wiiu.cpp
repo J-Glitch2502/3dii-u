@@ -186,6 +186,8 @@ static void gpu_trip() {
     longjmp(gpu_restart, 1);
 }
 
+static bool gpu_idle;  // the GPU thread has waited with nothing to do, and no work has come since
+
 static int gpu_thread(int, void *) {
     wiiu::profile_this_core();
     wiiu::gfx_thread_init();
@@ -207,9 +209,15 @@ static int gpu_thread(int, void *) {
         // finished frame may be shown
         const bool waited = !OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
         const u64 done = kernel::gx_stats.cmdlists + kernel::gx_stats.transfers;
-        const OSTime t0 = kMeasure ? OSGetSystemTime() : 0;
+        const OSTime t0 = kMeasure || gpu_idle ? OSGetSystemTime() : 0;
         kernel::gsp_process_gx();
-        if (!gpu_pause) wiiu::gfx_pump(waited && done == kernel::gx_stats.cmdlists + kernel::gx_stats.transfers);
+        const bool worked = done != kernel::gx_stats.cmdlists + kernel::gx_stats.transfers;
+        // Work that comes after this thread has waited came when the game chose, not when the drawing let it: the game's own pace (frame_cap.h).
+        // A wake-up that brought nothing to draw (a VBlank) is neither work nor a wait.
+        if (worked && gpu_idle) wiiu::gfx_work_arrived(OSTicksToMicroseconds((u64)t0));
+        if (worked) gpu_idle = false;
+        else if (waited) gpu_idle = true;
+        if (!gpu_pause) wiiu::gfx_pump(waited && !worked);
         if (kMeasure) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
     if (!gpu_parked) wiiu::gfx_shutdown();

@@ -486,7 +486,7 @@ bool frame_left_out(Surface &s, int which) {
         s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
         s.cleared = false;
     }
-    return cap.frame_ends(which, shared, shared || s.steady >= 8, OSTicksToMicroseconds((u64)OSGetSystemTime()));
+    return cap.frame_ends(which, shared, shared || s.steady >= 8);
 }
 
 // the screen's surface a draw is for, if the frame being made for that screen is left out
@@ -3550,6 +3550,9 @@ static void draw_keyboard() {
 static std::atomic<bool> report_due;
 static std::atomic<float> report_draws_per_flip;
 static void write_report();
+
+// (the GPU thread) work has come after it had waited with nothing to do: where a game's own pace shows (frame_cap.h)
+void gfx_work_arrived(u64 now) { cap.work_arrived(now); }
 
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {
