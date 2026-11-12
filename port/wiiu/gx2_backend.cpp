@@ -32,6 +32,7 @@
 #include <whb/gfx.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <memory>
@@ -45,9 +46,12 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "loader.h"
+#include "frame_cap.h"
+#include "present_rule.h"
 #include "shader_compile.h"
 #include "shadergen.h"
 #include "swkbd.h"
+#include "vertex_arrays.h"
 #include "wiiu.h"
 
 extern "C" void *GfxHeapAllocMEM1(uint32_t size, uint32_t alignment) __attribute__((weak));
@@ -64,18 +68,30 @@ namespace {
 // ---------------------------------------------------------------- timers: where a draw's time goes, for the log
 enum { P_KEY, P_BIND, P_PS, P_STATE, P_UNI, P_TEX, P_VSUNI, P_RANGE, P_ATTR, P_DRAW, P_HASH, P_WAIT, P_PRESENT, P_SYNC, P_TEXUP, P_TEXFL, P_COUNT };
 u32 prof[P_COUNT], st_syncs, st_luts, st_flushes, st_rehashes;
-// waits for the GPU to finish everything so far, which is what really costs when it happens during a frame
-inline void draw_done() {
-    const OSTime t = OSGetSystemTime();
-    GX2DrawDone();
-    prof[P_SYNC] += (u32)(OSGetSystemTime() - t);
-    st_syncs++;
+// The clock is read for these only in a build that measures (kMeasure): the time now, the time since then added to one of the counters
+// above, and a draw's steps one after another (lap). "nolaps" in the data folder leaves the steps out of a measuring build, to see
+// what reading the clock a dozen times a draw costs.
+bool prof_laps = true;
+inline OSTime prof_now() { return kMeasure ? OSGetSystemTime() : 0; }
+inline void prof_add(int k, OSTime since) {
+    if (kMeasure) prof[k] += (u32)(OSGetSystemTime() - since);
 }
 OSTime prof_t;
+inline void lap_start() {
+    if (kMeasure && prof_laps) prof_t = OSGetSystemTime();
+}
 inline void lap(int k) {
+    if (!kMeasure || !prof_laps) return;
     const OSTime n = OSGetSystemTime();
     prof[k] += (u32)(n - prof_t);
     prof_t = n;
+}
+// waits for the GPU to finish everything so far, which is what really costs when it happens during a frame
+inline void draw_done() {
+    const OSTime t = prof_now();
+    GX2DrawDone();
+    prof_add(P_SYNC, t);
+    st_syncs++;
 }
 
 // ---------------------------------------------------------------- per-frame memory
@@ -88,13 +104,17 @@ OSTime ring_fence[3];
 u32 dyn_waited;  // ticks waited for the GPU since dyn_res_update last looked
 
 void ring_next_segment() {
-    ring_fence[ring_seg] = GX2GetLastSubmittedTimeStamp();
+    // What has been submitted by now is the last that can read this segment, or the one before it: a draw whose data filled the end of that
+    // one was only submitted from this one, after that one's fence was taken.
+    const OSTime submitted = GX2GetLastSubmittedTimeStamp();
+    ring_fence[ring_seg] = submitted;
+    ring_fence[(ring_seg + 2) % 3] = submitted;
     ring_seg = (ring_seg + 1) % 3;
     const OSTime tw = OSGetSystemTime();
     if (ring_fence[ring_seg]) GX2WaitTimeStamp(ring_fence[ring_seg]);
     const u32 waited = (u32)(OSGetSystemTime() - tw);
-    prof[P_WAIT] += waited;
-    dyn_waited += waited;
+    if (kMeasure) prof[P_WAIT] += waited;
+    dyn_waited += waited;  // (this one the picture's size goes by: dyn_res_update)
     ring_off = RING_SIZE / 3 * ring_seg;
     ring_end = ring_off + RING_SIZE / 3;
     GX2Invalidate(GX2_INVALIDATE_MODE_ATTRIBUTE_BUFFER, ring, RING_SIZE);  // the GPU may have cached this memory's old contents
@@ -102,6 +122,7 @@ void ring_next_segment() {
 
 void *ring_alloc(u32 size, u32 align) {
     u32 at = (ring_off + align - 1) & ~(align - 1);
+    if (size + align > RING_SIZE / 3) FATAL("%u bytes asked of the per-frame memory, more than a segment holds\n", size);
     if (at + size > ring_end) {
         GX2Flush();
         ring_next_segment();
@@ -135,8 +156,19 @@ std::unordered_map<u64, VsEntry> vs_table;
 std::unordered_map<u64, PsEntry> ps_table;
 GX2VertexShader *vs_passthrough, *vs_blit;
 GX2PixelShader *ps_blit, *ps_fallback, *ps_fallback_tex, *ps_uber, *ps_uber_lit;
-GX2PixelShader *ps_etc1, *ps_etc1a4;  // decode those textures on the GPU (gpu_decode); null in a pack from before they existed
+GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GPU (gpu_decode); null in a pack from before it had that one
+// A bit per attribute format (s8, u8, s16, float) kept the old way: copied by itself, integers as floats made by the CPU. Files named "cpuattr"
+// (all), "cpuattr8" and "cpuattr16" set them, and "cemu" the signed bytes. None by default: bytes fetched a 4-byte word at a time (gpu_fetched)
+// draw NSMB2's skinned models as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen there.
+u32 gxt_cpu_attr;
+bool in_cemu;  // check_ports.py's runs say so with a file named "cemu": where Cemu can't do what a console does, the runtime shows what the console would
 bool gxt_cpu_tex;                     // a file named "cputex" in the data folder: every texture decoded by the CPU, as before
+// A vertex shader the pack lacks is compiled on the console, as pixel shaders are; a file named "noglslvs" leaves its draws with the CPU.
+// It was off: in Cemu the compiler hands back an empty program (16 bytes, no inputs) for whatever it compiles in its first second, and NSMB2's
+// Koopalings drew untextured with those (2026-11-10). Empty ones are turned away and compiled again now (shader_compile.cpp), and what it
+// then makes matches the pack's. Left with the CPU, a place no build's runs had reached is unplayable: in Kid Icarus's land battle the pack
+// lacked eleven, and the CPU shaded 47,000 vertices a frame, 3.5 fps in Cemu and about 2 on the user's console (2026-11-11).
+static bool glsl_vs = true;
 static bool glsl_force;  // "glslforce": the console's compiler is asked for every pixel shader the shipped set has too, which puts it under a real load in Cemu (it keeps the shipped ones)
 volatile bool uber_all;  // "uberall" (a file in the data folder, or set from the PC): every draw uses the uber shaders, which shows up a mistake in them
 bool uber_fallback;  // a fragment state with no compiled shader draws with them
@@ -264,8 +296,12 @@ void load_shader_tables() {
     uber_fallback = true;
     const auto etc1 = ps_table.find(fnv64(kEtc1Key, strlen(kEtc1Key))), etc1a4 = ps_table.find(fnv64(kEtc1A4Key, strlen(kEtc1A4Key)));
     if (etc1 != ps_table.end() && etc1a4 != ps_table.end()) {
-        ps_etc1 = load_ps(etc1->second.index);
-        ps_etc1a4 = load_ps(etc1a4->second.index);
+        ps_decode[12] = load_ps(etc1->second.index);
+        ps_decode[13] = load_ps(etc1a4->second.index);
+        for (u32 fmt = 0; fmt < 12; fmt++) {
+            const std::string k = untile_key(fmt);
+            if (const auto it = ps_table.find(fnv64(k.data(), k.size())); it != ps_table.end()) ps_decode[fmt] = load_ps(it->second.index);
+        }
     }
     LOG("[gx2] %u fragment and %u vertex shaders available\n", h->num_ps, h->num_vs);
 }
@@ -343,15 +379,20 @@ void vs_locations(VsEntry &v) {
     }
 }
 // what the fetch shader is built from (attribVars) against what the GPU routes by (the semantic table): a compiler may number them differently
+std::unordered_map<u64, u32> vs_set_aside;  // "glslvsforce": the shipped shaders the console's compiler stands in for, by key
 void log_vs_tables(const char *what, u64 key, const GX2VertexShader *s) {
     static u32 shown;
-    if (shown++ >= 48) return;
+    if (shown++ >= 96) return;
     char line[400];
     int n = snprintf(line, sizeof line, "[gx2] %s vs %016llx attribs", what, (unsigned long long)key);
     for (u32 i = 0; i < s->attribVarCount && n < 300; i++) n += snprintf(line + n, sizeof line - n, " %s@%u", s->attribVars[i].name, s->attribVars[i].location);
     n += snprintf(line + n, sizeof line - n, " | semantics(%u)", s->regs.num_sq_vtx_semantic);
     for (u32 i = 0; i < s->regs.num_sq_vtx_semantic && i < 32 && n < 380; i++) n += snprintf(line + n, sizeof line - n, " %u", s->regs.sq_vtx_semantic[i]);
     LOG("%s | block %s at %u size %u\n", line, s->uniformBlockCount ? s->uniformBlocks[0].name : "-", s->uniformBlockCount ? s->uniformBlocks[0].offset : 0, s->uniformBlockCount ? s->uniformBlocks[0].size : 0);
+    // what it hands the pixel shader, which finds its inputs by these ids: two compilers must number them alike
+    n = snprintf(line, sizeof line, "[gx2] %s vs %016llx outputs: config %08x, ids(%u)", what, (unsigned long long)key, s->regs.spi_vs_out_config, s->regs.num_spi_vs_out_id);
+    for (u32 i = 0; i < s->regs.num_spi_vs_out_id && i < 10; i++) n += snprintf(line + n, sizeof line - n, " %08x", s->regs.spi_vs_out_id[i]);
+    LOG("%s, clip %08x, %u bytes\n", line, s->regs.pa_cl_vs_out_cntl, s->size);
 }
 void prepare_vs(VsEntry &v) {
     v.shader = load_vs(v.index);
@@ -365,10 +406,13 @@ void install_compiled() {
     CompileDone d;
     while (shader_compile_take(d)) {
         if (d.vs) {
-            if (const auto it = vs_table.find(d.key); it != vs_table.end() && it->second.index != MISSED && it->second.index != COMPILED_HERE) {
+            // the cache of an earlier run compiles its vertex shaders whatever this run's switch says: they stop here
+            if (const auto it = vs_table.find(d.key); !glsl_vs || (it != vs_table.end() && it->second.index != MISSED && it->second.index != COMPILED_HERE)) {
                 shader_compile_discard(d);
                 continue;
             }
+            if (const auto shipped = vs_set_aside.find(d.key); shipped != vs_set_aside.end())  // "glslvsforce": the two side by side
+                log_vs_tables("shipped", d.key, load_vs(shipped->second));
             VsEntry &v = vs_table[d.key];
             v.shader = d.vs_shader;
             v.index = COMPILED_HERE;
@@ -453,6 +497,13 @@ struct Surface {
     u64 drawn = 0;                                     // when the GPU last wrote it (gpu_writes): of targets sharing memory, the latest holds what's there
     bool linear = false;                               // its memory holds the picture row by row, not in tiles: a display transfer's linear output (gpu_copy_transfer)
     bool shared_depth = false, clear_pending = false;  // see share_depth_block
+    // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
+    // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
+    bool in_list = false, sampled = false, was_sampled = false;
+    // for the thirty-a-second cap (frame_left_out): the screens its picture has been shown on (1 the top, 2 the bottom, 3 both), whether
+    // the game has cleared it since its last transfer, and for how many frames in a row it has
+    u8 lcds = 0, steady = 0;
+    bool cleared = false;
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
         return w * h * bpp;
@@ -462,10 +513,42 @@ struct Surface {
 };
 std::vector<std::unique_ptr<Surface>> surfaces;
 Surface *cur_color, *cur_depth;
+// A colour target in memory the game's code reads as it likes, and smaller than a screen: a picture the game may have drawn to pick up itself,
+// as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
+inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
+std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
+
+// Thirty frames a second: every other frame of a game that makes sixty is left undrawn. frame_cap.h has the rule, which frames and why;
+// here is what it is told about a screen's surface, and where its answer is used: nothing is drawn to a surface whose frame is left out
+// (gx2_skip_draw, metal_flush), its clear is dropped (gx2_memory_fill), and its transfer shows nothing (metal_defer_transfer).
+// Only a picture the game is sure to draw again is ever left out: a surface both screens are drawn in has to be drawn afresh for each
+// (New Super Mario Bros. 2), and a screen's own surface counts while the game has cleared it in each of its last eight frames, as what is
+// wiped every frame is drawn every frame.
+FrameCap cap;
+
+// at a screen's transfer: true if the frame it ends was left out
+bool frame_left_out(Surface &s, int which) {
+    s.lcds |= 1 << which;
+    const bool shared = s.lcds == 3;
+    if (which == 0 || !shared) {  // a bottom screen drawn in the top's surface goes by the top's frames
+        s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
+        s.cleared = false;
+    }
+    return cap.frame_ends(which, shared, shared || s.steady >= 8, OSTicksToMicroseconds((u64)OSGetSystemTime()));
+}
+
+// the screen's surface a draw is for, if the frame being made for that screen is left out
+Surface *left_out(u32 color_addr, u32 w, u32 h) {
+    if (!cap.marking()) return nullptr;
+    for (auto &s : surfaces)
+        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && cap.drops(s->lcds)) return s.get();
+    return nullptr;
+}
 GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
 bool state_lost = true;  // the GPU's state no longer matches what was last set
+bool state_sent_valid;   // set_state's record of what it last sent still holds (StateSent)
 
 #ifdef GX2_JUNK  // test builds: fresh host memory filled with noise, as a console's is, so that Cemu shows what starts uninitialized. 1 surfaces, 2 textures, 4 the ring
 static void *junk(void *p, u32 n, u32 bit) {
@@ -750,16 +833,17 @@ void vtx_cache_flip() {
             } else ++it;
 }
 
-// A buffer holding what fill makes of the bytes at src, as the GPU reads it: from the cache, or made now and kept
+// A buffer holding what fill makes of the bytes at src, as the GPU reads it: from the cache, or made now and kept. span: the bytes it's made from,
+// if more than the last vertex's 16 (a whole vertex array's copy)
 template <typename Fill>
-const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 kind, u32 size, Fill fill) {
+const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 kind, u32 size, Fill fill, u32 span = 0) {
     if (!use_vtx_cache) {
         void *w = ring_alloc(size + 64, 64);
         fill(w, src);
         DCFlushRange(w, size);
         return w;
     }
-    const u32 bytes = (count - 1) * src_stride + 16;  // the last vertex's attribute reads no more than 16 bytes
+    const u32 bytes = std::max((count - 1) * src_stride + 16, span);  // the last vertex's attribute reads no more than 16 bytes
     const u64 key = ((u64)addr << 32) ^ ((u64)src_stride << 20) ^ ((u64)kind << 12) ^ ((u64)count * 0x9E3779B97F4A7C15ull);
     const u32 now = (u32)st_flips;
     auto it = vtx_cache.find(key);
@@ -795,10 +879,16 @@ const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 k
     return buf;
 }
 
-Surface *find_surface(u32 addr, bool depth) {
+// A surface at addr that match accepts. Targets of different sizes can share an address (get_surface tells them apart by size), so the first
+// one there isn't always the one meant: a stale target used to stand in front of the one a texture read.
+template <class Match>
+Surface *find_surface(u32 addr, bool depth, Match match) {
     for (auto &s : surfaces)
-        if (s->addr == addr && s->depth == depth) return s.get();
+        if (s->addr == addr && s->depth == depth && match(*s)) return s.get();
     return nullptr;
+}
+Surface *find_surface(u32 addr, bool depth) {
+    return find_surface(addr, depth, [](const Surface &) { return true; });
 }
 
 void flush_surface(Surface &s) {
@@ -857,6 +947,8 @@ void apply_fill(Surface &s, const Fill &f) {
 struct Tex {
     u32 addr, w, h, fmt, levels, bytes;
     u32 hash, sample, heap_flushes;
+    u32 slice[32];      // the hash's parts (hash_guest), and the next one a whole-heap flush checks
+    u32 slice_next;
     bool maybe_dirty, dirty, hash_stale;
     // what a fill of the whole texture last left there, while nothing else has written it (gx2_memory_fill): the same fill again changes nothing
     bool filled = false, fill_pending = false;
@@ -870,7 +962,7 @@ struct Tex {
     bool changed_before;  // see replace_image
     void *spare;
     OSTime spare_used_until;
-    bool gpu;           // ETC1 or ETC1A4 decoded by the GPU into a tiled image it renders (gpu_decode): no CPU writes, no spare image
+    bool gpu;           // decoded by the GPU into a tiled image it renders (gpu_decode): no CPU writes, no spare image
     GX2ColorBuffer cb;  // that image as a render target
     GX2Texture stage;   // the bytes it decodes from, as they are in the game's memory
 };
@@ -883,10 +975,29 @@ constexpr u64 TEX_MEMORY_LIMIT = 128ull << 20;
 
 constexpr u8 k_fmt_bits[16] = {32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8, 8, 8};
 
-u32 hash_guest(const u8 *p, u32 n) {
-    u32 h = n;
+// Whether the GPU decodes a texture into a tiled image it renders (gpu_decode), instead of the CPU into a linear one: any one-level texture
+// from a size where switching targets costs less than the CPU's decode. The console's logs put the CPU's at 55 us a KB (2026-11-07), so 55 ms
+// for a 1 MB texture when it first shows, and every time for one the game keeps rewriting. "cputex" turns it off.
+inline bool gpu_decoded(u32 w, u32 h, u32 fmt, u32 levels) { return fmt < 14 && levels == 1 && w * h >= 128 * 128 && ps_decode[fmt] && !gxt_cpu_tex; }
+// staging rows to a row of 8x8 tiles: two rows of ETC1 blocks, or eight equal parts of a plain format's bytes
+inline u32 stage_rows(u32 fmt) { return fmt >= 12 ? 2 : 8; }
+
+// A texture's words in SLICES runs, each hashed by itself, and the whole's hash made of those: after a flush of the whole heap a texture can be
+// checked a run at a time (get_texture)
+constexpr u32 SLICES = 32;
+u32 hash_slice(const u8 *p, u32 n, u32 k) {
     const u32 *w = (const u32 *)p;
-    for (u32 i = 0; i < n / 4; i++) h = h * 31 + w[i];
+    const u32 words = n / 4;
+    u32 h = k;
+    for (u32 i = (u32)((u64)words * k / SLICES), end = (u32)((u64)words * (k + 1) / SLICES); i < end; i++) h = h * 31 + w[i];
+    return h;
+}
+u32 hash_guest(const u8 *p, u32 n, u32 *slices) {
+    u32 h = n;
+    for (u32 k = 0; k < SLICES; k++) {
+        slices[k] = hash_slice(p, n, k);
+        h = h * 31 + slices[k];
+    }
     return h;
 }
 
@@ -900,6 +1011,7 @@ u32 sample_guest(const u8 *p, u32 n) {
     return h;
 }
 
+u64 heap_flush_flip, heap_flush_gap;  // the frame of the last whole-heap flush, and the frames between the last two
 u32 heap_flushes;  // Most games flush what they changed. Some flush everything, after every file they read, and that says nothing about what changed.
 
 // for the frame rate report: what keeps being uploaded, and how often the GPU's work comes back to guest memory
@@ -1133,16 +1245,16 @@ bool replace_image(Tex &e) {
         memset(e.lag_rows, 0xff, sizeof e.lag_rows);  // nothing in it yet
     }
     if (e.spare_used_until && GX2GetRetiredTimeStamp() < e.spare_used_until) {
-        const OSTime t = OSGetSystemTime();
+        const OSTime t = prof_now();
         GX2WaitTimeStamp(e.spare_used_until);
-        prof[P_SYNC] += (u32)(OSGetSystemTime() - t);
+        prof_add(P_SYNC, t);
         st_syncs++;
     }
     std::swap(f.image, e.spare);
     if (f.mipmapSize) f.mipmaps = (u8 *)f.image + f.imageSize;
-    const OSTime t = OSGetSystemTime();
+    const OSTime t = prof_now();
     GX2Flush();
-    prof[P_TEXFL] += (u32)(OSGetSystemTime() - t);
+    prof_add(P_TEXFL, t);
     e.spare_used_until = GX2GetLastSubmittedTimeStamp();
     return true;
 }
@@ -1151,7 +1263,7 @@ bool replace_image(Tex &e) {
 // scrolled-in tiles into a 1 MB atlas nearly every frame, at scattered rows, and decoding all of it each time took 77 ms on the console.
 void gpu_decode(Tex &e, const u32 *rows);
 void upload_texture(Tex &e, const u32 *rows = nullptr) {
-    const OSTime t0 = OSGetSystemTime();
+    const OSTime t0 = prof_now();
     GX2Surface &f = e.t.surface;
     const u8 *src = pptr(e.addr);
     if (!src) return;
@@ -1187,23 +1299,27 @@ void upload_texture(Tex &e, const u32 *rows = nullptr) {
         st_upload_bytes += e.bytes;
     }
     st_uploads++;
-    const u32 dt = (u32)(OSGetSystemTime() - t0);
-    prof[P_TEXUP] += dt;
-    st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
+    if (kMeasure) {
+        const u32 dt = (u32)(OSGetSystemTime() - t0);
+        prof[P_TEXUP] += dt;
+        st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
+    }
 }
 
-GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
+// from: where to say which surface the texture is, when it's one
+GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **from = nullptr) {
     // render to texture: sample the surface itself. Not if it's another format: that memory has since been given to an ordinary texture.
-    if (Surface *s = find_surface(addr, false))
-        if (s->w == w && (s->h == h || s->tex_h == h) && s->fmt == fmt && !s->guest_newer) {
-            flush_surface(*s);
-            if (gxt()) LOG("[gxt] tex %08x %ux%u fmt %u from surface\n", addr, w, h, fmt);
-            return &s->tex;
-        }
+    const auto read_as_this = [&](const Surface &s) { return s.w == w && (s.h == h || s.tex_h == h) && s.fmt == fmt && !s.guest_newer; };
+    if (Surface *s = find_surface(addr, false, read_as_this)) {
+        if (from) *from = s;
+        flush_surface(*s);
+        if (gxt()) LOG("[gxt] tex %08x %ux%u fmt %u from surface\n", addr, w, h, fmt);
+        return &s->tex;
+    }
     const u64 tkey = tex_key(addr, w, h, fmt, levels);
     if (auto hit = tex_index.find(tkey); hit != tex_index.end()) {
         Tex &e = *hit->second;
-        if (stale_check && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale && hash_guest(pptr(addr), e.bytes) != e.hash) {
+        if (stale_check && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
             static u32 logged;
             if (logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
             e.maybe_dirty = true;
@@ -1211,22 +1327,34 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
         e.last_use = use_counter;
         if (e.heap_flushes != heap_flushes) {
             e.heap_flushes = heap_flushes;
-            const OSTime th = OSGetSystemTime();
-            if (sample_guest(pptr(addr), e.bytes) != e.sample) e.maybe_dirty = true;
-            prof[P_HASH] += (u32)(OSGetSystemTime() - th);
+            const OSTime th = prof_now();
+            if (sample_guest(pptr(addr), e.bytes) != e.sample) {
+                e.maybe_dirty = true;
+            } else if (!e.hash_stale) {
+                // The sample reads one word in 32 or fewer, so a few changed tiles can leave it as it was. Every byte gets checked too: all of
+                // them when such flushes are rare (after a file is read), and a run of them per flush when a game flushes every frame, which
+                // finds any change within SLICES flushes at a 32nd of a full hash's cost (4 ms a MB on a console).
+                if (heap_flush_gap > SLICES) {
+                    if (hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) e.maybe_dirty = true;
+                } else {
+                    const u32 k = e.slice_next++ % SLICES;
+                    if (hash_slice(pptr(addr), e.bytes, k) != e.slice[k]) e.maybe_dirty = true;
+                }
+            }
+            prof_add(P_HASH, th);
         }
         if (e.dirty || e.maybe_dirty) {
             st_rehashes++;
-            const OSTime th = OSGetSystemTime();
+            const OSTime th = prof_now();
             const u32 sample = sample_guest(pptr(addr), e.bytes);
             // A full hash of a 1 MB texture takes about 4 ms on a console, which is wasted if a definite write or a different sample already says it changed
             const bool changed = e.dirty || sample != e.sample;
             // Hashed unless a definite write said so: an upload on a changed sample alone used to leave the hash unknown too, and the next
             // write whose sample happened to match (two characters' textures, transparent at the sampled points) was taken for no change.
             // Dream Team drew Goombas with Luigi's head that way (2026-11-08).
-            const u32 hh = e.dirty ? 0 : hash_guest(pptr(addr), e.bytes);
+            const u32 hh = e.dirty ? 0 : hash_guest(pptr(addr), e.bytes, e.slice);
             e.sample = sample;
-            prof[P_HASH] += (u32)(OSGetSystemTime() - th);
+            prof_add(P_HASH, th);
             // A stale hash (the last upload took a definite write's word for it) with the same sample: the image is current, only the hash is
             // unknown, so it's taken now. Uploading instead redid NSMB2's whole 1 MB atlas after nearly every partial update.
             if (changed || (!e.hash_stale && hh != e.hash)) {
@@ -1270,8 +1398,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
     e.last_use = use_counter;
     memset(&e.t, 0, sizeof e.t);
     GX2Surface &f = e.t.surface;
-    // ETC1 and ETC1A4 from a size where switching targets costs less than the CPU's decode: the GPU decodes into a tiled image it renders (gpu_decode)
-    e.gpu = fmt >= 12 && levels == 1 && w * h >= 128 * 128 && ps_etc1 && !gxt_cpu_tex;
+    e.gpu = gpu_decoded(w, h, fmt, levels);
     f.dim = GX2_SURFACE_DIM_TEXTURE_2D;
     f.width = w;
     f.height = h;
@@ -1297,12 +1424,12 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
         e.cb.surface = f;
         e.cb.viewNumSlices = 1;
         GX2InitColorBufferRegs(&e.cb);
-        // two staging rows to a row of tiles: 2 texels a block for ETC1, 4 for ETC1A4
+        // the texture's bytes, four to a staging texel: 2 texels a block for ETC1, 4 for ETC1A4
         memset(&e.stage, 0, sizeof e.stage);
         GX2Surface &s = e.stage.surface;
         s.dim = GX2_SURFACE_DIM_TEXTURE_2D;
-        s.width = w / 4 * (fmt == 13 ? 4 : 2);
-        s.height = h / 4;
+        s.width = fmt >= 12 ? w / 4 * (fmt == 13 ? 4 : 2) : w * k_fmt_bits[fmt] / 32;
+        s.height = h / 8 * stage_rows(fmt);
         s.depth = 1;
         s.mipLevels = 1;
         s.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
@@ -1315,7 +1442,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
         GX2InitTextureRegs(&e.stage);
     }
     tex_memory += e.mem;
-    e.hash = hash_guest(src, total);
+    e.hash = hash_guest(src, total, e.slice);
     e.sample = sample_guest(src, total);
     e.heap_flushes = heap_flushes;
     upload_texture(e);
@@ -1504,6 +1631,7 @@ void bind_targets(const RTConfig &rt) {
         cur_color = c;
         GX2SetViewport(0, 0, (float)c->sw, (float)c->sh, 0, 1);
         GX2SetScissor(0, 0, c->sw, c->sh);
+        state_sent_valid = false;  // those two aren't the draw's, even if this target is the one its state was last sent for
     }
     if (d != cur_depth) {
         if (cur_depth) flush_surface(*cur_depth);
@@ -1535,8 +1663,7 @@ void take_depth_block(const RTConfig &rt) {
     bind_targets(rt);
 }
 
-void set_state(const DrawState &ds) {
-    Surface &c = *cur_color;
+void send_state(const DrawState &ds, Surface &c, bool has_depth, bool stencil) {
     const float Sx = c.sx, Sy = c.sy;
     // At 4.5 times the 3DS's size every other 3DS pixel edge lands on the centre of a TV pixel, where two quads meeting at that edge can both leave the pixel to the other: the
     // console drew Dream Team's text boxes with a thin line where their pieces meet, and Cemu's GPU never did. A quarter of a pixel moves every edge off the centres.
@@ -1588,16 +1715,69 @@ void set_state(const DrawState &ds) {
     // depth and stencil
     static const GX2CompareFunction k_cmp[8] = {GX2_COMPARE_FUNC_NEVER, GX2_COMPARE_FUNC_ALWAYS, GX2_COMPARE_FUNC_EQUAL, GX2_COMPARE_FUNC_NOT_EQUAL,
                                                 GX2_COMPARE_FUNC_LESS, GX2_COMPARE_FUNC_LEQUAL, GX2_COMPARE_FUNC_GREATER, GX2_COMPARE_FUNC_GEQUAL};
-    const bool has_depth = cur_depth != nullptr;
-    const bool stencil = ds.stencil && has_depth;
     // The PICA writes depth with its test off, and games clear depth that way. On GX2 no test means no writes, so the test stays on and always passes.
     GX2SetDepthStencilControl(has_depth && (ds.depth_test || ds.depth_write), has_depth && ds.depth_write, ds.depth_test ? k_cmp[ds.depth_func & 7] : GX2_COMPARE_FUNC_ALWAYS, stencil, stencil,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail);
     if (stencil) GX2SetStencilMask(ds.st_mask_in, ds.st_mask_w, ds.st_ref, ds.st_mask_in, ds.st_mask_w, ds.st_ref);
+}
+
+// Everything send_state gives the GPU comes from these. A draw whose values are the last draw's sends nothing: a batch of sprites or tiles
+// repeats them draw after draw, and each of the eight or so calls costs on a console whether or not it changes anything. The record is
+// dropped wherever something else sets render state (state_lost, a change of target) or leaves some of it changed behind a draw (an
+// outline's polygon offset).
+struct StateSent {
+    const Surface *c, *d;
+    float sx, sy, vp[4];
+    u32 row0, sw, sh, w, h;
+    s32 sc[4];
+    u32 color_mask, blend_color, st[3];
+    u8 scissor_mode, cull, color_write, blend, logic_op, f[6], depth_test, depth_write, depth_func, stencil, st_ops[4];
+};
+StateSent state_sent;
+
+void set_state(const DrawState &ds) {
+    Surface &c = *cur_color;
+    const bool has_depth = cur_depth != nullptr;
+    const bool stencil = ds.stencil && has_depth;
+    StateSent now;
+    memset(&now, 0, sizeof now);  // the padding too: the two are compared as bytes
+    now.c = &c;
+    now.d = cur_depth;
+    now.sx = c.sx, now.sy = c.sy;
+    now.vp[0] = ds.vp_x, now.vp[1] = ds.vp_y, now.vp[2] = ds.vp_hw, now.vp[3] = ds.vp_hh;
+    now.row0 = c.row0, now.sw = c.sw, now.sh = c.sh, now.w = c.w, now.h = c.h;
+    now.scissor_mode = (u8)ds.scissor_mode;
+    if (ds.scissor_mode == 3) now.sc[0] = ds.sc_x1, now.sc[1] = ds.sc_y1, now.sc[2] = ds.sc_x2, now.sc[3] = ds.sc_y2;
+    now.cull = (u8)ds.cull;
+    now.color_mask = ds.color_mask;
+    now.color_write = ds.color_write;
+    now.blend = ds.blend;
+    now.logic_op = (u8)ds.logic_op;
+    if (ds.blend) {
+        now.f[0] = (u8)ds.sf_rgb, now.f[1] = (u8)ds.df_rgb, now.f[2] = (u8)ds.eq_rgb, now.f[3] = (u8)ds.sf_a, now.f[4] = (u8)ds.df_a, now.f[5] = (u8)ds.eq_a;
+        now.blend_color = ds.blend_color;
+    }
+    now.depth_test = ds.depth_test, now.depth_write = ds.depth_write, now.depth_func = (u8)ds.depth_func;
+    now.stencil = stencil;
+    if (stencil) {
+        now.st_ops[0] = (u8)ds.st_func, now.st_ops[1] = (u8)ds.st_zpass, now.st_ops[2] = (u8)ds.st_zfail, now.st_ops[3] = (u8)ds.st_fail;
+        now.st[0] = ds.st_mask_in, now.st[1] = ds.st_mask_w, now.st[2] = ds.st_ref;
+    }
+    if (!state_sent_valid || memcmp(&now, &state_sent, sizeof now)) {
+        state_sent = now;
+        state_sent_valid = true;
+        send_state(ds, c, has_depth, stencil);
+    }
     if (ds.color_write) {
         c.written_since_flush = c.gpu_newer = true;
         c.drawn = ++gpu_writes;
+        if (cpu_reads(c) && !c.in_list) {
+            c.in_list = true;
+            c.was_sampled = c.sampled;
+            c.sampled = false;
+            read_targets.push_back(&c);
+        }
     }
     if (has_depth && (ds.depth_write || (stencil && ds.st_mask_w))) cur_depth->written_since_flush = cur_depth->gpu_newer = true;
 }
@@ -1805,7 +1985,9 @@ void set_fragment(const DrawState &ds, bool uber) {
             }
             continue;
         }
-        GX2Texture *tex = get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels);
+        Surface *drawn = nullptr;  // a picture the game drew, sampled where it lies
+        GX2Texture *tex = get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels, &drawn);
+        if (drawn && !cpu_reads(*cur_color)) drawn->sampled = true;
         if (!tex) tex = &black_tex;
         GX2SetPixelTexture(tex, k);
         GX2SetPixelSampler(get_sampler(t, tex->surface.mipLevels), k);
@@ -1872,12 +2054,17 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
     GX2SetVertexUniformBlock(vs_ubo_loc, VS_BLOCK_WORDS * 4, last);
 }
 
+// whether the GPU fetches an attribute from its array's copy (vertex_arrays.h), or the CPU makes floats of it the old way
+inline bool gpu_fetched(const Gx2Attr &at) { return !(gxt_cpu_attr >> at.fmt & 1) && fetchable(at); }
+
 GX2AttribFormat attr_format(u32 fmt, u32 elems) {
-    // 3 x 8 or 16 bits don't exist: fetch 4, and the mask supplies w
+    // 3 x 8 or 16 bits don't exist: fetch 4, and the mask supplies w. 16-bit integers are fetched as four however many there are, the mask
+    // dropping the rest: the console's GPU fetches one or two as well, but Cemu has no decoder for those, leaves the attribute out without a
+    // word on the game's side, and its pictures then show what no console draws (see check_ports.py's look at Cemu's own log).
     static const u32 base[4][4] = {
         {GX2_ATTRIB_TYPE_8, GX2_ATTRIB_TYPE_8_8, GX2_ATTRIB_TYPE_8_8_8_8, GX2_ATTRIB_TYPE_8_8_8_8},
         {GX2_ATTRIB_TYPE_8, GX2_ATTRIB_TYPE_8_8, GX2_ATTRIB_TYPE_8_8_8_8, GX2_ATTRIB_TYPE_8_8_8_8},
-        {GX2_ATTRIB_TYPE_16, GX2_ATTRIB_TYPE_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16},
+        {GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16, GX2_ATTRIB_TYPE_16_16_16_16},
         {GX2_ATTRIB_FORMAT_FLOAT_32, GX2_ATTRIB_FORMAT_FLOAT_32_32, GX2_ATTRIB_FORMAT_FLOAT_32_32_32, GX2_ATTRIB_FORMAT_FLOAT_32_32_32_32}};
     u32 f = base[fmt & 3][(elems - 1) & 3];
     if (fmt != 3) f |= GX2_ATTRIB_FLAG_SCALED;
@@ -1888,10 +2075,10 @@ GX2AttribFormat attr_format(u32 fmt, u32 elems) {
 // A texture the GPU decodes takes a draw of its own, with its own target and state: these have to go before anything of the draw that uses them is
 // set. set_fragment's look at the same textures then finds them current.
 void decode_textures_first(const DrawState &ds) {
-    if (!ps_etc1 || !ds.need_shade) return;
+    if (!ds.need_shade) return;
     for (u32 k = 0; k < 3; k++) {
         const TexUnitState &t = ds.tex[k];
-        if (!ds.need_tex[k] || t.null_tex || t.fmt < 12) continue;
+        if (!ds.need_tex[k] || t.null_tex || !gpu_decoded(t.w, t.h, t.fmt, t.levels)) continue;
         get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels);
         if (k == 0 && (t.type == 1 || t.type == 4))
             for (u32 f = 1; f < 6; f++) get_texture(t.face_addr[f], t.w, t.h, t.fmt, t.levels);
@@ -1902,6 +2089,7 @@ void begin_draw_common(const DrawState &ds, GX2PixelShader *ps) {
     if (state_lost) {
         GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
         state_lost = false;
+        state_sent_valid = false;
     }
     set_state(ds);
     GX2SetPixelShader(ps);
@@ -1980,7 +2168,7 @@ bool gx2_draw(const Gx2Draw &d) {
     const DrawState &ds = *d.ds;
     if (ds.skip || ds.shadow_mode || ds.gas || !ds.rt.color_addr || !pptr(ds.rt.color_addr) || (ds.rt.color_fmt & 0x80)) return true;
     if (gxt_cpu_vs) return false;  // debug aid: tells a wrong vertex shader from anything else
-    prof_t = OSGetSystemTime();
+    lap_start();
     // usually the same vertex program as the last draw
     static struct {
         const ShaderProgram *prog;
@@ -2017,8 +2205,16 @@ bool gx2_draw(const Gx2Draw &d) {
         miss_put(g.vs.i, 16);
         miss_put(d.slot_src, 24);
         LOG("[gx2] no compiled vertex shader %016llx, entry %u\n", (unsigned long long)key, d.entry);
-        // this draw and the next ones go the CPU way. Not compiled on the console: CafeGLSL 1.0.0-rc1 (the console's library) made vertex shaders that drew
-        // Tomodachi's Food Mart wrong in Cemu, while its pixel shaders were right (wiiu-3ds-windows-tools); the build's DVLB harvest covers vertex programs anyway
+        // The console compiles the shader itself, as it does pixel shaders (install_compiled puts it in the table), and this draw and the
+        // next ones go the CPU way meanwhile. A build's dump scan misses programs a game keeps outside shader binaries: 63 of
+        // the 64 vertex shaders runs met and builds lacked (2026-11-10).
+        if (glsl_vs && shader_compile_on()) {
+            u32 bools = 0, inputs = 0;
+            for (u32 i = 0; i < 16; i++)
+                if (g.vs.b[i]) bools |= 1u << i;
+            std::string glsl = gen_vs_glsl(d.prog, d.entry, bools, g.vs.i, d.slot_src, &inputs);
+            if (!glsl.empty()) shader_compile_request(true, key, std::move(glsl), inputs);
+        }
         return false;
     }
     VsEntry &vs = it->second;
@@ -2053,6 +2249,7 @@ bool gx2_draw(const Gx2Draw &d) {
         const float away = (ds.depth_func & 7) >= 6 ? -1.0f : 1.0f;
         GX2SetPolygonOffset(64.0f * away, 12.0f * away, 64.0f * away, 12.0f * away, 0.0f);
         GX2SetPolygonControl(GX2_FRONT_FACE_CW, FALSE, FALSE, FALSE, GX2_POLYGON_MODE_TRIANGLE, GX2_POLYGON_MODE_TRIANGLE, TRUE, TRUE, FALSE);
+        state_sent_valid = false;  // the next draw's cull write has to go, to turn this off
         constexpr u32 size = (VS_BLOCK_WORDS + 8) * 4;
         u32 *u = (u32 *)ring_alloc((size + 255) & ~255u, 256);
         const u32 *src = (const u32 *)g.vs.f;
@@ -2107,6 +2304,20 @@ bool gx2_draw(const Gx2Draw &d) {
     FetchKey fk;
     fk.count = 0;
     u32 buf = 0;
+    // The vertex arrays this draw reads, each copied once as it lies in the game's memory (one memcpy for all the attributes interleaved in it),
+    // and the GPU fetches every attribute from the copy in its own format: floats, and 8- and 16-bit integers it turns into floats itself.
+    // Each attribute used to get a copy of its own, and integers a float per component from the CPU: 1 to 5 ms a frame on the GPU thread in
+    // busy scenes, the largest named cost in the user's console logs (2026-11-10). "cpuattr" brings that back.
+    VertexArray arrays[16];
+    u32 n_arrays = 0;
+    u8 reg_array[16] = {};  // the array each input register's attribute went into
+    for (u32 r = 0; r < 16; r++) {
+        if (!(vs.inputs & (1u << r)) || vs.location[r] < 0 || reg_attr[r] < 0) continue;
+        const Gx2Attr &at = d.attr[reg_attr[r]];
+        if (!at.is_default && at.elems && at.stride && gpu_fetched(at)) reg_array[r] = (u8)join_vertex_array(arrays, n_arrays, at);
+    }
+    s32 array_buf[16];  // the attribute buffer each array's copy is bound as, once an attribute has asked for it
+    std::fill(array_buf, array_buf + 16, -1);
     for (u32 r = 0; r < 16; r++) {
         if (!(vs.inputs & (1u << r)) || vs.location[r] < 0) continue;
         const s32 a = reg_attr[r];
@@ -2121,6 +2332,42 @@ bool gx2_draw(const Gx2Draw &d) {
             GX2SetAttribBuffer(buf, 16, 16, c);
             fk.s[fk.count++] = float4_stream(vs.location[r], buf, 0, true);
             buf++;
+            continue;
+        }
+        if (gpu_fetched(*at)) {
+            const VertexArray &x = arrays[reg_array[r]];
+            s32 &bound = array_buf[reg_array[r]];
+            if (bound < 0) {
+                const u8 *src = pptr(d.base + x.lo);
+                if (!src) return true;
+                // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later.
+                // The copy is kept (vtx_cached) until the game says it wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices,
+                // and copying each draw's arrays again took 20 to 50 MB a frame.
+                const u32 count = maxv - minv + 1, bytes = vertex_array_bytes(x, count);
+                st_attr_verts += count;
+                st_attr_bytes += bytes;
+                st_attr_streams++;
+                const u8 *copy = (const u8 *)vtx_cached(d.base + x.lo + x.stride * minv, src + x.stride * minv, x.stride, count, 0x80, bytes,
+                                                        [&](void *out, const u8 *from) { memcpy(out, from, bytes); }, bytes);
+                bound = (s32)buf++;
+                // addressed as if it held vertex 0 too, as the indices count from there
+                GX2SetAttribBuffer((u32)bound, (maxv + 1) * x.stride + 64, x.stride, copy - minv * x.stride);
+            }
+            GX2AttribStream s{};
+            s.location = vs.location[r];
+            s.buffer = (u32)bound;
+            const u32 lane = at->fmt < 2 ? at->offset & 3 : 0;  // bytes: the word they're in is fetched, and they start at this byte of it
+            s.offset = at->offset - lane - x.lo;
+            // Cemu can't fetch one little-endian float: its sprites all got corner 0. Two do the same here, and the mask drops the second.
+            s.format = at->fmt == 3 && at->elems == 1 ? GX2_ATTRIB_FORMAT_FLOAT_32_32 : attr_format(at->fmt, at->fmt < 2 ? 4 : at->elems);
+            s.type = GX2_ATTRIB_INDEX_PER_VERTEX;
+            s.aluDivisor = 0;
+            // component k of the attribute is component lane + k of what's fetched (GX2_SQ_SEL_X to _W are 0 to 3); the rest are 0, 0, 1
+            u32 sel[4] = {GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_0, GX2_SQ_SEL_1};
+            for (u32 k = 0; k < at->elems; k++) sel[k] = GX2_SQ_SEL_X + lane + k;
+            s.mask = GX2_SEL_MASK(sel[0], sel[1], sel[2], sel[3]);
+            s.endianSwap = GX2_ENDIAN_SWAP_NONE;  // guest memory is little-endian, as the GPU wants
+            fk.s[fk.count++] = s;
             continue;
         }
         const u32 addr = d.base + at->offset;
@@ -2240,7 +2487,11 @@ void gx2_flush_cpu_batch() {
 }
 
 void metal_flush(const RTConfig &rt, const MBatch &mb) {
-    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80)) return;
+    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80) || left_out(rt.color_addr, rt.w, rt.h)) return;
+    // Textures first: a decode takes ring memory of its own, megabytes for a large one, and the batch's vertices mustn't already be lying in a
+    // segment that the decodes go on to leave behind
+    for (const MSeg &seg : mb.segs)
+        if (!seg.ds->skip && !seg.ds->shadow_mode && !seg.ds->gas) decode_textures_first(*seg.ds);
     const u32 bytes = (u32)mb.cverts.size() * sizeof(OutVertex);
     auto *v = (u32 *)ring_alloc(bytes + 64, 64);
     memcpy(v, mb.cverts.data(), bytes);
@@ -2256,8 +2507,6 @@ void metal_flush(const RTConfig &rt, const MBatch &mb) {
         for (u32 i = 0; i < 7; i++) k.s[k.count++] = float4_stream(i, 0, offs[i], false);
         fetch = get_fetch(k);
     }
-    for (const MSeg &seg : mb.segs)
-        if (!seg.ds->skip && !seg.ds->shadow_mode && !seg.ds->gas) decode_textures_first(*seg.ds);
     bind_targets(rt);
     for (const MSeg &seg : mb.segs)
         if (cur_depth && (seg.ds->depth_test || seg.ds->depth_write || seg.ds->stencil)) {
@@ -2270,7 +2519,7 @@ void metal_flush(const RTConfig &rt, const MBatch &mb) {
     for (const MSeg &seg : mb.segs) {
         const DrawState &ds = *seg.ds;
         if (ds.skip || ds.shadow_mode || ds.gas) continue;
-        prof_t = OSGetSystemTime();
+        lap_start();
         begin_draw_common(ds, find_ps(ds));
         static const V4 k_none[96] = {};
         set_vertex_uniforms(ds, k_none);
@@ -2322,6 +2571,8 @@ void metal_guest_written(u32 paddr, u32 size, bool definite) {
     vtx_invalidate(paddr, size);
     if (!definite && size >= 1 << 20) {
         heap_flushes++;
+        heap_flush_gap = st_flips - heap_flush_flip;
+        heap_flush_flip = st_flips;
         return;
     }
     mark_textures(paddr, size, definite);
@@ -2334,7 +2585,6 @@ void metal_guest_written(u32 paddr, u32 size, bool definite) {
 namespace {
 void write_back(Surface &s) {
     if (s.depth || !s.gpu_newer) return;
-    s.gpu_newer = false;
     st_readbacks++;
     static u32 notes;
     static u32 told;
@@ -2351,11 +2601,16 @@ void write_back(Surface &s) {
     st.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
     st.aa = GX2_AA_MODE1X;
     st.use = GX2_SURFACE_USE_TEXTURE;
-    st.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    // A console's copy is in memory when GX2DrawDone returns. Cemu hands a copy's pixels over some draws later (its LatteSurfaceCopy.cpp), which
+    // read here as whatever the memory held: a Mii's face came back blank. A copy to this tile mode it finishes at once, though not in the
+    // queue's turn, so the queue is emptied first.
+    st.tileMode = in_cemu ? GX2_TILE_MODE_LINEAR_SPECIAL : GX2_TILE_MODE_LINEAR_ALIGNED;
     GX2CalcSurfaceSizeAndAlignment(&st);
     st.image = memalign(st.alignment, st.imageSize);
-    if (!st.image) return;
+    if (!st.image) return;  // still newer on the GPU: the next read back tries again
+    s.gpu_newer = false;
     DCInvalidateRange(st.image, st.imageSize);
+    if (in_cemu) draw_done();
     GX2CopySurface(&s.cb.surface, 0, 0, &st, 0, 0);
     restore_context();
     draw_done();
@@ -2423,7 +2678,13 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
         else gx2_skip_pass = gx2_skip_copies = true;
     }
-    if (gx2_skip_pass) return true;
+    bool left = false;  // the clear of a screen's frame that isn't drawn; a clear also says the game draws that screen afresh (frame_left_out)
+    for (auto &s : surfaces)
+        if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
+            s->cleared = true;
+            left |= cap.drops(s->lcds);
+        }
+    if (gx2_skip_pass || left) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
     // A target that lies wholly inside the fill is filled too, as its memory would be: Luigi's Mansion: Dark Moon keeps its top screen's target, its bottom
@@ -2513,22 +2774,22 @@ void begin_blit() {
                              (GX2ChannelMask)0, (GX2ChannelMask)0);
 }
 
-// An ETC1 or ETC1A4 texture that changed: the tile rows that did (rows, or all of them), as their bytes are in the game's memory, to the ring, and a
-// draw of gen_etc1_fs over those rows of the texture's own image, in order with the draws that read it. The CPU decoder took 55 ms for NSMB2's 1 MB
+// A texture that changed: the tile rows that did (rows, or all of them), as their bytes are in the game's memory, to the ring, and a draw of
+// its format's decoder (gen_etc1_fs, gen_untile_fs) over those rows of the texture's own image, in order with the draws that read it. The CPU decoder took 55 ms for NSMB2's 1 MB
 // atlas, which the game rewrites every few frames in some areas, at a quarter of the frame rate. It sets a target and state of its own, so a draw
 // has to get here before it sets up anything: decode_textures_first.
 u64 st_gpu_decodes;
 void gpu_decode(Tex &e, const u32 *rows) {
     GX2Surface &s = e.stage.surface;
     const u8 *src = pptr(e.addr);
-    const u32 th = e.h / 8, row_bytes = s.width * 4, stride = s.pitch * 4;
+    const u32 th = e.h / 8, row_bytes = s.width * 4, stride = s.pitch * 4, per_tile = stage_rows(e.fmt);
     if (cur_color) flush_surface(*cur_color);
     GX2SetColorBuffer(&e.cb, GX2_RENDER_TARGET_0);
     cur_color = nullptr;
     begin_blit();
-    GX2SetPixelShader(e.fmt == 13 ? ps_etc1a4 : ps_etc1);
+    GX2SetPixelShader(ps_decode[e.fmt]);
     auto *u = (u32 *)ring_alloc(256, 256);  // the texture's size, in the blit block's tint: the shader may not ask the texture
-    const float dims[8] = {(float)e.w, (float)e.h, 0, 0, 0, 0, 0, 0};
+    const float dims[8] = {(float)e.w, (float)e.h, 1.0f / s.width, (float)s.width, 0, 0, 0, 0};
     for (u32 i = 0; i < 8; i++) u[i] = swap_float(dims[i]);
     GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_UNIFORM_BLOCK), u, 32);
     GX2SetPixelUniformBlock(0, 32, u);
@@ -2547,12 +2808,12 @@ void gpu_decode(Tex &e, const u32 *rows) {
         }
         u32 ty1 = ty0 + 1;
         while (ty1 < th && (!rows || (rows[ty1 >> 5] >> (ty1 & 31) & 1))) ty1++;
-        const u32 stage_rows = (ty1 - ty0) * 2, bytes = stage_rows * stride;
+        const u32 n_rows = (ty1 - ty0) * per_tile, bytes = n_rows * stride;
         u8 *buf = (u8 *)ring_alloc(bytes, 256);
-        for (u32 r = 0; r < stage_rows; r++) memcpy(buf + r * stride, src + (ty0 * 2 + r) * row_bytes, row_bytes);
+        for (u32 r = 0; r < n_rows; r++) memcpy(buf + r * stride, src + (ty0 * per_tile + r) * row_bytes, row_bytes);
         DCFlushRange(buf, bytes);
         GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, buf, bytes);
-        s.image = buf - ty0 * 2 * stride;  // where its first row would be: the shader reads these rows by their place in the whole texture
+        s.image = buf - ty0 * per_tile * stride;  // where its first row would be: the shader reads these rows by their place in the whole texture
         GX2SetPixelTexture(&e.stage, 0);
         // memory rows top down land bottom up
         GX2SetScissor(0, e.h - ty1 * 8, e.w, (ty1 - ty0) * 8);
@@ -2663,7 +2924,7 @@ void dyn_res_update() {
 }
 
 void present() {
-    const OSTime tp = OSGetSystemTime();
+    const OSTime tp = prof_now();
     if (dump_enabled && st_flips % 120 == 0) {
         dump_surface(tv_cb->surface, (wiiu::data_dir() + "/tv.ppm").c_str(), 2);
         dump_surface(drc_cb->surface, (wiiu::data_dir() + "/drc.ppm").c_str(), 1);
@@ -2708,11 +2969,12 @@ void present() {
     ring_next_segment();
     dyn_res_update();
     vtx_cache_flip();
-    prof[P_PRESENT] += (u32)(OSGetSystemTime() - tp);
+    prof_add(P_PRESENT, tp);
 }
 
 bool screen_fresh;
 bool top_shown;  // a display transfer brought the top screen since the last VBlank
+PresentRule present_rule;  // when a finished frame is shown (present_rule.h, gfx_pump)
 
 void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_hi = 1, float u_hi = 1) {
     if (which == 0) top_shown = true;
@@ -2736,6 +2998,7 @@ void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_
     GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
     state_lost = true;
     screen_fresh = true;
+    present_rule.drew(which);
 }
 
 // ---- the options menu: drawn over the bottom screen on the GamePad, with a small built-in font
@@ -2823,11 +3086,11 @@ void draw_text(u32 w, u32 h, const char *text, float x, float y, float scale) {
 void metal_display_transfer(u32, u32, u32, u32, u32) {}
 
 // a display transfer from a render target to a framebuffer is a frame finished: no need for the pixels in guest memory
-// the last frame sent to each screen, in case the game reads it back (for a photo, say)
+// the last frame sent to each screen, and the last to a buffer no screen shows, in case the game reads it back (for a photo, say)
 struct LastTransfer {
     Surface *src = nullptr;
     u32 in_paddr = 0, out_paddr = 0, in_dims = 0, out_dims = 0, flags = 0, out_size = 0;
-} last_transfer[2];
+} last_transfer[3];
 
 // A transfer between two surfaces the game draws at screen size stays on the GPU, at their higher resolution. Paper Mario draws its 3D at
 // double width, scales it down into a buffer, and copies that into the target it draws the 2D on. Through guest memory that would be a
@@ -2978,8 +3241,8 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
 // (gpu_copy_transfer). Metroid draws its final picture from these copies, so at 1:1 the whole screen came out at the 3DS's resolution.
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap) {
     if (linear_copy_on_gpu(in_paddr, out_paddr, size, in_width_gap, out_width_gap)) return true;
-    Surface *src = find_surface(in_paddr, false);
-    if (!src || !src->gpu_newer || src->guest_newer || src->sy <= 1 || size != src->bytes()) return false;
+    Surface *src = find_surface(in_paddr, false, [&](const Surface &t) { return t.gpu_newer && !t.guest_newer && t.sy > 1 && size == t.bytes(); });
+    if (!src) return false;
     const u32 bpp = src->bytes() / (src->w * src->h), tile_row = src->w * 8 * bpp;
     const u32 in_w = (in_width_gap & 0xffff) * 16, in_gap = (in_width_gap >> 16) * 16;
     const u32 out_w = (out_width_gap & 0xffff) * 16, out_gap = (out_width_gap >> 16) * 16;
@@ -2988,8 +3251,6 @@ bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u
     u32 h = src->h;
     while (h & (h - 1)) h += h & -h;
     if ((w & (w - 1)) || w > 1024 || h > 1024) return false;
-    // another target at that address would be the one get_texture finds, and turn this one down
-    if (Surface *o = find_surface(out_paddr, false); o && (o->w != w || o->h != h)) return false;
     Surface *dst = get_surface(out_paddr, w, h, src->fmt, false, src);
     if (dst == src) return false;
     take_dyn_level(*dst);
@@ -3104,6 +3365,10 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
 }
 
 bool gx2_skip_pass, gx2_skip_copies;
+bool gx2_skip_draw() {
+    const u32 dim = g.regs[R::FB_DIM];
+    return gx2_skip_pass || left_out((g.regs[R::COLOR_ADDR] & 0x0fffffff) * 8, dim & 0x7ff, ((dim >> 12) & 0x3ff) + 1);
+}
 
 // New Super Mario Bros. 2 draws a right eye every frame though the slider says 3D is off, and the Wii U couldn't show it: half its draws.
 // Once a right eye is seen right after a left one, the pass between those transfers isn't drawn. If something else turns up there, it stops.
@@ -3157,6 +3422,19 @@ struct HiddenRightEye {
     }
 };
 static HiddenRightEye hidden_right_eye;
+
+// whether a destination no LCD has shown has come before, when its screen's count of pictures stood elsewhere
+static bool passed_over(u32 pa, u32 count) {
+    struct Spare {
+        u32 pa, count;
+    };
+    static Spare spares[4];
+    static u32 next;
+    for (const Spare &x : spares)
+        if (x.pa == pa) return x.count != count;
+    spares[next++ % 4] = {pa, count};
+    return false;
+}
 
 bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags, u32 out_size) {
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w = out_dims & 0xffff, out_h = out_dims >> 16;
@@ -3225,8 +3503,16 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     // memory rows run top down, surface rows bottom up; a surface read as a taller texture has its window at the top of that texture
     const float h = (float)s->tex_h;
     const int which = shown_h == 400 ? 0 : 1;
-    show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
-    last_transfer[which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
+    // A picture for a buffer no LCD has shown is taken for the screen of its height, as a game fills a buffer before its LCD first shows it. One that
+    // comes again after that screen has had a picture in a buffer it does show is no screen's. Miitopia sends its cleared target to a spare buffer
+    // after each top screen, and the TV stayed black from start to finish (2026-11-11). It's kept in case the game reads it back (the Laytons do).
+    static u32 shown[2];  // pictures sent to each screen's own buffers
+    const bool spare = known_screen < 0 && passed_over(out_paddr, shown[which]);
+    if (known_screen >= 0) shown[which]++;
+    // a buffer its LCD has shown ends a frame of that screen's, which may be one that was left out
+    const bool out = known_screen >= 0 && frame_left_out(*s, which);
+    if (!spare && !out) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
+    last_transfer[spare ? 2 : which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
     return true;
 }
 
@@ -3250,7 +3536,21 @@ void gx2_cpu_will_read(u32 paddr, u32 size) {
 // part, objects drawn over what's in front of them. Cemu takes commands as they're issued, so it never shows there. A 3DS's GPU has finished by then too.
 // Waiting for the GPU at each list would mean the CPU and GPU never work at the same time, which on a console costs a quarter or more of each frame. So gx2_draw copies
 // what the GPU reads, in every game, and the only wait is ring_next_segment's, which stops the CPU getting more than a couple of frames ahead.
-void gx2_finish_list() { GX2Flush(); }
+//
+// The game also takes it to mean that what the list drew is in memory. A picture it drew to pick up with its own code is put there first: Miitopia
+// draws a Mii's eyes and mouth into a scratch buffer, shrinks that twice, and copies the three sizes into the face's texture itself, which found
+// only what the memory held before, and the face was bare (2026-11-11). Not a target whose last picture the scene sampled where it lay: that is a
+// texture the game draws to (Tomodachi Life's faces), and reading it back each time would only hold the GPU up.
+void gx2_finish_list() {
+    for (Surface *s : read_targets) {
+        s->in_list = false;
+        if (s->was_sampled) continue;
+        write_back(*s);
+        mark_textures(s->addr, s->bytes(), true);  // other textures in that memory are whatever it holds now
+    }
+    read_targets.clear();
+    GX2Flush();
+}
 
 bool get_display_image_for(u32, u32, u32, const u32 **, int *, int *) { return false; }
 
@@ -3363,9 +3663,24 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("dump")) dump_enabled = true;
     if (wiiu::debug_flag("cpuvs")) gxt_cpu_vs = true;
     if (wiiu::debug_flag("cputex")) gxt_cpu_tex = true;
+    if (wiiu::debug_flag("cpuattr")) gxt_cpu_attr = 0xf;
+    if (wiiu::debug_flag("cpuattr8")) gxt_cpu_attr |= 3;
+    if (wiiu::debug_flag("cpuattr16")) gxt_cpu_attr |= 4;
+    // check_ports.py's runs say they're in Cemu, which has no decoder for signed bytes made into floats and leaves such an attribute out
+    // (NSMB2's world map lost its ground, 2026-11-11): there the CPU makes them. The console's GPU fetches them itself.
+    in_cemu = wiiu::debug_flag("cemu");
+    if (in_cemu) gxt_cpu_attr |= 1;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
+    if (wiiu::debug_flag("noglslvs")) glsl_vs = false;
+    if (wiiu::debug_flag("glslvsforce")) {
+        glsl_vs = true;  // a test: every vertex shader comes from the console's compiler, none from the pack
+        LOG("[gx2] glslvsforce: %u shipped vertex shaders set aside\n", (u32)vs_table.size());
+        for (const auto &e : vs_table) vs_set_aside[e.first] = e.second.index;
+        vs_table.clear();
+    }
+    prof_laps = !wiiu::debug_flag("nolaps");
     if (wiiu::debug_flag("kstats")) kernel::kstats.ipc = true;  // SVCs, switches and service requests per frame, on the log
     if (wiiu::debug_flag("top1080")) {
         top_720 = false;
@@ -3408,6 +3723,7 @@ static volatile bool menu_quit;
 bool menu_open() { return menu_is_open; }
 int game_speed() { return menu_speed; }
 bool menu_wants_quit() { return menu_quit; }
+void menu_quit_now() { menu_quit = true; }
 
 void menu_input(u32 pressed) {
     if (!menu_is_open) {
@@ -3717,11 +4033,26 @@ static void show_lcd_from_memory() {
     top_shown = false;
 }
 
-void gfx_pump() {
-    if (!vblank_pending) return;
+// The report is asked for by the frontend's thread and written by this one, between frames: the counters it prints and starts over are this
+// thread's, and read from the other they came out torn (a count taken mid-draw, a reset that lost what was added meanwhile).
+static std::atomic<bool> report_due;
+static std::atomic<float> report_draws_per_flip;
+static void write_report();
+
+// (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
+void gfx_pump(bool quiet) {
+    if (!vblank_pending) {
+        // the menu and the keyboard are drawn at a VBlank's look only, so while one is up nothing is shown in between
+        if (!menu_is_open && !kb_active && present_rule.between(quiet)) {
+            screen_fresh = false;
+            present();
+        }
+        return;
+    }
     vblank_pending = false;
     show_lcd_from_memory();
     install_compiled();
+    if (report_due.exchange(false)) write_report();
     shader_compile_watch();
     if (menu_is_open) {
         draw_menu();
@@ -3730,7 +4061,7 @@ void gfx_pump() {
         draw_keyboard();
         screen_fresh = true;
     }
-    if (screen_fresh) {
+    if (present_rule.vblank(screen_fresh)) {
         screen_fresh = false;
         present();
     }
@@ -3774,6 +4105,7 @@ void gfx_reacquire() {
     restore_context();
     vblank_pending = false;
     screen_fresh = false;
+    present_rule.reset();
 }
 
 void gfx_note_busy(u32 us) { gpu_busy_us = gpu_busy_us + us; }
@@ -3815,15 +4147,20 @@ bool tv_shot(u32 step, std::vector<u8> &ppm, u32 addr) {
 }
 
 float gfx_report() {
+    report_due = true;
+    return report_draws_per_flip;  // of the report before: what the frontend asks is whether anything is being drawn
+}
+
+static void write_report() {
     static OSTime last_t;
-    static u64 last_flips, last_draws;
+    static u64 last_flips, last_draws, last_cpu_draws;
     static u32 last_busy;
     const OSTime now = OSGetSystemTime();
     const float secs = last_t ? OSTicksToMicroseconds(now - last_t) / 1e6f : 1;
     const float fps = (st_flips - last_flips) / secs;
     const float busy = last_t ? (gpu_busy_us - last_busy) / (secs * 1e6f) * 100 : 0;
     LOG("[gx2] %.1f fps, gpu thread %.0f%% busy, %.0f draws/s, %llu on CPU, %llu fragment misses, %llu textures uploaded (%llu KB, %.1f ms, %llu decoded on the GPU), %u KB textures, %u surfaces\n",
-        fps, busy, (st_draws - last_draws) / secs, (unsigned long long)st_cpu_draws, (unsigned long long)st_ps_misses, (unsigned long long)st_uploads,
+        fps, busy, (st_draws - last_draws) / secs, (unsigned long long)(st_cpu_draws - last_cpu_draws), (unsigned long long)st_ps_misses, (unsigned long long)st_uploads,
         (unsigned long long)(st_upload_bytes >> 10), st_upload_ms, (unsigned long long)st_gpu_decodes, (u32)(tex_memory >> 10), (u32)surfaces.size());
     const float draws = std::max<float>((float)(st_draws - last_draws), 1.0f);
     auto us = [&](int k) { return (float)OSTicksToMicroseconds((u64)prof[k]) / draws; };
@@ -3840,13 +4177,20 @@ float gfx_report() {
         for (const auto &x : surfaces) surf += x->mem1 ? 0 : (x->depth ? x->db.surface.imageSize : x->cb.surface.imageSize);
         LOG("[prof] memory the renderer holds: textures %u KB, vertex cache %u KB (%u buffers let go), surfaces outside MEM1 %u KB (%u surfaces)\n", (u32)(tex_memory >> 10),
             (u32)(vtx_cache_size >> 10), (u32)(vtx_retired.size()), (u32)(surf >> 10), (u32)surfaces.size());
+        // vertices the CPU shaded instead of the GPU, by why (vertex.cpp)
+        static const char *const why[VCPU_COUNT] = {"no compiled shader", "geometry shader", "continued strip"};
+        char line[300] = "";
+        int n = 0;
+        for (int k = 0; k < VCPU_COUNT; k++)
+            if (vtx_cpu.draws[k])
+                n += snprintf(line + n, sizeof line - n, " | %s: %.1f draws, %.0f vertices, %.2f ms", why[k], vtx_cpu.draws[k] / flips, vtx_cpu.verts[k] / flips,
+                              vtx_cpu.ms[k] / flips);
+        if (n) LOG("[vtx] shaded on the CPU, per flip%s\n", line);
+        vtx_cpu = {};
     }
     LOG("[prof] vertex data per draw: %.1f streams, %.0f vertices, %.1f KB; %.0f%% of streams from the cache (%u entries, %u KB)\n", st_attr_streams / draws,
         st_attr_verts / draws, st_attr_bytes / 1024.0 / draws, 100.0 * st_vtx_hits / std::max<u64>(st_vtx_hits + st_vtx_misses, 1), (u32)vtx_cache.size(), (u32)(vtx_cache_size >> 10));
     st_attr_verts = st_attr_bytes = st_attr_streams = st_vtx_hits = st_vtx_misses = 0;
-    LOG("[prof] shaded on the CPU per flip: %.1f draws (%.0f vertices) through a geometry shader, %.1f (%.0f) continuing a primitive\n", g_cpu_route[0] / flips,
-        g_cpu_route[1] / flips, g_cpu_route[2] / flips, g_cpu_route[3] / flips);
-    for (u64 &c : g_cpu_route) c = 0;
     if (ds_built > 10 * flips) {  // states built by the hundred per flip: which registers keep changing between the builds
         char line[200] = "";
         int n = 0;
@@ -3870,10 +4214,11 @@ float gfx_report() {
     last_t = now;
     last_flips = st_flips;
     last_draws = st_draws;
+    last_cpu_draws = st_cpu_draws;
     last_busy = gpu_busy_us;
     st_uploads = st_upload_bytes = st_gpu_decodes = 0;
     st_upload_ms = 0;
-    return draws / flips;
+    report_draws_per_flip = draws / flips;
 }
 
 void touch_to_bottom(u16 x, u16 y, bool &touch, u16 &tx, u16 &ty) {

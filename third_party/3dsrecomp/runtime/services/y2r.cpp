@@ -74,6 +74,7 @@ struct Y2rService : Service {
     u16 dither[8] = {};
     Dma y, u, v, yuyv, out;
     bool warned_rotation = false;
+    bool busy = false;  // a conversion is under way (StartConversion)
 
     void convert() {
         if (!width || (width & 7) || width > 1024 || !out.addr) {
@@ -258,12 +259,17 @@ struct Y2rService : Service {
             ipc.ok();
             break;
         case 0x0026:  // StartConversion
-            convert();
+            // A video frame takes tens of milliseconds to convert, and the game's other threads, its sound thread first, run meanwhile, as on
+            // a 3DS, where the converter is hardware of its own (run_blocked). Done under the kernel lock, each frame of Kid Icarus's opening
+            // video stopped them all for 25 to 120 ms (2026-11-11).
+            busy = true;
+            run_blocked(*ipc.lk, [&] { convert(); });
+            busy = false;
             done->signal();
             ipc.ok();
             break;
         case 0x0027: ipc.ok(); break;   // StopConversion
-        case 0x0028: get(0); break;     // IsBusyConversion
+        case 0x0028: get(busy); break;  // IsBusyConversion
         case 0x0029: {                  // SetPackageParameter
             const u32 a = ipc[1], b = ipc[2], c = ipc[3];
             input_format = a & 0xff;

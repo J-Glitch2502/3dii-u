@@ -43,7 +43,7 @@ __attribute__((weak)) u32 pipe_readable(u32 pipe) {
 
 __attribute__((weak)) u16 recv_data(u32) { return on ? 0 : 1; }
 
-__attribute__((weak)) bool tick() {
+__attribute__((weak)) bool tick(bool) {
     if (!on) return false;
     // bump the frame counter of both shared memory regions
     static u16 frame;

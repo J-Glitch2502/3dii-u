@@ -581,14 +581,38 @@ class Emitter:
         self.override = {}
         # Wii U mode: trusts the ARM calling convention around calls and drops resume points, which shrinks and speeds up code.
         self.abi = False
+        # Address ranges of hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder). In Wii U
+        # mode its functions alone are generated the safe way, with every register through memory at calls and a resume point at every
+        # return site, so one decoder doesn't cost the whole game the fast code.
+        self.safe_ranges = []
+        self.cur_abi = False
+
+    def is_safe(self, addr):
+        return any(lo <= (addr & ~1) < hi for lo, hi in self.safe_ranges)
+
+    # Safe-mode code reads every register back from c->r after a call, and fast code leaves c->r stale for the ones the calling convention
+    # has it preserve (r4-r11 and sp: it keeps them in C locals). So where safe-mode code hands over to fast code, by a call or a tail jump,
+    # those slots are kept across it. A target inside the safe ranges is left alone: its pieces may hand values back in any register.
+    KEPT = (4, 5, 6, 7, 8, 9, 10, 11, 13)
+    KEEP = 'u32 ' + ', '.join('k%d = c->r[%d]' % (r, r) for r in KEPT) + ';'
+    BACK = ' '.join('c->r[%d] = k%d;' % (r, r) for r in KEPT)
+
+    def leaves_safe(self):
+        """whether the function being emitted is safe-mode code in a build that also has fast code"""
+        return bool(self.abi and self.safe_ranges and not self.cur_abi)
+
+    def in_safe_c(self, expr):
+        """C for: this guest address is inside a safe range"""
+        return '(' + ' || '.join('((%s) & ~1u) - 0x%xu < 0x%xu' % (expr, lo, hi - lo) for lo, hi in self.safe_ranges) + ')'
 
     def emit_function(self, key):
         an = self.an
         th = key & 1
         start = key & ~1
+        abi = self.cur_abi = self.abi and not self.is_safe(start)
         insts, _ = an.explore(key)
         addrs = sorted(insts)
-        out_mask = self.custom_out.get(key, 0) if self.abi else 0
+        out_mask = self.custom_out.get(key, 0) if abi else 0
         self.override = {}
         fused = self.fuse_compares(insts, th, start) if self.flag_opt else {}
         try:
@@ -630,6 +654,7 @@ class Emitter:
         return fused
 
     def _emit_function(self, key, insts, addrs, th, start, out_mask, fused):
+        abi = self.cur_abi
         an = self.an
         if self.flag_opt:
             lo = flags.liveness(insts, th, start, an.funcs, key in self.flag_returning, self.flag_reading_entries)
@@ -659,7 +684,7 @@ class Emitter:
                         resume.append(nxt)
             if i.falls_through:
                 labels.add(a + i.size) if False else None
-        resume = [] if self.abi else sorted(set(resume))
+        resume = [] if abi else sorted(set(resume))
         labels |= set(resume)
         regs = set()
         vregs = set()
@@ -678,7 +703,7 @@ class Emitter:
             if 'fpsr' in txt:
                 uses_fpsr = True
         regs.discard(15)
-        if self.abi and any(i.kind in (CALL, ICALL) for i in insts.values()):
+        if abi and any(i.kind in (CALL, ICALL) for i in insts.values()):
             # Callees leave c->r stale for what the ABI lets them change, so anything that calls keeps its own sp. A piece
             # of a split function (no prologue of its own) must also carry every callee-saved register on to the next piece.
             regs.add(13)
@@ -710,10 +735,10 @@ class Emitter:
             si.append('S%d = c->s[%d];' % (v, v))
         out.append('void %s(CPU *c, u32 entry) {' % fn)
         decl = []
-        unloaded = self.prologue_saved(start, th) - mask_regs(self.custom_in.get(key, 0) | out_mask) if self.abi else set()
+        unloaded = self.prologue_saved(start, th) - mask_regs(self.custom_in.get(key, 0) | out_mask) if abi else set()
         if regs:
             decl.append('u32 ' + ', '.join(('r%d = 0' % r) if r in unloaded else 'r%d = c->r[%d]' % (r, r) for r in regs) + ';')
-        if uses_flags and self.abi and key not in self.flag_returning and key not in self.flag_reading_entries:
+        if uses_flags and abi and key not in self.flag_returning and key not in self.flag_reading_entries:
             decl.append('u32 nf = 0, zf = 0, cf = 0, vf = 0;')
         elif uses_flags:
             decl.append('u32 nf = c->nf, zf = c->zf, cf = c->cf, vf = c->vf;')
@@ -733,7 +758,7 @@ class Emitter:
         out += ['  ' + d for d in decl]
         out.append('#define SO() do { %s } while (0)' % ' '.join(so))
         out.append('#define SI() do { %s } while (0)' % ' '.join(si))
-        if self.abi:
+        if abi:
             def sync(fmt, wanted_r, wanted_s, extra):
                 return ' '.join([fmt[0] % (r, r) for r in regs if r in wanted_r] + [fmt[1] % (v, v) for v in vregs if v in wanted_s] + extra)
             store, load = ('c->r[%d] = r%d;', 'c->s[%d] = S%d;'), ('r%d = c->r[%d];', 'S%d = c->s[%d];')
@@ -774,7 +799,10 @@ class Emitter:
                     prev_falls = nxt
                 else:
                     # a tail call into the following function
-                    out.append('  SO(); __attribute__((musttail)) return %s(c, 0);' % fname(nxt | th))
+                    if self.leaves_safe() and not self.is_safe(nxt):
+                        out.append('  { SO(); %s %s(c, 0); %s return; }' % (self.KEEP, fname(nxt | th), self.BACK))
+                    else:
+                        out.append('  SO(); __attribute__((musttail)) return %s(c, 0);' % fname(nxt | th))
                     self.stats['fallthrough_tail'] += 1
         if prev_falls is not None:
             out.append('  goto L_%x;' % prev_falls)
@@ -792,7 +820,9 @@ class Emitter:
             pass
         elif i.kind == B:
             t = i.target
-            if (t | th) in an.funcs and t != (key & ~1):
+            if (t | th) in an.funcs and t != (key & ~1) and self.leaves_safe() and not self.is_safe(t):
+                body.append('{ SO(); %s %s(c, 0); %s return; }' % (self.KEEP, fname(t | th), self.BACK))
+            elif (t | th) in an.funcs and t != (key & ~1):
                 body.append('SO(); __attribute__((musttail)) return %s(c, 0);' % fname(t | th))
             elif t <= i.addr:
                 # a loop: give way if an interrupt readied a higher-priority thread (a busy wait for that
@@ -809,6 +839,18 @@ class Emitter:
             # was decoded as instructions): go through the dispatcher, which reports it if it is ever reached
             body.append('SO(); c->pc = 0x%xu; rt_dispatch(c, 0); SI(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
                 i.target, i.link | th))
+        elif i.kind == CALL and self.cur_abi and self.is_safe(i.target):
+            # Into safe-mode code from fast code: it gets every register, and may come back through the dispatcher any number of times
+            # (its pieces return to each other in ways the calling convention doesn't describe) before it returns here.
+            body.append('SO(); %s(c, 0); while (__builtin_expect(c->pc != 0x%xu, 0)) rt_dispatch(c, 0); SI();' % (fname(i.target), i.link | th))
+            self.stats['calls_into_safe'] += 1
+        elif i.kind == CALL and self.leaves_safe() and not self.is_safe(i.target):
+            body.append('{ SO(); %s %s(c, 0); %s if (__builtin_expect(c->pc != 0x%xu, 0)) return; SI(); }' % (
+                self.KEEP, fname(i.target), self.BACK, i.link | th))
+            self.stats['calls_out_of_safe'] += 1
+        elif i.kind == ICALL and self.leaves_safe():
+            body.append('{ SO(); c->pc = tpc; if (%s) rt_dispatch(c, 0); else { %s rt_dispatch(c, 0); %s } '
+                        'if (__builtin_expect(c->pc != 0x%xu, 0)) return; SI(); }' % (self.in_safe_c('tpc'), self.KEEP, self.BACK, i.link | th))
         elif i.kind == CALL:
             # A callee that reads flags on entry is split-off code, so it gets a full sync; so does one that returns flags.
             before = 'SO' if i.target in self.flag_reading_entries or i.target in self.flag_returning else 'SOC'
@@ -829,7 +871,12 @@ class Emitter:
             else:
                 # a jump to where this function was called from is its return, whichever register kept the address: Mario Kart 7's
                 # hand-written decoder returns with `mov pc, r6`, which went through the dispatcher and lost its caller
-                body.append('if (tpc == lr0) { c->pc = tpc; SOR(); return; } c->pc = tpc; SO(); __attribute__((musttail)) return rt_dispatch(c, 0);')
+                if self.leaves_safe():
+                    body.append('if (tpc == lr0) { c->pc = tpc; SOR(); return; } c->pc = tpc; SO(); '
+                                'if (%s) __attribute__((musttail)) return rt_dispatch(c, 0); { %s rt_dispatch(c, 0); %s return; }' % (
+                                    self.in_safe_c('tpc'), self.KEEP, self.BACK))
+                else:
+                    body.append('if (tpc == lr0) { c->pc = tpc; SOR(); return; } c->pc = tpc; SO(); __attribute__((musttail)) return rt_dispatch(c, 0);')
                 self.stats['indirect_jumps'] += 1
         elif i.kind == SVC:
             body.append('SO(); c->pc = 0x%xu; rt_svc(c, 0x%x); SI();' % (i.addr + i.size, i.imm))
@@ -1144,6 +1191,8 @@ def main():
     ap.add_argument('--lazy', help='only emit the function at this address (and new functions it calls)')
     ap.add_argument('--lazy-out', help='C file for --lazy')
     ap.add_argument('--abi', action='store_true', help='Wii U mode: trust the calling convention, drop resume points')
+    ap.add_argument('--safe-range', action='append', default=[], metavar='LO-HI',
+                    help='with --abi: generate the functions in this address range (hex) the safe way; may be given more than once')
     args = ap.parse_args()
     if args.lazy:
         return lazy(args)
@@ -1158,6 +1207,7 @@ def main():
     keys = an.discover()
     em = Emitter(an, args.outdir)
     em.abi = args.abi
+    em.safe_ranges = [tuple(int(x, 16) for x in r.split('-')) for r in args.safe_range]
     files = em.run(keys)
     with open(os.path.join(args.outdir, 'funcs.txt'), 'w') as f:
         for k in keys:

@@ -9,6 +9,16 @@ namespace gpu {
 u64 g_cpu_route[4];
 #endif
 
+VtxCpuStats vtx_cpu;
+// adds the time to the end of its scope to one of vtx_cpu's reasons
+struct VtxCpuTimer {
+    VtxCpuWhy why;
+    double t0 = kMeasure ? now_ms() : 0;
+    ~VtxCpuTimer() {
+        if (kMeasure) vtx_cpu.ms[why] += now_ms() - t0;
+    }
+};
+
 // ---------------------------------------------------------------- vertex loader
 namespace {
 struct LoaderAttr {
@@ -456,6 +466,9 @@ void vtx_finish_jobs() {
     }
     for (auto &p : junit_job) p = nullptr;
     if (g_trace) LOG("gpu trace: finish %u jobs, %u indices\n", njobs, pending_indices);
+#ifdef __WIIU__
+    VtxCpuTimer timed{VCPU_NO_SHADER};  // there, only draws without a compiled vertex shader become jobs
+#endif
     double t0 = g_stats ? now_ms() : 0;
     // vertex shading
     constexpr u32 VCHUNK = 64, TCHUNK = 96;
@@ -779,6 +792,20 @@ void vtx_draw(bool indexed) {
         g_cpu_route[1] += n;
 #endif
         vtx_finish_jobs();
+        VtxCpuTimer timed{VCPU_GEOMETRY};
+        vtx_cpu.draws[VCPU_GEOMETRY]++;
+        vtx_cpu.verts[VCPU_GEOMETRY] += n;
+#ifdef __WIIU__
+        {
+            static std::vector<const ShaderProgram *> logged;
+            const ShaderProgram *gp = shader_get_program(g.gs);
+            if (std::find(logged.begin(), logged.end(), gp) == logged.end() && logged.size() < 64) {
+                logged.push_back(gp);
+                LOG("[vtx] geometry shader %p (entry %u, mode %u) shaded on the CPU, %u vertices in its first draw\n", (const void *)gp,
+                    g.regs[R::GS + R::SH_ENTRY] & 0xffff, gsp.mode, n);
+            }
+        }
+#endif
         ShaderUnit &u = unit_for(0);
         V4 in[16], buf[16];
         for (u32 i = 0; i < n; i++) {
@@ -810,6 +837,9 @@ void vtx_draw(bool indexed) {
         g_cpu_route[3] += n;
 #endif
         vtx_finish_jobs();
+        VtxCpuTimer timed{VCPU_CONTINUED};
+        vtx_cpu.draws[VCPU_CONTINUED]++;
+        vtx_cpu.verts[VCPU_CONTINUED] += n;
         ShaderUnit &u = unit_for(0);
         OutMap m;
         setup_outmap(m);
@@ -841,6 +871,8 @@ void vtx_draw(bool indexed) {
             d.slot_src[i] = s >= 0 && (u32)(s >> 2) < nout ? (s8)(out_reg[s >> 2] * 4 + (s & 3)) : -1;
         }
         if (gx2_draw(d)) return;
+        vtx_cpu.draws[VCPU_NO_SHADER]++;
+        vtx_cpu.verts[VCPU_NO_SHADER] += n;
         if (!fill_ids()) return;
     }
 #endif

@@ -8,8 +8,8 @@
 #include <coreinit/time.h>
 #include <malloc.h>
 
+#include <cctype>
 #include <dirent.h>
-
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -30,6 +30,7 @@ struct Job {
     u64 key;
     u32 inputs;
     std::string glsl;
+    u32 tries = 0;  // compiles that came back hollow (compile_thread)
 };
 OSMutex mutex;
 std::deque<Job> jobs;
@@ -39,6 +40,22 @@ constexpr u32 STACK = 4 << 20;  // the compiler recurses
 OSThread *compiler;
 volatile OSTime busy_since;  // when the compile in progress began, 0 between compiles
 volatile u32 watched;        // reports written about the compile in progress
+
+// How many of a generated vertex shader's inputs (v0 to v15) its code reads: named again after being declared
+u32 inputs_read(const std::string &glsl) {
+    u32 n = 0;
+    for (u32 r = 0; r < 16; r++) {
+        const std::string name = "v" + std::to_string(r);
+        u32 seen = 0;
+        for (size_t at = glsl.find(name); at != std::string::npos && seen < 2; at = glsl.find(name, at + 1)) {
+            const bool starts = at == 0 || !(isalnum((unsigned char)glsl[at - 1]) || glsl[at - 1] == '_');
+            const bool ends = at + name.size() >= glsl.size() || !(isalnum((unsigned char)glsl[at + name.size()]) || glsl[at + name.size()] == '_');
+            seen += starts && ends;
+        }
+        n += seen >= 2;
+    }
+    return n;
+}
 
 // One cache per shipped set: what an older build missed and compiled here is mostly in a newer one's set, and compiling it all again at every
 // start kept this thread (and the heap lock it takes all the time) busy for minutes, through Luigi's Mansion: Dark Moon's intro, whose sound
@@ -70,10 +87,17 @@ static void cache_drop_old() {
     }
 }
 
+// The file starts with these two words. Its GLSL is what the shader generator of the build that wrote it made of each state, so a build whose
+// generator writes a state differently (kShaderGenRevision, shadergen.h) starts the file over: compiled from the old text, a shader would be
+// the old generator's, mistakes and all, under the new build's key.
+const u32 kCacheHead[2] = {0x53484443, kShaderGenRevision};  // 'SHDC'
+
 // u8 vs, u8 pad[3], u32 inputs, u64 key, u32 length, the GLSL: this console's own bytes, nobody else reads it
 void cache_append(const Job &j) {
     wiiu::fs_begin(0xC00B);  // its turn with every other file call
     if (FILE *f = fopen(cache_path().c_str(), "ab")) {
+        fseek(f, 0, SEEK_END);
+        if (ftell(f) == 0) fwrite(kCacheHead, 1, sizeof kCacheHead, f);
         const u32 head[5] = {(u32)j.vs << 24, j.inputs, (u32)(j.key >> 32), (u32)j.key, (u32)j.glsl.size()};
         fwrite(head, 1, sizeof head, f);
         fwrite(j.glsl.data(), 1, j.glsl.size(), f);
@@ -90,6 +114,12 @@ void cache_load() {
     FILE *f = fopen(cache_path().c_str(), "rb");
     if (!f) return;
     u32 n = 0, head[5];
+    if (fread(head, 1, sizeof kCacheHead, f) != sizeof kCacheHead || memcmp(head, kCacheHead, sizeof kCacheHead)) {
+        fclose(f);
+        if ((f = fopen(cache_path().c_str(), "wb"))) fclose(f);  // another generator's, or from before the file said whose: emptied
+        LOG("[glsl] the shader cache was another build's generator's: started over\n");
+        return;
+    }
     while (fread(head, 1, sizeof head, f) == sizeof head && head[4] < (1 << 20)) {
         Job j{(head[0] >> 24) != 0, true, (u64)head[2] << 32 | head[3], head[1], std::string(head[4], '\0')};
         if (fread(&j.glsl[0], 1, head[4], f) != head[4]) break;
@@ -156,6 +186,22 @@ int compile_thread(int, void *) {
             continue;
         }
         LOG("[glsl] %s %016llx compiled in %u ms%s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, ms, j.cached ? ", from the cache" : "");
+        // A vertex shader that reads inputs and comes back with none, or as a 16-byte program, is hollow: the compiler hands those out for
+        // what it's given in its first second or so after starting, and the same source compiles properly afterwards (seen in Cemu,
+        // 2026-11-10). One is never installed. It's tried again for a couple of seconds, and then given up, so that a later miss can ask
+        // afresh; the CPU shades those draws meanwhile. Fewer inputs than the code reads is no sign of it: the compiler rightly drops an
+        // input that reaches no output, and the same shader comes back that way every time.
+        if (j.vs && (d.vs_shader->size <= 16 || (inputs_read(j.glsl) && !d.vs_shader->attribVarCount))) {
+            FreeVertexShader(d.vs_shader);
+            const bool again = ++j.tries < 8;
+            LOG("[glsl] vertex %016llx came back hollow: %s\n", (unsigned long long)j.key, again ? "trying again" : "given up");
+            if (again) OSSleepTicks(OSMillisecondsToTicks(250));
+            OSLockMutex(&mutex);
+            if (again) jobs.push_front(std::move(j));
+            else known.erase(j.key);
+            OSUnlockMutex(&mutex);
+            continue;
+        }
         if (!j.cached) cache_append(j);
         OSLockMutex(&mutex);
         done.push_back(d);
@@ -184,8 +230,10 @@ void shader_compile_init() {
     }
     auto *t = (OSThread *)memalign(16, sizeof(OSThread));
     void *stack = memalign(16, STACK);
-    // core 0, just below the card thread (20), so a burst of compiles never holds up saves and the log; the game's threads are on core 1 now, so
-    // only core 0's own threads (net, watchdog, audio, hid, card), which mostly sleep, come first. At 25 it never ran back when the game shared core 0
+    // Core 0, just below the card thread (20): a burst of compiles never holds up saves and the log, and only core 0's own threads (net,
+    // watchdog, hid, card), which mostly sleep, come first. Not core 2 with the GPU thread: when shaders are missing that thread is at its
+    // busiest, shading on the CPU what the missing shaders would, and the compiler below it got no time at all. One compile took 69 s there
+    // against under 1 s here, at 7 fps against 57 (NSMB2 with every vertex shader from this compiler, in Cemu, 2026-11-11).
     if (!t || !stack || !OSCreateThread(t, compile_thread, 0, nullptr, (u8 *)stack + STACK, STACK, 21, OS_THREAD_ATTRIB_AFFINITY_CPU0)) {
         LOG("[glsl] no compiler thread\n");
         return;
@@ -206,9 +254,20 @@ void shader_compile_watch() {
     wiiu::log_threads();  // memory only: this is the GPU thread, which never waits for the card
 }
 
+// A draw is waiting for this one, so it goes ahead of everything the cache queued at the start, and a shader the cache queued that a draw now
+// asks for moves up to the front: after a start with a few hundred cached shaders a miss used to wait its turn behind all of them, its draws
+// going through the fallback for as many seconds.
 void shader_compile_request(bool vs, u64 key, std::string glsl, u32 inputs) {
     OSLockMutex(&mutex);
-    if (known.insert(key).second) jobs.push_back(Job{vs, false, key, inputs, std::move(glsl)});
+    if (known.insert(key).second) jobs.push_front(Job{vs, false, key, inputs, std::move(glsl)});
+    else
+        for (auto it = jobs.begin(); it != jobs.end(); ++it)
+            if (it->key == key && it->vs == vs) {
+                Job j = std::move(*it);
+                jobs.erase(it);
+                jobs.push_front(std::move(j));
+                break;
+            }
     OSUnlockMutex(&mutex);
 }
 

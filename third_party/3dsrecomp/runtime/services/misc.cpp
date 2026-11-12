@@ -762,7 +762,15 @@ static void relocate_shared_font(u32 addr) {
 }
 
 std::shared_ptr<SharedMem> load_shared_font() {
-    std::vector<u8> font = lz11(system_archive_file(0x0004009B00014002ull, "/cbf_std.bcfnt.lz"));
+    // A build may bring the font already unpacked (shared_font.bcfnt beside the game's files, tools/make_game_title.py): the console then reads it
+    // as it is, with no archive to search and nothing to decompress while the game starts. Without the file it comes from the system archive.
+    std::vector<u8> font;
+    if (FILE *f = fopen((g_game.dir + "/shared_font.bcfnt").c_str(), "rb")) {
+        u8 buf[65536];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) font.insert(font.end(), buf, buf + n);
+        fclose(f);
+    }
+    if (font.empty()) font = lz11(system_archive_file(0x0004009B00014002ull, "/cbf_std.bcfnt.lz"));
     const u32 size = 0x332000;
     if (font.empty() || font.size() > size - 0x80) {
         LOG("[apt] shared font: system archive 0004009b00014002 missing or unreadable (%zu bytes)\n", font.size());

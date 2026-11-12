@@ -281,8 +281,8 @@ void Source::generate() {
     st.filters.process(frame);
 }
 
-SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool publish) {
-    parse_config(cfg, coeffs);
+SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish) {
+    if (seen) parse_config(cfg, coeffs);
     if (st.enabled) generate();
 
     SourceStatus s;

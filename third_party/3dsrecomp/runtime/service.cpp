@@ -65,6 +65,8 @@ u32 service_request(std::shared_ptr<Session> s, Thread *t, Lock &lk) {
         snprintf(k, sizeof k, "%s:%04x", s->service->name.c_str(), cmd >> 16);
         kstats.requests[k]++;
     }
+    t->in_service = s->service->name.c_str();
+    t->in_cmd = cmd;
     s->service->handle(ipc);
     if (g_verbose && (ipc.word(1) & 0x80000000))
         LOG("[ipc] %s cmd %08x -> error %08x\n", s->service->name.c_str(), cmd, ipc.word(1));

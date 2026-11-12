@@ -1,5 +1,6 @@
 // The 3Dii U Builder window. `app` (gui.py's App) holds what it shows and does what its buttons ask; `T` is the theme.
-// A night-blue window with a slow aurora behind it; the game is a 3DS game card that tilts toward the mouse; questions come up inside the window.
+// The 3DS HOME Menu's look: pale stripes, white glossy tiles and buttons. The Build page is two screens, like a 3DS: the game's start-up screen above, touch tiles
+// below; questions come up inside the window.
 import QtQuick
 import QtQuick.Window
 import QtQuick.Controls.Basic
@@ -35,38 +36,29 @@ ApplicationWindow {
         id: g
         default property alias content: body.data
         property real pad: 22
-        property real radius: 22
+        property real radius: 20
         property color fill: T.surface
         implicitHeight: body.implicitHeight + 2 * pad
         MultiEffect {
             source: face
             anchors.fill: face
             shadowEnabled: true
-            shadowColor: "#000000"
-            shadowOpacity: 0.55
-            shadowBlur: 1.0
-            shadowVerticalOffset: 12
-            blurMax: 48
+            shadowColor: T.shadow
+            shadowOpacity: 0.28
+            shadowBlur: 0.7
+            shadowVerticalOffset: 5
+            blurMax: 28
         }
         Rectangle {
             id: face
             anchors.fill: parent
             radius: g.radius
             gradient: Gradient {
-                GradientStop { position: 0; color: Qt.lighter(g.fill, 1.16) }
-                GradientStop { position: 1; color: g.fill }
+                GradientStop { position: 0; color: g.fill }
+                GradientStop { position: 1; color: Qt.darker(g.fill, 1.035) }
             }
             border.color: T.edge
             border.width: 1
-        }
-        Rectangle {  // the light catching the top edge
-            x: g.radius; width: parent.width - 2 * g.radius; height: 1; y: 1
-            gradient: Gradient {
-                orientation: Gradient.Horizontal
-                GradientStop { position: 0; color: "#00ffffff" }
-                GradientStop { position: 0.5; color: "#33ffffff" }
-                GradientStop { position: 1; color: "#00ffffff" }
-            }
         }
         Item {
             id: body
@@ -85,8 +77,8 @@ ApplicationWindow {
         signal clicked()
         implicitWidth: Math.max(label.implicitWidth + (small ? 30 : 48), small ? 90 : 130)
         implicitHeight: small ? 34 : 46
-        opacity: enabled ? 1 : 0.38
-        scale: !enabled ? 1 : area.pressed ? 0.96 : area.containsMouse ? 1.035 : 1
+        opacity: enabled ? 1 : 0.45
+        scale: !enabled ? 1 : area.pressed ? 0.95 : area.containsMouse ? 1.03 : 1
         Behavior on scale { NumberAnimation { duration: 170; easing.type: Easing.OutBack } }
         Behavior on opacity { NumberAnimation { duration: 180 } }
         activeFocusOnTab: enabled
@@ -95,43 +87,38 @@ ApplicationWindow {
         Keys.onReturnPressed: if (enabled) clicked()
         Keys.onSpacePressed: if (enabled) clicked()
         MultiEffect {
-            visible: p.main && p.enabled
-            source: sheen
-            anchors.fill: sheen
+            visible: p.enabled
+            source: face
+            anchors.fill: face
             shadowEnabled: true
-            shadowColor: T.violet
-            shadowOpacity: area.containsMouse ? 0.95 : 0.6
-            shadowBlur: 1.0
-            shadowVerticalOffset: 6
-            blurMax: 36
+            shadowColor: p.main ? T.blue : T.shadow
+            shadowOpacity: p.main ? (area.containsMouse ? 0.7 : 0.45) : 0.25
+            shadowBlur: 0.6
+            shadowVerticalOffset: area.pressed ? 1 : 3
+            blurMax: 20
         }
         Rectangle {
-            id: sheen
-            visible: p.main
+            id: face
             anchors.fill: parent
             radius: height / 2
             gradient: Gradient {
-                orientation: Gradient.Horizontal
-                GradientStop { position: 0; color: T.red }
-                GradientStop { position: 0.5; color: T.violet }
-                GradientStop { position: 1; color: T.blue }
+                GradientStop { position: 0; color: p.main ? T.sky : T.surface }
+                GradientStop { position: 1; color: p.main ? T.blue : T.surface2 }
             }
-        }
-        Rectangle {
-            visible: !p.main
-            anchors.fill: parent
-            radius: height / 2
-            color: area.containsMouse && p.enabled ? "#2b3274" : "#1e2356"
-            border.color: area.containsMouse && p.enabled ? T.blue : T.edge
+            border.color: p.main ? T.blueDeep : area.containsMouse && p.enabled ? T.blue : T.edge
             border.width: 1
-            Behavior on color { ColorAnimation { duration: 140 } }
+        }
+        Rectangle {  // the gloss: a lighter top half
+            x: 3; y: 2
+            width: parent.width - 6
+            height: parent.height / 2 - 2
+            radius: height
+            color: p.main ? "#40ffffff" : "#b0ffffff"
         }
         Rectangle {
-            visible: p.main
             anchors.fill: parent
             radius: height / 2
-            color: area.pressed ? "#33000000" : area.containsMouse ? "#24ffffff" : "#00ffffff"
-            Behavior on color { ColorAnimation { duration: 140 } }
+            color: area.pressed && p.enabled ? "#1a000000" : "transparent"
         }
         Rectangle {
             visible: p.activeFocus
@@ -139,7 +126,7 @@ ApplicationWindow {
             anchors.margins: -4
             radius: height / 2
             color: "transparent"
-            border.color: "#e0ffffff"
+            border.color: T.blue
             border.width: 2
         }
         Text {
@@ -147,9 +134,11 @@ ApplicationWindow {
             anchors.centerIn: parent
             text: p.text
             color: p.main ? "white" : T.text
+            style: p.main ? Text.Raised : Text.Normal
+            styleColor: T.blueDeep
             font.family: p.main ? T.display : T.font
             font.pixelSize: p.size
-            font.weight: p.main ? Font.Bold : Font.Medium
+            font.weight: p.main ? Font.Bold : Font.DemiBold
         }
         MouseArea {
             id: area
@@ -212,8 +201,8 @@ ApplicationWindow {
         Layout.fillHeight: true
         implicitHeight: tileText.implicitHeight + 24
         radius: 14
-        color: tileArea.containsMouse ? "#232966" : "#1b2050"
-        border.color: tileArea.containsMouse ? "#3a4390" : "#252c66"
+        color: tileArea.containsMouse ? T.hover : T.surface
+        border.color: tileArea.containsMouse ? T.blue : T.edge
         Behavior on color { ColorAnimation { duration: 140 } }
         MouseArea { id: tileArea; anchors.fill: parent; hoverEnabled: true }
         RowLayout {
@@ -238,6 +227,171 @@ ApplicationWindow {
         }
     }
 
+    // A game on the bottom screen, as the HOME Menu shows its titles: a picture in a white frame, and a cursor round the chosen one.
+    component GameIcon: Item {
+        id: gi
+        property string name
+        property string picture
+        property bool pixel: false   // the game's own 48x48 icon, which stays crisp, not a cover
+        property bool chosen: false
+        property bool plus: false
+        signal picked()
+        signal forgotten()
+        width: 108
+        height: 132
+        Rectangle {  // the cursor
+            visible: gi.chosen
+            x: -6; y: -6; width: 120; height: 120
+            radius: 26
+            color: "transparent"
+            border.color: T.blue
+            border.width: 4
+            SequentialAnimation on opacity {
+                running: gi.chosen
+                loops: Animation.Infinite
+                NumberAnimation { to: 0.35; duration: 700; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 1; duration: 700; easing.type: Easing.InOutSine }
+            }
+        }
+        Rectangle {
+            id: frame
+            width: 108; height: 108
+            radius: 20
+            color: T.surface
+            border.color: iconArea.containsMouse ? T.blue : T.edge
+            scale: iconArea.pressed ? 0.94 : iconArea.containsMouse || gi.chosen ? 1.04 : 1
+            Behavior on scale { NumberAnimation { duration: 180; easing.type: Easing.OutBack } }
+            Image {
+                visible: !gi.plus
+                anchors.fill: parent
+                anchors.margins: 8
+                source: gi.picture
+                fillMode: Image.PreserveAspectCrop
+                smooth: !gi.pixel
+                mipmap: !gi.pixel
+                clip: true
+            }
+            Text { visible: gi.plus; anchors.centerIn: parent; text: "+"; color: T.blue; font.pixelSize: 56; font.weight: Font.Light }
+            Rectangle {  // the gloss
+                x: 4; y: 3; width: parent.width - 8; height: parent.height / 2 - 6
+                radius: 16
+                color: "#38ffffff"
+            }
+        }
+        Text {
+            anchors { top: frame.bottom; topMargin: 6; horizontalCenter: frame.horizontalCenter }
+            width: 116
+            horizontalAlignment: Text.AlignHCenter
+            text: gi.name
+            color: gi.chosen ? T.text : T.dim
+            font.pixelSize: 12
+            font.weight: gi.chosen ? Font.DemiBold : Font.Normal
+            elide: Text.ElideRight
+        }
+        MouseArea {
+            id: iconArea
+            anchors.fill: frame
+            hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            cursorShape: Qt.PointingHandCursor
+            onClicked: (mouse) => mouse.button === Qt.RightButton && !gi.plus ? gi.forgotten() : gi.picked()
+        }
+        Accessible.role: Accessible.Button
+        Accessible.name: gi.name
+    }
+
+    // A tile on the Build page's bottom screen: one of the game's extras. Tapping it chooses one; the cross takes it away.
+    component TouchTile: Rectangle {
+        id: tile
+        property string label
+        property string status
+        property bool on: false
+        property bool usable: true
+        signal picked()
+        signal cleared()
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1
+        implicitHeight: 58
+        radius: 14
+        color: tileArea.containsMouse && usable ? T.hover : T.surface
+        border.color: on ? T.green : tileArea.containsMouse && usable ? T.blue : T.edge
+        border.width: on ? 1.5 : 1
+        opacity: usable ? 1 : 0.45
+        scale: tileArea.pressed && usable ? 0.97 : 1
+        Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutBack } }
+        Behavior on color { ColorAnimation { duration: 140 } }
+        activeFocusOnTab: usable
+        Accessible.role: Accessible.Button
+        Accessible.name: label + ": " + status
+        Keys.onReturnPressed: if (usable) picked()
+        Keys.onSpacePressed: if (usable) picked()
+        MouseArea { id: tileArea; anchors.fill: parent; hoverEnabled: true; enabled: tile.usable; cursorShape: Qt.PointingHandCursor; onClicked: tile.picked() }
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 9
+            spacing: 0
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Rectangle { implicitWidth: 10; implicitHeight: 10; radius: 5; color: tile.on ? T.green : T.faint }
+                Text { text: tile.label; color: T.text; font.family: T.display; font.pixelSize: 14; font.weight: Font.Bold; Layout.fillWidth: true }
+                Text {
+                    visible: tile.on && tile.usable
+                    text: "\u00d7"
+                    color: clearArea.containsMouse ? T.red : T.dim
+                    font.pixelSize: 20
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Remove the " + tile.label
+                    MouseArea { id: clearArea; anchors.fill: parent; anchors.margins: -8; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: tile.cleared() }
+                }
+            }
+            Text { text: tile.on ? tile.status : "Tap to add"; color: T.dim; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
+        }
+    }
+
+    // One of the player's own files on the bottom screen: its state, a tap to choose it, and "?" for how to get it.
+    component FileChip: Rectangle {
+        id: chip
+        property string label
+        property string status
+        property color tone: T.faint
+        signal picked()
+        signal asked()
+        Layout.fillWidth: true
+        Layout.preferredWidth: 1
+        implicitHeight: 50
+        radius: 14
+        color: chipArea.containsMouse ? T.hover : T.surface
+        border.color: T.edge
+        Behavior on color { ColorAnimation { duration: 140 } }
+        activeFocusOnTab: true
+        Accessible.role: Accessible.Button
+        Accessible.name: label + ": " + status
+        Keys.onReturnPressed: picked()
+        MouseArea { id: chipArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: chip.picked() }
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 12
+            anchors.rightMargin: 8
+            spacing: 9
+            Rectangle { implicitWidth: 10; implicitHeight: 10; radius: 5; color: chip.tone; Behavior on color { ColorAnimation { duration: 220 } } }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 0
+                Text { text: chip.label; color: T.text; font.pixelSize: 13; font.weight: Font.DemiBold }
+                Text { text: chip.status; color: T.dim; font.pixelSize: 11; elide: Text.ElideMiddle; Layout.fillWidth: true }
+            }
+            Rectangle {
+                implicitWidth: 28; implicitHeight: 28; radius: 14
+                color: askArea.containsMouse ? T.violet : T.surface2
+                Accessible.role: Accessible.Button
+                Accessible.name: "How do I get the " + chip.label + "?"
+                Text { anchors.centerIn: parent; text: "?"; color: T.text; font.pixelSize: 15; font.weight: Font.Bold }
+                MouseArea { id: askArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: chip.asked() }
+            }
+        }
+    }
+
     component Toggle: Item {
         id: tg
         property var options: []
@@ -246,7 +400,7 @@ ApplicationWindow {
         readonly property int chosen: Math.max(0, options.findIndex(o => o.value === value))
         implicitWidth: 236
         implicitHeight: 42
-        Rectangle { anchors.fill: parent; radius: height / 2; color: "#141838"; border.color: T.edge }
+        Rectangle { anchors.fill: parent; radius: height / 2; color: T.surface2; border.color: T.edge }
         Rectangle {
             y: 4
             height: parent.height - 8
@@ -285,7 +439,7 @@ ApplicationWindow {
         property real value: 0
         property bool running: true
         implicitHeight: 14
-        Rectangle { anchors.fill: parent; radius: height / 2; color: "#141838"; border.color: T.edge }
+        Rectangle { anchors.fill: parent; radius: height / 2; color: T.surface2; border.color: T.edge }
         MultiEffect {
             source: fill
             anchors.fill: fill
@@ -341,7 +495,7 @@ ApplicationWindow {
         Item {
             anchors.fill: parent
             visible: si.stageState === "now"
-            Rectangle { anchors.fill: parent; radius: width / 2; color: "transparent"; border.color: "#232a63"; border.width: 3 }
+            Rectangle { anchors.fill: parent; radius: width / 2; color: "transparent"; border.color: T.surface2; border.width: 3 }
             Shape {
                 anchors.fill: parent
                 preferredRendererType: Shape.CurveRenderer
@@ -394,196 +548,6 @@ ApplicationWindow {
         Text { id: badgeText; anchors.centerIn: parent; text: parent.text; color: T.ink; font.family: T.display; font.pixelSize: 14; font.weight: Font.Bold }
     }
 
-    // The chosen game as a 3DS game card. Empty, it is the button that chooses one.
-    component Cartridge: Item {
-        id: cart
-        property real tiltX: 0
-        property real tiltY: 0
-        property bool hot: false
-        signal clicked()
-        implicitWidth: 300
-        implicitHeight: 372
-        transform: [
-            Rotation { origin.x: cart.width / 2; origin.y: cart.height / 2; axis { x: 0; y: 1; z: 0 } angle: cart.tiltY },
-            Rotation { origin.x: cart.width / 2; origin.y: cart.height / 2; axis { x: 1; y: 0; z: 0 } angle: cart.tiltX }
-        ]
-        Behavior on tiltX { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-        Behavior on tiltY { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
-        readonly property string outline: {
-            var w = width - 2, h = height - 2, r = 24, n = 46
-            return "M " + (1 + r) + " 1 L " + (1 + w - n) + " 1 L " + (1 + w) + " " + (1 + n) + " L " + (1 + w) + " " + (1 + h - r) +
-                   " Q " + (1 + w) + " " + (1 + h) + " " + (1 + w - r) + " " + (1 + h) + " L " + (1 + r) + " " + (1 + h) +
-                   " Q 1 " + (1 + h) + " 1 " + (1 + h - r) + " L 1 " + (1 + r) + " Q 1 1 " + (1 + r) + " 1 Z"
-        }
-        MultiEffect {
-            visible: app.hasGame
-            source: shell
-            anchors.fill: shell
-            shadowEnabled: true
-            shadowColor: "#000000"
-            shadowOpacity: 0.7
-            shadowBlur: 1.0
-            shadowVerticalOffset: cart.hot ? 24 : 16
-            blurMax: 56
-            Behavior on shadowVerticalOffset { NumberAnimation { duration: 260 } }
-        }
-        Item {
-            id: shell
-            anchors.fill: parent
-            Shape {
-                anchors.fill: parent
-                visible: app.hasGame
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: cart.hot ? T.blue : "#3a4390"
-                    strokeWidth: 2
-                    fillGradient: LinearGradient {
-                        x1: 0; y1: 0; x2: 0; y2: cart.height
-                        GradientStop { position: 0; color: "#353e86" }
-                        GradientStop { position: 1; color: "#232a5e" }
-                    }
-                    PathSvg { path: cart.outline }
-                }
-            }
-            Shape {
-                anchors.fill: parent
-                visible: !app.hasGame
-                preferredRendererType: Shape.CurveRenderer
-                ShapePath {
-                    strokeColor: cart.hot ? T.blue : "#3e4794"
-                    strokeWidth: 2
-                    strokeStyle: ShapePath.DashLine
-                    dashPattern: [5, 4]
-                    fillColor: "#0cffffff"
-                    PathSvg { path: cart.outline }
-                }
-            }
-            Row {  // the grip along the top
-                visible: app.hasGame
-                x: 30; y: 14
-                spacing: 7
-                Repeater { model: 6; Rectangle { width: 3; height: 18; radius: 1.5; color: "#4b55a8" } }
-            }
-            Rectangle {  // the label
-                visible: app.hasGame
-                x: 22; y: 46
-                width: parent.width - 44
-                height: parent.height - 46 - 74
-                radius: 16
-                gradient: Gradient {
-                    GradientStop { position: 0; color: "#ffffff" }
-                    GradientStop { position: 1; color: "#e9ecfb" }
-                }
-                Image {
-                    id: art
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: 18
-                    width: 144; height: 144
-                    source: app.icon
-                    smooth: false
-                    fillMode: Image.PreserveAspectFit
-                }
-                Text {
-                    anchors.top: art.bottom
-                    anchors.topMargin: 12
-                    width: parent.width - 28
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: app.gameName
-                    color: T.ink
-                    font.family: T.display
-                    font.pixelSize: 19
-                    font.weight: Font.Bold
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    maximumLineCount: 3
-                    elide: Text.ElideRight
-                }
-                Text {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 10
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: app.maker
-                    color: "#7a80a6"
-                    font.pixelSize: 12
-                }
-            }
-            Badge {
-                visible: app.hasGame
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 20
-                text: app.badge
-                tone: app.known ? T.green : T.amber
-            }
-            Column {  // empty: choose a game
-                visible: !app.hasGame
-                anchors.centerIn: parent
-                spacing: 14
-                Item {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    width: 92; height: 92
-                    MultiEffect {
-                        source: ring; anchors.fill: ring
-                        shadowEnabled: true; shadowColor: T.violet; shadowOpacity: cart.hot ? 0.9 : 0.5; shadowBlur: 1.0; blurMax: 40
-                    }
-                    Rectangle {
-                        id: ring
-                        anchors.fill: parent
-                        radius: width / 2
-                        gradient: Gradient {
-                            orientation: Gradient.Horizontal
-                            GradientStop { position: 0; color: T.red }
-                            GradientStop { position: 0.5; color: T.violet }
-                            GradientStop { position: 1; color: T.blue }
-                        }
-                        SequentialAnimation on scale {
-                            loops: Animation.Infinite
-                            NumberAnimation { from: 1; to: 1.07; duration: 900; easing.type: Easing.InOutSine }
-                            NumberAnimation { from: 1.07; to: 1; duration: 900; easing.type: Easing.InOutSine }
-                        }
-                        Rectangle { anchors.centerIn: parent; width: 34; height: 5; radius: 2.5; color: "white" }
-                        Rectangle { anchors.centerIn: parent; width: 5; height: 34; radius: 2.5; color: "white" }
-                    }
-                }
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: "Choose a game"
-                    color: T.text
-                    font.family: T.display
-                    font.pixelSize: 24
-                    font.weight: Font.Bold
-                }
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: ".3ds   .cci   .cia   .cxi"
-                    color: T.dim
-                    font.pixelSize: 13
-                }
-                Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: "encrypted or decrypted  ·  Ctrl+O"
-                    color: T.faint
-                    font.pixelSize: 12
-                }
-            }
-        }
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            enabled: !app.building
-            cursorShape: Qt.PointingHandCursor
-            onPositionChanged: (m) => { cart.tiltY = (m.x / width - 0.5) * 16; cart.tiltX = -(m.y / height - 0.5) * 12 }
-            onEntered: cart.hot = true
-            onExited: { cart.hot = false; cart.tiltX = 0; cart.tiltY = 0 }
-            onClicked: cart.clicked()
-        }
-        Accessible.role: Accessible.Button
-        Accessible.name: app.hasGame ? app.gameName + ", choose another game" : "Choose a game"
-        activeFocusOnTab: true
-        Keys.onReturnPressed: cart.clicked()
-        Keys.onSpacePressed: cart.clicked()
-    }
-
     // A 3DS and a Wii U GamePad, with lights running from one to the other.
     component Doodle: Item {
         id: dd
@@ -598,9 +562,9 @@ ApplicationWindow {
                 model: [40, 30]
                 Rectangle {
                     width: 56; height: 30; radius: 7
-                    color: "#1a1f4a"
+                    color: T.surface2
                     border.color: T.red; border.width: 2
-                    Rectangle { anchors.centerIn: parent; width: modelData; height: 18; radius: 3; color: "#2b337a" }
+                    Rectangle { anchors.centerIn: parent; width: modelData; height: 18; radius: 3; color: T.surface2 }
                 }
             }
         }
@@ -613,16 +577,16 @@ ApplicationWindow {
                 width: lit ? 9 : 5
                 height: width
                 radius: width / 2
-                color: lit ? Qt.rgba(1 - index * 0.15, 0.36 + index * 0.09, 0.45 + index * 0.11, 1) : "#2c3370"  // coral to blue
+                color: lit ? Qt.rgba(1 - index * 0.15, 0.36 + index * 0.09, 0.45 + index * 0.11, 1) : T.surface2  // coral to blue
                 Behavior on width { NumberAnimation { duration: 120 } }
             }
         }
         Rectangle {
             x: 156; y: 14
             width: 78; height: 42; radius: 17
-            color: "#1a1f4a"
+            color: T.surface2
             border.color: T.blue; border.width: 2
-            Rectangle { anchors.centerIn: parent; width: 36; height: 25; radius: 3; color: "#2b337a" }
+            Rectangle { anchors.centerIn: parent; width: 36; height: 25; radius: 3; color: T.surface2 }
             Rectangle { x: 8; y: 13; width: 9; height: 9; radius: 4.5; color: T.dim }
             Rectangle { x: parent.width - 17; y: 13; width: 9; height: 9; radius: 4.5; color: T.dim }
         }
@@ -640,7 +604,7 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.margins: 2
             radius: 16
-            color: nb.chosen ? "#1d2252" : area.containsMouse ? "#151a40" : "transparent"
+            color: nb.chosen ? T.surface2 : area.containsMouse ? T.surface2 : "transparent"
             Behavior on color { ColorAnimation { duration: 160 } }
         }
         Item {
@@ -698,7 +662,7 @@ ApplicationWindow {
     component LogPanel: Rectangle {
         implicitHeight: 150
         radius: 14
-        color: "#0a0c1e"
+        color: T.surface2
         border.color: T.edge
         ScrollView {
             anchors.fill: parent
@@ -724,103 +688,80 @@ ApplicationWindow {
         layer.enabled: dialogLayer.visible
         layer.effect: MultiEffect { blurEnabled: true; blur: 0.55; blurMax: 40; brightness: -0.08 }
 
-        // the aurora: two soft lights drifting behind everything
+        // the backdrop: pale stripes, as behind the 3DS HOME Menu's icons
         Item {
             anchors.fill: parent
             clip: true
-            Shape {
-                id: glowA
-                width: 760; height: 760
-                x: 40; y: -420
-                opacity: 0.42
-                ShapePath {
-                    strokeColor: "transparent"
-                    fillGradient: RadialGradient {
-                        centerX: 380; centerY: 380; centerRadius: 380; focalX: 380; focalY: 380
-                        GradientStop { position: 0; color: T.red }
-                        GradientStop { position: 1; color: "#00ff5a73" }
-                    }
-                    PathAngleArc { centerX: 380; centerY: 380; radiusX: 380; radiusY: 380; startAngle: 0; sweepAngle: 360 }
-                }
-                SequentialAnimation on x {
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 180; duration: 14000; easing.type: Easing.InOutSine }
-                    NumberAnimation { to: 40; duration: 14000; easing.type: Easing.InOutSine }
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    GradientStop { position: 0; color: T.surface }
+                    GradientStop { position: 1; color: T.bg }
                 }
             }
-            Shape {
-                width: 820; height: 820
-                x: win.width - 560; y: win.height - 430
-                opacity: 0.36
-                ShapePath {
-                    strokeColor: "transparent"
-                    fillGradient: RadialGradient {
-                        centerX: 410; centerY: 410; centerRadius: 410; focalX: 410; focalY: 410
-                        GradientStop { position: 0; color: T.blue }
-                        GradientStop { position: 1; color: "#003fd0ff" }
-                    }
-                    PathAngleArc { centerX: 410; centerY: 410; radiusX: 410; radiusY: 410; startAngle: 0; sweepAngle: 360 }
-                }
-                SequentialAnimation on y {
-                    loops: Animation.Infinite
-                    NumberAnimation { to: win.height - 520; duration: 16000; easing.type: Easing.InOutSine }
-                    NumberAnimation { to: win.height - 430; duration: 16000; easing.type: Easing.InOutSine }
-                }
-            }
-            Shape {
-                width: 600; height: 600
-                x: win.width * 0.35; y: win.height * 0.55
-                opacity: 0.22
-                ShapePath {
-                    strokeColor: "transparent"
-                    fillGradient: RadialGradient {
-                        centerX: 300; centerY: 300; centerRadius: 300; focalX: 300; focalY: 300
-                        GradientStop { position: 0; color: T.violet }
-                        GradientStop { position: 1; color: "#00a07bff" }
-                    }
-                    PathAngleArc { centerX: 300; centerY: 300; radiusX: 300; radiusY: 300; startAngle: 0; sweepAngle: 360 }
-                }
+            Repeater {
+                model: Math.ceil(win.height / 8)
+                Rectangle { y: index * 8; width: win.width; height: 3; color: T.stripe }
             }
         }
 
-        // the rail on the left
+        // the status bar, as along the top of the HOME Menu: the app's name, and where its other pages are
         Rectangle {
-            id: rail
-            width: 92
-            anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
-            color: "#cc080a1a"
-            Rectangle { anchors { top: parent.top; bottom: parent.bottom; right: parent.right } width: 1; color: T.edge }
-            Image {
-                source: appIcon
-                width: 66; height: 66  // the 3Dii U logo, wide: smaller and its letters blur
-                anchors.horizontalCenter: parent.horizontalCenter
-                y: 14
-                smooth: true
-                mipmap: true
+            id: statusBar
+            anchors { top: parent.top; left: parent.left; right: parent.right }
+            height: 54
+            gradient: Gradient {
+                GradientStop { position: 0; color: T.surface }
+                GradientStop { position: 1; color: T.surface2 }
             }
-            Column {
-                anchors.horizontalCenter: parent.horizontalCenter
-                y: 96
-                spacing: 6
-                NavButton { kind: "build"; label: "Build"; chosen: win.page === kind; onPicked: win.page = kind }
-                NavButton { kind: "games"; label: "Games"; chosen: win.page === kind; onPicked: win.page = kind }
-                NavButton { kind: "help"; label: "Help"; chosen: win.page === kind; onPicked: win.page = kind }
+            Rectangle { anchors { left: parent.left; right: parent.right; bottom: parent.bottom } height: 1; color: T.edge }
+            Row {
+                anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
+                spacing: 10
+                Image { source: appIcon; width: 40; height: 40; smooth: true; mipmap: true; anchors.verticalCenter: parent.verticalCenter }
+                Row {
+                    anchors.verticalCenter: parent.verticalCenter
+                    Text { text: "3D"; color: T.red; font.family: T.display; font.pixelSize: 22; font.weight: Font.Bold }
+                    Text { text: "ii U"; color: T.blue; font.family: T.display; font.pixelSize: 22; font.weight: Font.Bold }
+                    Text { text: " Builder"; color: T.dim; font.family: T.display; font.pixelSize: 22 }
+                }
+                Item { width: 14; height: 1 }
+                Repeater {
+                    model: [{ page: "build", label: "HOME" }, { page: "games", label: "Games that work" }, { page: "help", label: "Help" }]
+                    Pill {
+                        anchors.verticalCenter: parent.verticalCenter
+                        small: true
+                        main: win.page === modelData.page
+                        text: modelData.label
+                        onClicked: win.page = modelData.page
+                    }
+                }
             }
             Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 16
+                id: versionLabel
+                anchors { right: parent.right; rightMargin: 124; verticalCenter: parent.verticalCenter }
                 text: "v" + app.version
                 color: T.faint
                 font.pixelSize: 11
+            }
+            // credits and licences: the projects the builder is built on (credits.py)
+            Text {
+                anchors { right: versionLabel.left; rightMargin: 14; verticalCenter: parent.verticalCenter }
+                text: "About"
+                color: aboutArea.containsMouse ? T.text : T.dim
+                font.pixelSize: 12
+                font.underline: aboutArea.containsMouse
+                Accessible.role: Accessible.Button
+                Accessible.name: "About 3Dii U Builder, credits and licences"
+                MouseArea { id: aboutArea; anchors.fill: parent; anchors.margins: -6; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: app.about() }
             }
         }
 
         // the title bar: drag to move, the window's buttons on the right
         Item {
             id: titleBar
-            anchors { left: rail.right; right: parent.right; top: parent.top }
-            height: 40
+            anchors { left: parent.left; right: parent.right; top: parent.top }
+            height: 54
             DragHandler { target: null; onActiveChanged: if (active) win.startSystemMove() }
             TapHandler { onDoubleTapped: win.visibility === Window.Maximized ? win.showNormal() : win.showMaximized() }
             Row {
@@ -830,7 +771,7 @@ ApplicationWindow {
                     model: ["min", "close"]
                     Rectangle {
                         width: 52; height: 40
-                        color: wbArea.containsMouse ? (modelData === "close" ? "#e81123" : "#22ffffff") : "transparent"
+                        color: wbArea.containsMouse ? (modelData === "close" ? "#e81123" : "#14000000") : "transparent"
                         Rectangle { visible: modelData === "min"; anchors.centerIn: parent; width: 12; height: 1.5; color: T.text }
                         Item {
                             visible: modelData === "close"
@@ -850,32 +791,10 @@ ApplicationWindow {
             }
         }
 
-        // the header
-        Item {
-            id: header
-            anchors { left: rail.right; right: parent.right; top: parent.top; leftMargin: 34; rightMargin: 34; topMargin: 30 }
-            height: 82
-            Row {
-                id: logo
-                spacing: 0
-                Text { text: "3D"; color: T.red; font.family: T.display; font.pixelSize: 40; font.weight: Font.Bold }
-                Text { text: "ii U"; color: T.blue; font.family: T.display; font.pixelSize: 40; font.weight: Font.Bold }
-                Text { text: "  Builder"; color: T.dim; font.family: T.display; font.pixelSize: 40; font.weight: Font.Light }
-            }
-            Text {
-                anchors.top: logo.bottom
-                anchors.topMargin: 0
-                text: "Your own 3DS games, made for your Wii U."
-                color: T.dim
-                font.pixelSize: 15
-            }
-            Doodle { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter }
-        }
-
         // the pages
         Item {
             id: pages
-            anchors { left: rail.right; right: parent.right; top: header.bottom; bottom: parent.bottom; leftMargin: 34; rightMargin: 34; topMargin: 18; bottomMargin: 26 }
+            anchors { left: parent.left; right: parent.right; top: statusBar.bottom; bottom: parent.bottom; leftMargin: 26; rightMargin: 26; topMargin: 16; bottomMargin: 20 }
 
             // ---- Build
             Item {
@@ -884,138 +803,173 @@ ApplicationWindow {
                 opacity: win.page === "build" ? 1 : 0
                 visible: opacity > 0
                 Behavior on opacity { NumberAnimation { duration: 220 } }
-                RowLayout {
+                ColumnLayout {
                     anchors.fill: parent
-                    spacing: 30
-                    ColumnLayout {
-                        Layout.fillWidth: false  // layouts fill by default, and the note's one-line width would widen it
-                        Layout.preferredWidth: 300
-                        Layout.maximumWidth: 300
-                        Layout.fillHeight: true
-                        spacing: 0
-                        Cartridge { Layout.alignment: Qt.AlignHCenter; onClicked: app.chooseGame() }
-                        Text {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 16
-                            Layout.leftMargin: 6
-                            Layout.rightMargin: 6
-                            text: app.note
-                            color: T.dim
-                            font.pixelSize: 13
-                            wrapMode: Text.WordWrap
-                        }
-                        Text {
-                            Layout.fillWidth: true
-                            Layout.topMargin: 6
-                            Layout.leftMargin: 6
-                            visible: app.meta.length > 0
-                            text: app.meta
-                            color: T.faint
-                            font.pixelSize: 11
-                            elide: Text.ElideRight
-                        }
-                        Item { Layout.fillHeight: true }
-                        Pill {
-                            Layout.fillWidth: true
-                            implicitHeight: 58
-                            main: true
-                            size: 21
-                            text: app.building ? "Building..." : "Build it!"
-                            enabled: app.canBuild && !app.building
-                            onClicked: app.build()
+                    spacing: 14
+
+                    // the top screen: the chosen game's banner
+                    Glass {
+                        id: banner
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: app.view === "form" ? 232 : 118
+                        Behavior on Layout.preferredHeight { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                        pad: 16
+                        Item {
+                            width: parent.width
+                            height: banner.height - 2 * banner.pad
+                            // no game yet: the whole banner asks for one
+                            Column {
+                                anchors.centerIn: parent
+                                visible: !app.hasGame
+                                spacing: 6
+                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Choose a game"; color: T.text; font.family: T.display; font.pixelSize: 30; font.weight: Font.Bold }
+                                Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Tap the + below, or drop a .3ds, .cci, .cia or .cxi here"; color: T.dim; font.pixelSize: 14 }
+                            }
+                            MouseArea { anchors.fill: parent; enabled: !app.hasGame; cursorShape: Qt.PointingHandCursor; onClicked: app.chooseGame() }
+                            RowLayout {
+                                anchors.fill: parent
+                                visible: app.hasGame
+                                spacing: 18
+                                Rectangle {  // its cover, as the Wii U shows it while the game starts
+                                    Layout.fillHeight: true
+                                    Layout.preferredWidth: height * 16 / 9
+                                    radius: 10
+                                    color: "#000000"
+                                    clip: true
+                                    Image {
+                                        anchors.centerIn: parent
+                                        source: app.hasArt ? app.artUrl : app.icon
+                                        height: app.hasArt ? parent.height : Math.min(96, parent.height - 16)
+                                        width: app.hasArt ? parent.width : height
+                                        fillMode: Image.PreserveAspectFit
+                                        smooth: app.hasArt
+                                        mipmap: app.hasArt
+                                    }
+                                }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    spacing: 4
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 12
+                                        Text { text: app.gameName; color: T.text; font.family: T.display; font.pixelSize: 28; font.weight: Font.Bold; elide: Text.ElideRight; Layout.fillWidth: true }
+                                        Badge { text: app.badge; tone: app.known ? T.green : T.amber }
+                                    }
+                                    Text { text: (app.maker ? app.maker + "   \u00b7   " : "") + app.meta; color: T.faint; font.pixelSize: 12; elide: Text.ElideRight; Layout.fillWidth: true }
+                                    Text {
+                                        visible: app.view === "form"
+                                        text: app.note
+                                        color: T.dim
+                                        font.pixelSize: 13
+                                        wrapMode: Text.WordWrap
+                                        maximumLineCount: 2
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                    Item { Layout.fillHeight: true }
+                                    RowLayout {
+                                        visible: app.view === "form"
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        TouchTile { label: "Update"; status: app.updateText; on: app.hasUpdate; usable: !app.building
+                                                    onPicked: app.chooseExtra("update"); onCleared: app.removeExtra("update") }
+                                        TouchTile { label: "DLC"; status: app.dlcText; on: app.hasDlc; usable: !app.building
+                                                    onPicked: app.chooseExtra("dlc"); onCleared: app.removeExtra("dlc") }
+                                        TouchTile { label: "Mod"; status: app.modText; on: app.hasMod; usable: !app.building
+                                                    onPicked: modMenu.popup(); onCleared: app.removeExtra("mod") }
+                                        TouchTile { label: "Banner art"; status: app.artText; on: app.hasArt; usable: !app.building
+                                                    onPicked: app.chooseArt(); onCleared: app.removeArt() }
+                                    }
+                                }
+                            }
+                            Menu {
+                                id: modMenu
+                                MenuItem { text: "A .zip"; onTriggered: app.chooseMod("zip") }
+                                MenuItem { text: "A folder"; onTriggered: app.chooseMod("folder") }
+                            }
                         }
                     }
+
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
 
-                        // the form
+                        // the bottom screen: the library's icons, then what a build needs and the big button
                         ColumnLayout {
                             id: form
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            spacing: 16
+                            anchors.fill: parent
+                            spacing: 12
                             opacity: app.view === "form" ? 1 : 0
                             visible: opacity > 0
                             Behavior on opacity { NumberAnimation { duration: 220 } }
-                            Glass {
+                            Rectangle {
                                 Layout.fillWidth: true
-                                ColumnLayout {
-                                    width: parent.width
-                                    spacing: 12
-                                    CardTitle { title: "Extras"; sub: "The game's update, DLC and a mod, if you have them. You're asked about each when you pick a game." }
-                                    ItemRow {
-                                        title: "Update"; elideMode: Text.ElideRight
-                                        status: app.updateText
-                                        dot: app.hasUpdate ? T.green : T.faint
-                                        Pill { small: true; text: app.hasUpdate ? "Change" : "Choose"; enabled: app.hasGame && !app.building; onClicked: app.chooseExtra("update") }
-                                        Pill { small: true; text: "Remove"; enabled: app.hasUpdate && !app.building; onClicked: app.removeExtra("update") }
-                                    }
-                                    ItemRow {
-                                        title: "DLC"; elideMode: Text.ElideRight
-                                        status: app.dlcText
-                                        dot: app.hasDlc ? T.green : T.faint
-                                        Pill { small: true; text: app.hasDlc ? "Change" : "Choose"; enabled: app.hasGame && !app.building; onClicked: app.chooseExtra("dlc") }
-                                        Pill { small: true; text: "Remove"; enabled: app.hasDlc && !app.building; onClicked: app.removeExtra("dlc") }
-                                    }
-                                    ItemRow {
-                                        title: "Mod"; elideMode: Text.ElideRight
-                                        status: app.modText
-                                        dot: app.hasMod ? T.green : T.faint
-                                        Pill { small: true; text: ".zip"; enabled: app.hasGame && !app.building; onClicked: app.chooseMod("zip") }
-                                        Pill { small: true; text: "Folder"; enabled: app.hasGame && !app.building; onClicked: app.chooseMod("folder") }
-                                        Pill { small: true; text: "Remove"; enabled: app.hasMod && !app.building; onClicked: app.removeExtra("mod") }
+                                Layout.fillHeight: true
+                                Layout.minimumHeight: 150
+                                radius: 20
+                                color: T.well
+                                border.color: T.edge
+                                Flickable {
+                                    id: shelf
+                                    anchors.fill: parent
+                                    anchors.margins: 14
+                                    contentWidth: icons.width
+                                    contentHeight: height
+                                    clip: true
+                                    flickableDirection: Flickable.HorizontalFlick
+                                    Row {
+                                        id: icons
+                                        height: parent.height
+                                        spacing: 16
+                                        Repeater {
+                                            model: app.library
+                                            GameIcon {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                name: modelData.name
+                                                picture: modelData.cover || modelData.icon
+                                                pixel: !modelData.cover
+                                                chosen: modelData.current
+                                                onPicked: app.openRecent(modelData.path)
+                                                onForgotten: app.forgetGame(modelData.path)
+                                            }
+                                        }
+                                        GameIcon { anchors.verticalCenter: parent.verticalCenter; name: "Add a game"; plus: true; onPicked: app.chooseGame() }
                                     }
                                 }
                             }
-                            Glass {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                ColumnLayout {
-                                    width: parent.width
-                                    spacing: 12
-                                    CardTitle { title: "Your files"; sub: "They stay on this PC. The builder never shows or keeps a key." }
-                                    ItemRow {
-                                        title: "3DS keys"
-                                        status: app.keysText
-                                        dot: app.keysOk ? T.green : app.keysNeeded ? T.amber : T.faint
-                                        Pill { small: true; text: "Folder..."; onClicked: app.chooseKeys() }
-                                    }
-                                    ItemRow {
-                                        title: "Wii U otp.bin"
-                                        status: app.otpText
-                                        dot: app.otpOk ? T.green : T.amber
-                                        Pill { small: true; text: "File..."; onClicked: app.chooseOtp() }
-                                    }
-                                    ItemRow {
-                                        title: "3DS system files"
-                                        status: app.sysText
-                                        dot: app.sysOk ? T.green : T.amber
-                                        Pill { small: true; text: "What are these?"; onClicked: app.explainSystem() }
-                                        Pill { small: true; text: "Folder..."; onClicked: app.chooseSystem() }
-                                    }
-                                }
+                                spacing: 10
+                                FileChip { label: "3DS keys"; status: app.keysText; tone: app.keysOk ? T.green : app.keysNeeded ? T.amber : T.faint
+                                           onPicked: app.chooseKeys(); onAsked: app.explain("keys") }
+                                FileChip { label: "Wii U otp.bin"; status: app.otpText; tone: app.otpOk ? T.green : T.amber
+                                           onPicked: app.chooseOtp(); onAsked: app.explain("otp") }
+                                FileChip { label: "3DS system files"; status: app.sysText; tone: app.sysOk ? T.green : T.amber
+                                           onPicked: app.chooseSystem(); onAsked: app.explain("system") }
                             }
-                            Glass {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                ColumnLayout {
-                                    width: parent.width
-                                    spacing: 12
-                                    CardTitle { title: "Put it on" }
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 12
-                                        Toggle {
-                                            options: [{ value: "card", label: "SD card" }, { value: "folder", label: "A folder" }]
-                                            value: app.target
-                                            onPicked: (v) => app.setTarget(v)
-                                        }
-                                        Pill {
-                                            id: destButton
-                                            Layout.fillWidth: true
-                                            text: app.destText + (app.target === "card" ? "   ▾" : "")
-                                            onClicked: app.target === "card" ? drives.popup(destButton, 0, destButton.height + 6) : app.chooseFolder()
-                                        }
-                                    }
+                                spacing: 10
+                                Toggle {
+                                    options: [{ value: "card", label: "SD card" }, { value: "folder", label: "A folder" }]
+                                    value: app.target
+                                    onPicked: (v) => app.setTarget(v)
+                                }
+                                Pill {
+                                    id: destButton
+                                    Layout.fillWidth: true
+                                    text: app.destText + (app.target === "card" ? "   \u25be" : "")
+                                    onClicked: app.target === "card" ? drives.popup(destButton, 0, destButton.height + 6) : app.chooseFolder()
+                                }
+                                Pill {
+                                    Layout.preferredWidth: 260
+                                    implicitHeight: 56
+                                    main: true
+                                    size: 22
+                                    text: app.building ? "Building..." : "Build it!"
+                                    enabled: app.canBuild && !app.building
+                                    onClicked: app.build()
                                 }
                             }
                         }
@@ -1260,7 +1214,7 @@ ApplicationWindow {
                 ColumnLayout {
                     width: parent.width
                     spacing: 18
-                    CardTitle { title: "How it works"; sub: "Five things, all your own. Nothing is downloaded, and no game or key comes with the builder." }
+                    CardTitle { title: "How it works"; sub: "Five things, all your own. No game or key comes with the builder, and the only thing it downloads is a game's cover art." }
                     Repeater {
                         id: steps
                         model: [
@@ -1296,14 +1250,14 @@ ApplicationWindow {
     Menu {
         id: drives
         width: 300
-        background: Rectangle { radius: 14; color: "#1a1f4a"; border.color: T.edge }
+        background: Rectangle { radius: 14; color: T.surface2; border.color: T.edge }
         Instantiator {
             model: app.cards
             delegate: MenuItem {
                 text: modelData.label
                 onTriggered: app.pickCard(modelData.path)
                 contentItem: Text { text: parent.text; color: T.text; font.pixelSize: 14; leftPadding: 8 }
-                background: Rectangle { radius: 10; color: parent.highlighted ? "#2b3274" : "transparent" }
+                background: Rectangle { radius: 10; color: parent.highlighted ? T.surface2 : "transparent" }
             }
             onObjectAdded: (i, o) => drives.insertItem(i, o)
             onObjectRemoved: (i, o) => drives.removeItem(o)
@@ -1320,7 +1274,7 @@ ApplicationWindow {
             text: "Look again"
             onTriggered: app.refreshCards()
             contentItem: Text { text: parent.text; color: T.blue; font.pixelSize: 14; leftPadding: 8 }
-            background: Rectangle { radius: 10; color: parent.highlighted ? "#2b3274" : "transparent" }
+            background: Rectangle { radius: 10; color: parent.highlighted ? T.surface2 : "transparent" }
         }
     }
 

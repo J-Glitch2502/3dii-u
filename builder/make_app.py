@@ -28,7 +28,8 @@ ENGINE_FILES = ('third_party/cafeglsl/glslcompiler.exe', 'third_party/cafeglsl/l
 WORK = os.path.join(HERE, 'build_app')  # PyInstaller's own work folder, gone afterwards
 NAME = '3Dii U Builder'
 # what the build's scripts import that the window's code doesn't (they're run from the repository by path, so PyInstaller can't see them)
-SCRIPT_MODULES = ('argparse', 'bisect', 'builtins', 'concurrent.futures', 'filecmp', 'glob', 'hashlib', 'mmap', 'runpy', 'shlex', 'zlib',
+SCRIPT_MODULES = ('urllib.request', 'ssl',  # covers.py, when the window is the frozen app
+                  'argparse', 'bisect', 'builtins', 'concurrent.futures', 'filecmp', 'glob', 'hashlib', 'mmap', 'runpy', 'shlex', 'zlib',
                   'cryptography.hazmat.primitives.ciphers')  # the last for phase0/tools/pack_wup.py, which packs the WUP
 EXCLUDE = ('numpy', 'PIL', 'tkinter', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick', 'PySide6.QtPdf',
            'PySide6.QtMultimedia', 'PySide6.Qt3DCore', 'PySide6.QtCharts', 'PySide6.QtDataVisualization', 'PySide6.QtGraphs', 'PySide6.QtQuick3D')
@@ -159,7 +160,7 @@ def main():
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "icon.png")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "bin", "makerom.exe")}{os.pathsep}bin',
-            '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'cia_to_decrypted_3ds']
+            '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'covers', '--hidden-import', 'cia_to_decrypted_3ds']
     for m in SCRIPT_MODULES:
         args += ['--hidden-import', m]
     for m in EXCLUDE:
@@ -176,6 +177,14 @@ def main():
     with open(os.path.join(app, 'Read me first.txt'), 'w', encoding='utf-8') as f:
         f.write(readme)
     shutil.copyfile(os.path.join(HERE, 'app_notices.txt'), os.path.join(app, 'Third-party notices.txt'))
+    # the app's licence (EUPL-1.2) and every bundled part's notice and full licence text, as the licences ask of a binary release
+    shutil.copyfile(os.path.join(ROOT, 'LICENSE'), os.path.join(app, 'LICENSE.txt'))
+    shutil.copyfile(os.path.join(ROOT, 'THIRD_PARTY_LICENSES.md'), os.path.join(app, 'THIRD_PARTY_LICENSES.md'))
+    import user_files
+    leaked = user_files.bundled(app)
+    if leaked:  # keys and console dumps are each user's own: an app carrying one must never ship
+        sys.exit('The app holds files only a user may supply, so it was not packed:\n  ' + '\n  '.join(leaked))
+    shutil.copyfile(os.path.join(app, 'engine', 'stamp.txt'), os.path.join(app, '_internal', 'stamp.txt'))  # app.py: one version, not two mixed
     files = sum(len(fs) for _, _, fs in os.walk(app)) + 1  # and files.txt, which app.py checks by that a tester unzipped the whole app
     with open(os.path.join(app, '_internal', 'files.txt'), 'w') as f:
         f.write(str(files))

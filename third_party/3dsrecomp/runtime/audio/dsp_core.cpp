@@ -108,7 +108,11 @@ void wakeup(Dsp &d) {
     reset_pipes(d);
 }
 
-StereoFrame generate_frame(Dsp &d) {
+// seen: the game is waiting for this frame. One it isn't waiting for (it's late: reading a file, held up by another thread) still plays what
+// its voices have queued, as a 3DS's DSP goes on playing whatever the game does, but leaves the shared memory's settings and status alone: the
+// game may be in the middle of them, and a status it never read would lose it a "buffer finished" (a stream then reloads a buffer still
+// queued and the game hangs walking the voice's list). The next frame it takes reports what happened meanwhile.
+StereoFrame generate_frame(Dsp &d, bool seen) {
     const int ri = read_region_index();
     if (g_verbose >= 3) {  // which region the game submitted, and both frame counters, when that changes
         static u32 last = ~0u;
@@ -124,15 +128,16 @@ StereoFrame generate_frame(Dsp &d) {
     // its submissions only plays on: its status would go into the region the game may still be reading (it reads the one it doesn't
     // submit next), and a status changing halfway through gave Luigi's Mansion: Dark Moon one channel of a stereo stream newer news
     // than the other. The stream then queued a buffer again that was still in the second channel's list, and the game hung walking it.
+    // A frame the game doesn't take (seen) is never fresh, and leaves the game's submission to the frame it does take.
     const u16 counter = frame_counter(ri);
-    d.fresh = counter != d.last_counter || (frame_counter(0) == 0 && frame_counter(1) == 0);
-    d.last_counter = counter;
+    d.fresh = seen && (counter != d.last_counter || (frame_counter(0) == 0 && frame_counter(1) == 0));
+    if (seen) d.last_counter = counter;
 
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
-        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, d.fresh);
+        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen, d.fresh);
         if (d.fresh) memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
     }
@@ -306,13 +311,13 @@ u16 recv_data(u32 /*reg*/) {
     return d.power == Power::On ? 0 : 1;
 }
 
-bool tick(bool *fresh) {
+bool tick(bool seen, bool *fresh) {
     Dsp &d = dsp();
     StereoFrame out;
     {
         std::lock_guard lk(d.lock);
         if (d.power != Power::On) return false;
-        out = generate_frame(d);
+        out = generate_frame(d, seen);
         if (fresh) *fresh = d.fresh;
     }
     host_output(out.data(), out.size());

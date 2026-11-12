@@ -14,6 +14,7 @@
 #include <gx2/event.h>
 #include <proc_ui/procui.h>
 #include <sysapp/launch.h>
+#include <sys/stat.h>
 #include <malloc.h>
 #include <nn/act.h>
 #include <unistd.h>
@@ -33,6 +34,7 @@
 #include <new>
 #include <string>
 
+#include "audio/host.h"
 #include "audio_iface.h"
 #include "frontend.h"
 #include "gpu_iface.h"
@@ -45,7 +47,7 @@
 
 static const char *const CONTENT_DIR = "fs:/vol/content";
 void rt_log_sync();
-static volatile bool want_log_sync, want_dump, want_report, crash_pending;
+static volatile bool want_log_sync, want_dump, crash_pending;
 static volatile u32 want_hang_dump, card_passes;  // want_hang_dump: seconds without drawing, plus one
 static volatile u32 idle_samples, all_samples;
 static char crash_msg[512];
@@ -111,7 +113,14 @@ extern const char *g_live_path;
 void frontend_wake() { OSSignalEvent(&gpu_event); }
 }  // namespace kernel
 void frontend_live_text(const std::string &) {}
-void frontend_live_key(const std::string &) {}
+// A route's "KEY quit" quits as choosing Quit in the options menu does. Cemu has no Wii U Menu to leave for, so there the main loop ends
+// itself, as if the system had said so: what a game does as it closes then runs in a check too.
+static volatile bool route_quit;
+void frontend_live_key(const std::string &key) {  // a route's "KEY <name>"
+    if (key != "quit") return;
+    if (wiiu::debug_flag("cemu")) route_quit = true;
+    else wiiu::menu_quit_now();
+}
 namespace onescreen {
 u32 host_mask(const char *) { return 0; }
 }  // namespace onescreen
@@ -194,11 +203,14 @@ static int gpu_thread(int, void *) {
             gpu_parked = false;
             continue;
         }
-        OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
-        const OSTime t0 = OSGetSystemTime();
+        // quiet: two milliseconds went by with nothing asked of the GPU, and nothing came in at the last moment either, which is when a
+        // finished frame may be shown
+        const bool waited = !OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
+        const u64 done = kernel::gx_stats.cmdlists + kernel::gx_stats.transfers;
+        const OSTime t0 = kMeasure ? OSGetSystemTime() : 0;
         kernel::gsp_process_gx();
-        if (!gpu_pause) wiiu::gfx_pump();
-        wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
+        if (!gpu_pause) wiiu::gfx_pump(waited && done == kernel::gx_stats.cmdlists + kernel::gx_stats.transfers);
+        if (kMeasure) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
     }
     if (!gpu_parked) wiiu::gfx_shutdown();
     gpu_parked = true;
@@ -254,9 +266,6 @@ static int hid_thread(int, void *) {
         if (err == VPAD_READ_SUCCESS) {
             buttons = map_buttons(st.hold);
             wiiu::mic_blow(st.hold & VPAD_BUTTON_STICK_R);
-            // the four shoulder buttons together: report where every thread is, for a freeze the watchdog can't see
-            constexpr u32 shoulders = VPAD_BUTTON_L | VPAD_BUTTON_R | VPAD_BUTTON_ZL | VPAD_BUTTON_ZR;
-            if ((st.hold & shoulders) == shoulders) want_report = true;
             wiiu::menu_input(st.trigger);
             if (!leaving && wiiu::menu_wants_quit()) {
                 leaving = true;
@@ -303,17 +312,25 @@ static int hid_thread(int, void *) {
         }
         wiiu::input_override(buttons, touch, tx, ty);
         kernel::hid_update(buttons, cx, cy, touch, tx, ty);
-        all_samples = all_samples + 1;
-        if (kernel::guest_idle()) idle_samples = idle_samples + 1;
+        if (kMeasure) {
+            all_samples = all_samples + 1;
+            if (kernel::guest_idle()) idle_samples = idle_samples + 1;
+        }
         OSSleepTicks(OSMicrosecondsToTicks(4273));  // 234 Hz, as on the 3DS
     }
     return 0;
 }
 
+constexpr int AUDIO_CUSHION = 1600;  // samples kept queued, about 50 ms: audio_wiiu.cpp's CUSHION, which starts the voices at twice this
+
 static int audio_thread(int, void *) {
     const OSTime period = OSNanosecondsToTicks(1000000000ll * 160 / 32728);
     OSTime next = OSGetSystemTime();
     bool silent = false;
+    u32 gaps = 0;
+    OSTime gaps_logged = 0;
+    // for the report of a gap, since the last one: the longest this thread went between two rounds, and the longest a frame took to make
+    OSTime round = OSGetSystemTime(), away = 0, making = 0;
     while (!quitting) {
         if (gpu_pause != silent) {
             silent = gpu_pause;
@@ -324,11 +341,34 @@ static int audio_thread(int, void *) {
             OSSleepTicks(OSMillisecondsToTicks(5));
             continue;
         }
-        next += period;
         const OSTime now = OSGetSystemTime();
-        if (next > now) OSSleepTicks(next - now);
-        else if (now - next > period * 8) next = now;  // never try to catch up on more than a short stall
-        while (!kernel::dsp_tick() && !quitting && !gpu_pause) OSSleepTicks(OSMicrosecondsToTicks(500));
+        away = std::max(away, now - round);
+        round = now;
+        if (const int queued = audio::hle::host_queued(); queued >= 0) {
+            // Once the voices play, a frame is made whenever what's queued falls under the cushion, so the sound keeps to the console's audio
+            // clock. Made by the timer alone, production ran half a percent behind what the voices played, and the queue ran dry about once
+            // a second with the game at full speed and the CPU mostly idle (NSMB2 in Cemu, 2026-11-10).
+            if (queued >= AUDIO_CUSHION) {
+                OSSleepTicks(OSMillisecondsToTicks(1));
+                continue;
+            }
+        } else {  // before the voices start: by the timer
+            next += period;
+            if (next > now) OSSleepTicks(next - now);
+            else if (now - next > period * 8) next = now;  // never try to catch up on more than a short stall
+        }
+        // Nearly nothing left queued: this thread came too late, and the voices are about to play old sound again. Every time is on the log, so
+        // a run can be held to none (tools/check_ports.py).
+        if (const int queued = audio::hle::host_queued(); queued >= 0 && queued < 160) gaps++;
+        kernel::dsp_tick();
+        making = std::max(making, OSGetSystemTime() - now);
+        if (gaps && now - gaps_logged > (OSTime)OSSecondsToTicks(1)) {
+            LOG("[audio] %u gaps: the sound ran out before the next frame of it was made (this thread was away for up to %u ms, a frame took up to %u ms)\n", gaps,
+                (u32)OSTicksToMilliseconds(away), (u32)OSTicksToMilliseconds(making));
+            gaps = 0;
+            away = making = 0;
+            gaps_logged = now;
+        }
     }
     audio_parked = true;
     return 0;
@@ -450,7 +490,6 @@ static int watchdog_thread(int, void *) {
             want_dump = false;
             want_hang_dump = 1;
         }
-        if (want_report) report_stuck("Reported by hand.");
         if (++tenths < 5) continue;
         tenths = 0;
         if (++seconds >= 41 && !drawn && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
@@ -483,7 +522,7 @@ static int card_thread(int, void *) {
             want_hang_dump = 0;
             dump_hang(seconds);
         }
-        if (pass % 300 == 0) {
+        if (kMeasure && pass % 300 == 0) {
             const struct mallinfo m = mallinfo();
             LOG("[wiiu] memory: %u KB in use, %u KB taken from the system, top at %p\n", (u32)m.uordblks >> 10, (u32)m.arena >> 10, sbrk(0));
         }
@@ -519,11 +558,41 @@ static void let_card_catch_up() {
     for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(ms); card_passes == seen && OSGetSystemTime() < until;) OSSleepTicks(OSMillisecondsToTicks(5));
 }
 
+// What this console has had to compile for the game, copied to the SD card as the game closes: sd:/3dii-u/<title id>/learned.bin. It lives in
+// the title's save, which nothing on a PC reads. The builder folds it into its next build of the game (builder/pipeline.py). With no card
+// in, or no room on it, nothing happens. The game's log stays in its save: it is not copied anywhere.
+static void copy_to_card(const std::string &from, const std::string &to) {
+    FILE *in = fopen(from.c_str(), "rb");
+    if (!in) return;
+    if (FILE *out = fopen(to.c_str(), "wb")) {
+        alignas(64) static char block[64 << 10];
+        for (size_t n; (n = fread(block, 1, sizeof block, in)) > 0;)
+            if (fwrite(block, 1, n, out) != n) break;
+        fclose(out);
+    }
+    fclose(in);
+}
+
+static void leave_on_card() {
+    char dir[64];
+    snprintf(dir, sizeof dir, "fs:/vol/external01/3dii-u/%016llx", (unsigned long long)OSGetTitleID());
+    const std::string to = dir, from = wiiu::data_dir();
+    wiiu::fs_begin(0xC00D);
+    mkdir("fs:/vol/external01/3dii-u", 0777);
+    mkdir(dir, 0777);
+    copy_to_card(from + "/shader_misses.bin", to + "/learned.bin");
+    wiiu::fs_end();
+}
+
 void frontend_run() {
     wiiu::profile_this_core();
     OSThread *gpu = spawn(gpu_thread, 2, 16, 2 << 20, "gpu");
     host_threads[1] = gpu;
     host_threads[2] = spawn(hid_thread, 0, 16, 256 << 10, "hid");
+    // The cores: 0 for files, input, the network, the log, the sound and the shader compiler; 1, with the large cache, for the game's code
+    // alone; 2 for the GPU thread alone. The sound was tried on core 2, ahead of the GPU thread: NSMB2's slowest frames fell from 50 fps to
+    // 14 to 16 and its restart from 60 fps to 39 to 44, twice over, and came back with the sound here (Cemu, 2026-11-11). Core 0's own
+    // threads mostly sleep, and the sound has had no gaps from here.
     host_threads[3] = spawn(audio_thread, 0, 15, 512 << 10, "audio");
     spawn(card_thread, 0, 20, 256 << 10, "card");
     stage("threads started");
@@ -531,7 +600,7 @@ void frontend_run() {
     stage("graphics ready");
     OSTime next_clock = OSGetSystemTime();
     u64 frames = 0;
-    while (WHBProcIsRunning()) {
+    while (WHBProcIsRunning() && !route_quit) {
         // While the HOME Menu is up nothing may touch GX2, and with no VBlanks the game waits. WHBProcIsRunning blocks until we're back.
         if (gpu_pause) {
             if (!foreground_back) continue;
@@ -579,7 +648,7 @@ void frontend_run() {
             update_shared_page_time();
             next_clock = OSGetSystemTime() + OSSecondsToTicks(1);
         }
-        if (frames % 300 == 0) {
+        if (kMeasure && frames % 300 == 0) {
             const u32 idle = all_samples ? idle_samples * 100 / all_samples : 0;
             LOG("[wiiu] frame %llu: gx lists %llu, transfers %llu, guest threads idle %u%%\n", (unsigned long long)frames, (unsigned long long)kernel::gx_stats.cmdlists,
                 (unsigned long long)kernel::gx_stats.transfers, idle);
@@ -598,9 +667,19 @@ void frontend_run() {
     quitting = true;
     gfx_may_close = true;
     OSJoinThread(gpu, nullptr);
-    for (int i = 0; i < 50 && !audio_parked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
-    if (audio_parked) audio::shutdown();
+    // The sound system is always shut down before the game goes: left running, its voices play from memory the system is about to take back, and
+    // the Wii U Menu hangs as it starts (testers' NSMB2 and 3D Land, 2026-11-09). The audio thread used to get 100 ms to stop, and a late one
+    // meant no shutdown at all, with nothing logged. A busy game's can be late, so it gets 2 s, and the shutdown happens either way.
+    const OSTime audio_asked = OSGetSystemTime();
+    for (int i = 0; i < 1000 && !audio_parked; i++) OSSleepTicks(OSMillisecondsToTicks(2));
+    LOG("[quit] audio thread %s after %d ms\n", audio_parked ? "stopped" : "still running", (int)OSTicksToMilliseconds(OSGetSystemTime() - audio_asked));
+    audio::shutdown();
+    LOG("[quit] sound system shut down\n");
+    wiiu::fs_begin(0xC001);
+    rt_log_sync();  // the lines since the card thread's last look, these [quit] ones among them: they never reached the file before
+    wiiu::fs_end();
     fflush(nullptr);
+    leave_on_card();
 }
 
 // a crash shows what happened on the screen, so it can be reported: the addresses can be looked up against build/game.nm
@@ -657,7 +736,7 @@ int main(int argc, char **argv) {
     host_threads[0] = OSGetCurrentThread();
     trace_stage = "starting the watchdog";
     spawn(watchdog_thread, 0, 13, 64 << 10, "watchdog");
-    spawn(wiiu::net_thread, 0, 12, 64 << 10, "net");
+    if (kMeasure) spawn(wiiu::net_thread, 0, 12, 64 << 10, "net");
     trace_stage = "system libraries";
     WHBProcInit();
     // WHB registers its own at priority 100 from the GPU thread, on core 2. Each core has its own list, highest first: the GPU stops before WHB's goes, and starts after WHB's has made the screens again.
@@ -692,6 +771,20 @@ int main(int argc, char **argv) {
         fclose(f);
     }
     if (wiiu::test_run()) LOG("[test] a test run from the PC: this boot has a save of its own\n");
+    // debug aid: "env.txt" in the data folder sets the runtime's own test switches, a NAME=value on each line. RECOMP_ROMFS_SWAP=<file>=<other>
+    // (services/fs.cpp) loads a level in place of the one a test route enters: a tower or a castle no route reaches by playing.
+    if (FILE *f = kMeasure ? fopen((wiiu::data_dir() + "/env.txt").c_str(), "r") : nullptr) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (char *eq = strchr(line, '=')) {
+                *eq = 0;
+                setenv(line, eq + 1, 1);
+                LOG("[test] %s is %s\n", line, eq + 1);
+            }
+        }
+        fclose(f);
+    }
     LOG("[wiiu] guest memory at %p\n", g_mem);
     settings_load();
     // The console's Miis, one per account: the game finds them in Mii Maker and as the player's Mii (services/misc.cpp, fs.cpp). On since

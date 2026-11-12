@@ -55,6 +55,11 @@ MIN_FREE_MB = 2500
 os.environ['DEVKITPRO'] = DKP
 os.environ['DEVKITPPC'] = DKP + '/devkitPPC'
 os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ['PATH']
+# A game is built without what only measures it: the clock reads behind the log's five-second lines, those lines, and the network console
+# (rt.h's kMeasure). THREEDII_MEASURE in the environment builds with them, for the checks in Cemu (check_ports.py --measure): the runtime
+# and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
+# packed for a console.
+MEASURE = bool(os.environ.get('THREEDII_MEASURE'))
 
 
 class MemoryStatus(ctypes.Structure):
@@ -191,7 +196,7 @@ def compile_all(items, n, what, force=False, timeout=None, fallback=None):
         objcache.trim(obj_cache())
 
 
-def mobiclip_tables(game_dir):
+def mobiclip_sites(game_dir):
     """Offset-table jumps (`sub rB, pc, #n` ... `add pc, rX, rB`) in the game's code. Mobiclip's hand-written video decoder is made of them
     (168 in Mario Kart 7, the Laytons and Paper Jam): it keeps values in any register across its own calls, which only code generated
     without --abi follows. Mario Kart 7's menu videos stopped the game otherwise."""
@@ -200,18 +205,18 @@ def mobiclip_tables(game_dir):
     with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:
         code = f.read(size)
     words = struct.unpack_from('<%dI' % (len(code) // 4), code)
-    n = 0
+    sites = []  # the address of each
     for i, w in enumerate(words):
         if w >> 28 != 0xE or (w & 0x0FEF0000) != 0x024F0000:  # sub/add rB, pc, #n
             continue
         rb = (w >> 12) & 15
         for x in words[i + 1:i + 16]:
             if (x & 0xFFF0FFF0) == 0xE080F000 and rb in ((x >> 16) & 15, x & 15):  # add pc, rX, rB
-                n += 1
+                sites.append(0x100000 + 4 * i)
                 break
             if (x >> 26) & 3 == 0 and (x >> 12) & 15 == rb:  # rB written again first
                 break
-    return n
+    return sites
 
 
 def coroutine_switches(game_dir):
@@ -260,6 +265,9 @@ def coroutine_switches(game_dir):
     return switches
 
 
+DECODER_MARGIN = 64 << 10
+
+
 class Game:
     """How a game builds. Every game follows the same recipe: what differs comes from the game itself (its code, its program id) or from what
     earlier runs of it learned (functions.txt, shader logs), never from which game it is."""
@@ -268,6 +276,8 @@ class Game:
         self.dir = (game_dir or f'{ROOT}/games/{name}').replace('\\', '/')
         # where the build goes: the folders the first ports were built in, which tools/check_ports.py and tools/ship_card.py look in
         self.out = f'{ROOT}/build' if name == 'tomodachi' else f'{ROOT}/build_layton/{name}' if name.startswith('layton_') else f'{ROOT}/build_mario/{name}'
+        if MEASURE:  # never where the games for a console are built and packed
+            self.out = f'{ROOT}/build_measure/{name}'
         self.rpx, self.nm, self.shaders = f'{self.out}/{name}.rpx', f'{self.out}/game.nm', f'{self.out}/shaders'
         self.extra_functions = f'{self.dir}/functions.txt'  # what runs of the game found that static analysis missed
         # what the 3dsrecomp project's own runs of this game learned: its functions and the render states it uses
@@ -277,9 +287,21 @@ class Game:
         self.pipelines = f'{upstream}/pipelines.bin' if os.path.isfile(f'{upstream}/pipelines.bin') else None
         # Hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder) runs right only when every register
         # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
-        safe = mobiclip_tables(self.dir) >= 8 or coroutine_switches(self.dir) > 0
+        decoder = mobiclip_sites(self.dir)
+        safe = len(decoder) >= 8 or coroutine_switches(self.dir) > 0
         self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
         self.gen_dir = f'{self.dir}/{self.gen}'
+        self.safe_ranges = []  # with mode 'abi': address ranges generated the safe way (mixed)
+        # the decoder's sites span 65 KB of each game that has it; the margin takes in the rest of its library
+        self.decoder_range = (decoder[0] - DECODER_MARGIN, decoder[-1] + DECODER_MARGIN) if len(decoder) >= 8 else None
+
+    def mixed(self):
+        """Trial (--mixed): a game whose only reason for safe mode is the video decoder gets the fast code everywhere else, and the safe
+        way for the decoder's address range alone. The decoder is about 2% of such a game's code. Not the default until it has run on a
+        console: Mario Kart 7, the Laytons and Paper Jam build this way."""
+        if self.mode == 'safe' and self.decoder_range and not coroutine_switches(self.dir):
+            self.gen, self.mode, self.opt, self.safe_ranges = 'gen_mixed', 'abi', [], [self.decoder_range]
+            self.gen_dir = f'{self.dir}/{self.gen}'
 
 
 # ---------------------------------------------------------------- recompiling the game's ARM code to C
@@ -319,6 +341,7 @@ def do_gen(g, args, gen_dir=None, abi=None):
     argv = [sys.executable, ROOT + '/tools/win/gen_lf.py', g.dir, gen_dir or g.gen_dir, '--extra', functions_list(g)]
     if g.mode == 'abi' if abi is None else abi:
         argv.append('--abi')
+        argv += [f'--safe-range={lo:x}-{hi:x}' for lo, hi in getattr(g, 'safe_ranges', [])]
     r = run(argv, cwd=ROOT + '/third_party/3dsrecomp', env=game_env(g), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
     for line in r.stdout.splitlines():
         if re.search(r'instructions:|^functions|undefined instructions|Error|Traceback', line):
@@ -329,7 +352,9 @@ def do_gen(g, args, gen_dir=None, abi=None):
 
 # ---------------------------------------------------------------- the Wii U build
 def link_setup():
-    """wut's linker files adjusted for very large code: see tools/rpx_link_setup.sh"""
+    """wut's linker files adjusted for very large code. The C runtime's .init and .fini are pieces of one function that fall through into each
+    other. With wut's script they land in .text with their callees at the far end of it, and ld --relax then places branch stubs in the
+    fall-through path. Keeping them, and crtbegin's and crtend's code, together at the start of .text means no far branch is needed there."""
     d = WORK + '/rpx'
     os.makedirs(d, exist_ok=True)
     s = open(WUT + '/share/wut.ld').read()
@@ -346,7 +371,7 @@ def runtime_flags(extra):
     return ['-std=c++20', '-O2', '-g0', '-w', '-mcpu=750', '-meabi', '-mhard-float', '-ffunction-sections', '-fno-strict-aliasing', '-fno-exceptions', '-fno-if-conversion',
             '-fno-if-conversion2', '-D__WIIU__', '-D__WUT__', '-DESPRESSO', f'-I{PORT}/wiiu', f'-I{PORT}', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu', f'-I{RT}/services',
             f'-I{CAFEGLSL_PPC}/include',
-            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h'] + extra
+            '-isystem', f'{WUT}/include', '-include', f'{PORT}/wiiu/shim.h'] + (['-DRECOMP_MEASURE'] if MEASURE else []) + extra
 
 
 def obj_name(src):
@@ -355,7 +380,7 @@ def obj_name(src):
 
 def build_runtime(g, args):
     """the runtime every game links: one build of it serves them all"""
-    obj_dir = f'{WORK}/rt_std'
+    obj_dir = f'{WORK}/rt_measure' if MEASURE else f'{WORK}/rt_std'
     os.makedirs(obj_dir, exist_ok=True)
     skip = {'frontend.cpp', 'main.cpp', 'host_sdl.cpp', 'watch.cpp', 'profile.cpp'}  # shadergen.cpp runs on the console too, for shader_compile.cpp
     sources = []
@@ -377,9 +402,14 @@ def build_runtime(g, args):
     return obj_dir
 
 
+# A game's translated code is 15 to 25 times the size of its ARM code, and a console's core has 32 KB of instruction cache: for size, then
+# (NSMB2's code is 25.3 MB at -O2 and 21.5 MB at -Os). No frame pointer and no position-independent code, which are this compiler's defaults, said so.
+GAME_OPT = ['-Os', '-fomit-frame-pointer', '-fno-pic']
+
+
 def game_flags(g, opt=None):
-    return [BIN + 'gcc.exe'] + (shlex.split(opt) if opt else g.opt or ['-O2']) + ['-mcpu=750', '-meabi', '-mhard-float', '-ffp-contract=off', '-fno-math-errno',
-                                                                                   '-fno-strict-aliasing', '-std=gnu11', '-w', f'-I{PORT}', f'-I{RT}', f'-I{g.gen_dir}']
+    return [BIN + 'gcc.exe'] + (shlex.split(opt) if opt else g.opt or GAME_OPT) + ['-mcpu=750', '-meabi', '-mhard-float', '-ffp-contract=off', '-fno-math-errno',
+                                                                                    '-fno-strict-aliasing', '-std=gnu11', '-w', f'-I{PORT}', f'-I{RT}', f'-I{g.gen_dir}']
 
 
 def build_game_code(g, args):
@@ -407,10 +437,10 @@ def build_code(g, args):
     link_setup()
     rt = build_runtime(g, args)
     code = build_game_code(g, args)
-    link_game(g, rt, code)
+    link_game(g, rt, code, getattr(args, 'link_flags', None))
 
 
-def link_game(g, rt, code):
+def link_game(g, rt, code, link_flags=None):
     os.makedirs(WORK + '/link', exist_ok=True)
     os.makedirs(g.out, exist_ok=True)
     def rel(p):  # the standalone builder can have its work folder on another drive than its tools: then there's no relative path
@@ -440,7 +470,7 @@ def link_game(g, rt, code):
     open(stamp_c, 'w', newline='\n').write(f'const char g_build_stamp[] = "{time.strftime("%Y-%m-%d %H:%M")} {g.name}";\n')
     if run([BIN + 'gcc.exe', '-mcpu=750', '-meabi', '-mhard-float', '-c', stamp_c, '-o', f'{WORK}/link/stamp.o']).returncode:
         sys.exit('the build stamp did not compile')
-    extra = [rel(f'{WORK}/link/stamp.o')]
+    extra = [rel(f'{WORK}/link/stamp.o')] + shlex.split(link_flags or '')
     # relative paths: a space in the project's path would break the specs file's -T
     # every file call goes to port/wiiu/fsa_direct.cpp first, the C library's too
     wraps = ['-Wl,--wrap=' + f for f in ('FSAOpenFileEx', 'FSACloseFile', 'FSAReadFile', 'FSAWriteFile', 'FSASetPosFile', 'FSAGetStatFile', 'FSAGetStat', 'FSAFlushFile', 'FSATruncateFile',
@@ -638,7 +668,7 @@ def build_shaders(g, args):
 def host_runtime(args):
     obj_dir = WORK + '/pc_rt'
     os.makedirs(obj_dir, exist_ok=True)
-    flags = HOST_CXX + ['-std=c++20', '-O1', '-g', '-w', '-DRECOMP_VS_LOG', '-D_FILE_OFFSET_BITS=64', f'-I{PORT}/pc/win', f'-I{PORT}/wiiu', f'-I{PORT}/pc', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu',
+    flags = HOST_CXX + ['-std=c++20', '-O1', '-g', '-w', '-DRECOMP_VS_LOG', '-DRECOMP_MEASURE', '-D_FILE_OFFSET_BITS=64', f'-I{PORT}/pc/win', f'-I{PORT}/wiiu', f'-I{PORT}/pc', f'-I{RT}', f'-I{RT}/audio', f'-I{RT}/gpu',
                         f'-I{RT}/services', '-include', f'{PORT}/pc/shim.h', '-DRECOMP_GAME="tomodachi"', f'-DRECOMP_SOURCE_DIR="{ROOT}/third_party/3dsrecomp"'] + shlex.split(args.extra_flags or '')
     skip = {'frontend.cpp', 'main.cpp', 'host_sdl.cpp', 'watch.cpp'}
     sources = []
@@ -782,6 +812,8 @@ def build_title(g, args):
 
 
 def pack(g, otp):
+    if MEASURE:
+        sys.exit('THREEDII_MEASURE is set: that build measures itself and is for Cemu only. Build the game again without it, then pack.')
     title = g.out + '/title'
     target = f'{ROOT}/dist/{known_game(g.name)["folder"]}'  # as tools/ship_card.py names them
     r = subprocess.run([sys.executable, ROOT + '/tools/pack_game_wup.py', otp, title, target], cwd=ROOT)
@@ -795,6 +827,8 @@ def main():
     ap.add_argument('game')
     ap.add_argument('otp', nargs='?', help="pack: your otp.bin. trial: frames, default 3600. lazy (the trial's own use): an address")
     ap.add_argument('--gen', help='trial: which generated code, gen_safe (default) or gen_abi')
+    ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode, for a game that has one')
+    ap.add_argument('--link-flags', help='code: more flags for the link, like -Wl,--section-ordering-file=<file> to place chosen functions together')
     ap.add_argument('--autoplay', type=int, default=2, help='trial: 1 presses A and taps, 2 also wanders, 3 walks about')
     ap.add_argument('--seed', type=int)
     ap.add_argument('--speed', type=int, help='trial: percent. 200 gets further in the same time')
@@ -819,6 +853,8 @@ def main():
     if not os.path.exists(BIN + 'gcc.exe'):
         sys.exit('no toolchain: run tools/win/install_toolchain.sh once')
     g = Game(args.game)
+    if args.mixed:
+        g.mixed()
     if args.out:
         g.out = args.out.replace('\\', '/')
         g.rpx, g.nm, g.shaders = f'{g.out}/{g.name}.rpx', f'{g.out}/game.nm', f'{g.out}/shaders'

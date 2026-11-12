@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -401,10 +402,12 @@ static void log_romfs_read(u64 off) {
 // Games load in the background and expect the rest of the frame to go on meanwhile; an instant read can finish a
 // load before the code that started it has set up for its end (Animal Crossing: New Leaf's map process cleared
 // its own "ready" flag after a synchronous load, leaving the village's bottom screen blank and untouchable).
+// What the read itself took here (spent_ns) counts towards it: a console's storage is no faster than a game card.
 // RECOMP_FS_DELAY=0 turns it off.
-static void romfs_read_delay(IPC &ipc, u32 len) {
+static void romfs_read_delay(IPC &ipc, u32 len, u64 spent_ns) {
     static const bool on = !getenv("RECOMP_FS_DELAY") || atoi(getenv("RECOMP_FS_DELAY")) != 0;
-    if (on) sleep_current(std::max<u64>((u64)len * 94 + 582778, 663124), *ipc.lk);
+    const u64 on_a_3ds = std::max<u64>((u64)len * 94 + 582778, 663124);
+    if (on && spent_ns < on_a_3ds) sleep_current(on_a_3ds - spent_ns, *ipc.lk);
 }
 
 static std::string archive_dir(u32 id, const LowPath &p) {
@@ -469,9 +472,9 @@ struct FileSession : Service {
             u32 len = ipc[3];
             u32 dst = ipc[5];
             s64 n;
-            // Storage can take a long time to answer, and VBlanks and timers need the kernel lock meanwhile. Only the running thread gets here, and it
-            // keeps the CPU until it next enters the kernel, so nothing else in the guest can run into this file.
-            ipc.lk->unlock();
+            // Storage can take a long time to answer: the game's other threads run meanwhile, as they do on a 3DS (run_blocked)
+            const auto began = std::chrono::steady_clock::now();
+            run_blocked(*ipc.lk, [&] {
             if (romfs) {
                 FsIo io(0x0802);
                 log_romfs_read(base + off);
@@ -498,14 +501,15 @@ struct FileSession : Service {
                     n = pread(fd, gptr(dst), len, (off_t)off);
                 }
             }
-            ipc.lk->lock();
+            });
+            const u64 spent_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - began).count();
             if (n < 0) n = 0;
             if (g_verbose >= 2) LOG("[fs] read %s off %llx len %x -> %lld\n", romfs ? "romfs" : path.c_str(), (unsigned long long)off, len, (long long)n);
             ipc.ok(2, 2);
             ipc.set(2, (u32)n);
             ipc.set(3, (len << 4) | 0xC);
             ipc.set(4, dst);
-            if (romfs) romfs_read_delay(ipc, len);
+            if (romfs) romfs_read_delay(ipc, len, spent_ns);
             break;
         }
         case 0x0803: {  // Write(offset u64, size, flush, mapped buffer)
@@ -628,6 +632,28 @@ struct DirSession : Service {
 
 // Shared extdata F000000B always exists on a console (made at system setup): it holds gamecoin.dat, the
 // Play Coin counter, which some games read (or fail) without creating it.
+// What an archive was formatted with: its size in bytes, how many directories and files it's for, and whether it keeps duplicate data. A game
+// asks for these back (GetFormatInfo) and formats again when they aren't what it formats with: The Legend of Zelda: A Link Between Worlds
+// wiped its save at every start while the answer was the same four numbers for every game (2026-11-11). Kept in a file beside the archive's
+// folder, in this machine's byte order: it never leaves the save it describes.
+struct FormatInfo {
+    u32 bytes = 0x20000, dirs = 0x10, files = 0x10, duplicate = 0;  // what's answered for an archive formatted before this was kept
+};
+static void keep_format_info(const std::string &dir, const FormatInfo &info) {
+    if (FILE *f = fopen((dir + ".format").c_str(), "wb")) {
+        fwrite(&info, sizeof info, 1, f);
+        fclose(f);
+    }
+}
+static FormatInfo format_info(const std::string &dir) {
+    FormatInfo info, kept;
+    if (FILE *f = fopen((dir + ".format").c_str(), "rb")) {
+        if (fread(&kept, sizeof kept, 1, f) == 1) info = kept;
+        fclose(f);
+    }
+    return info;
+}
+
 static void create_gamecoin(const std::string &dir) {
     fsys::create_directories(dir);
     struct { u32 magic; u16 coins, coins_today; u32 steps, last_steps; u16 year; u8 month, day; } gc{le32(0x4F00), le16(10), 0, 0, 0, le16(2014), 1, 1};
@@ -957,10 +983,13 @@ struct FsUser : Service {
         case 0x084C: {  // FormatSaveData
             std::string d = save_root() + "/savedata";
             std::error_code ec;
+            // size in 512-byte blocks, directories, files, two bucket counts, duplicate data: after the archive's path in FormatSaveData
+            const int at = ipc.cmd() == 0x084C ? 4 : 1;
             FS_NOTE("save: formatting");
             SAVE_SETTLE(d, true);
             fsys::remove_all(d, ec);
             fsys::create_directories(d);
+            keep_format_info(d, {ipc[at] * 512, ipc[at + 1], ipc[at + 2], ipc[at + 5] & 0xff});
             FS_NOTE("save: formatted");
             LOG("[fs] formatted save data at %s\n", d.c_str());
             save_changed(d);
@@ -973,11 +1002,12 @@ struct FsUser : Service {
                 ipc.result(ERR_NOT_FORMATTED, 5);
                 break;
             }
+            const FormatInfo info = format_info(d);
             ipc.ok(5);
-            ipc.set(2, 0x20000);  // total size
-            ipc.set(3, 0x10);     // dirs
-            ipc.set(4, 0x10);     // files
-            ipc.set(5, 0);        // duplicate data
+            ipc.set(2, info.bytes);
+            ipc.set(3, info.dirs);
+            ipc.set(4, info.files);
+            ipc.set(5, info.duplicate);
             break;
         }
         case 0x0851: {  // CreateExtSaveData(info[0..5 words], ...)

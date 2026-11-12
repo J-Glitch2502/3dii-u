@@ -23,7 +23,7 @@ static const size_t WIIU_BLOCK = 0x20010000;  // the most the Wii U build has
 static bool guard;
 
 // Like Linux's MAP_NORESERVE: the 4 GiB is only reserved, and the part games use is committed up front, since the kernel can't read a file into memory that isn't committed.
-// A touch above that, which the Wii U build couldn't serve anyway, gets its page here. RECOMP_GUARD=1 stops there and says where instead, which is what tools/pc_guard.sh is for.
+// A touch above that, which the Wii U build couldn't serve anyway, gets its page here. RECOMP_GUARD=1 stops there and says where instead.
 static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *e) {
     const EXCEPTION_RECORD *r = e->ExceptionRecord;
     if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;

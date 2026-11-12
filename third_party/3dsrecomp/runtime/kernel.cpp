@@ -4,6 +4,7 @@
 #ifdef __WIIU__
 #include <coreinit/event.h>
 #include <coreinit/thread.h>
+#include <coreinit/time.h>
 #include <malloc.h>
 #else
 #include <dlfcn.h>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <set>
 
@@ -38,6 +40,35 @@ u32 heap_size, linear_used;
 static thread_local Thread *tls_thread;
 #endif
 static void flush_deferred();
+static std::atomic<int> lock_wanted;  // host threads in lock_soon: svc_dispatch lets them go first
+
+bool lock_soon(Lock &lk) {
+    static u64 without_since;  // (one host thread calls this, the sound's) since when it has gone without the lock, 0 if it had it last time
+    static char holder[64];
+    static u32 said;
+    lock_wanted++;
+    const u64 until = real_ns() + 1000000;
+    bool got;
+    while (!(got = lk.try_lock()) && real_ns() < until) {
+#ifdef __WIIU__
+        OSSleepTicks(OSMicrosecondsToTicks(50));
+#else
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+#endif
+    }
+    lock_wanted--;
+    if (!got && !without_since) {
+        without_since = real_ns();
+        const Thread *t = running;  // read without the lock, for the log alone: threads are never freed, and a stale answer costs a wrong name
+        if (t && t->in_svc >= 0 && t->in_service) snprintf(holder, sizeof holder, "%s command %08x", t->in_service, t->in_cmd);
+        else if (t && t->in_svc >= 0) snprintf(holder, sizeof holder, "svc %02x", (unsigned)t->in_svc);
+        else snprintf(holder, sizeof holder, "a host thread");
+    } else if (got && without_since) {
+        if (said++ < 200) LOG("[lock] the kernel lock was held for about %u ms (%s): the sound went on without it\n", (u32)((real_ns() - without_since) / 1000000), holder);
+        without_since = 0;
+    }
+    return got;
+}
 
 // ---------------------------------------------------------------- handles
 Handle add_handle(ObjPtr o) {
@@ -284,6 +315,26 @@ void sleep_current(u64 ns, Lock &lk) {
         if (t->wait_gen == gen && t->status == TStatus::WaitSleep) resume_thread(t);
     });
     block_current(lk);
+}
+
+// Storage is what this is for. A read used to keep the CPU: every other thread of the game, its sound thread among them, stood still for as
+// long as the storage took, which on a console is most of a transition between scenes, and the sound stuttered through each one (2026-11-10).
+void run_blocked(Lock &lk, const std::function<void()> &work) {
+    Thread *cur = current_thread();
+    cur->status = TStatus::WaitSleep;  // with no timeout set: nothing resumes it but the end of this
+    cur->wait_gen++;
+    flush_deferred();
+    running = best_ready();
+    if (running) {
+        running->status = TStatus::Running;
+        running->cv.notify_one();
+    }
+    lk.unlock();
+    work();
+    lk.lock();
+    make_ready(cur, true);
+    schedule_async();  // takes the CPU if it's free, and asks a thread of lower priority for it otherwise
+    cur->cv.wait(lk, [&] { return running == cur; });
 }
 
 // ---------------------------------------------------------------- wait objects
@@ -1129,7 +1180,11 @@ std::string kstats_report(u64 frames) {
 }
 
 void svc_dispatch(CPU *c, u32 imm) {
+    while (lock_wanted.load(std::memory_order_relaxed)) std::this_thread::yield();  // lock_soon's caller first
     Lock lk(kmutex);
+    Thread *const t = current_thread();
+    t->in_svc = (s32)imm;
+    t->in_service = nullptr;
     kstats.svc[imm & 127]++;
     flush_deferred();
     static int svclog = getenv("RECOMP_SVCLOG") ? atoi(getenv("RECOMP_SVCLOG")) : -1;
@@ -1137,6 +1192,7 @@ void svc_dispatch(CPU *c, u32 imm) {
         LOG("[svc %u] %02x lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x\n", current_thread()->id, imm, c->r[14], c->r[0],
             c->r[1], c->r[2], c->r[3]);
     svc_locked(c, imm, lk);
+    t->in_svc = -1;
 }
 
 // The guest functions (f_<address>) on a thread's host stack, innermost first: a thread that spins without SVCs

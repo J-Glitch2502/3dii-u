@@ -56,13 +56,65 @@ def write_tga(path, icon, w, h, bpp, scale, background):
             if bpp == 32:
                 pixels.append(255)
     header = struct.pack('<BBBHHBHHHHBB', 0, 0, 2, 0, 0, 0, 0, 0, w, h, bpp, 8 if bpp == 32 else 0)
-    footer = bytes(8) + b'TRUEVISION-XFILE.\0'
     with open(path, 'wb') as f:
-        f.write(header + bytes(pixels) + footer + (bytes(4) if bpp == 24 else b''))
+        f.write(header + bytes(pixels) + TGA_FOOTER + (bytes(4) if bpp == 24 else b''))
 
 
-def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCHIVES):
-    """title: the folder to make. game: the unpacked game (exheader.bin, code.bin, romfs.bin, exefs/icon.bin). rpx and shaders: what the build made."""
+TGA_FOOTER = bytes(8) + b'TRUEVISION-XFILE.\0'  # the console's loader wants it; Cemu doesn't care
+
+
+SHARED_FONT = '0004009b00014002'  # the system archive with the font games write their text in
+
+
+def unpacked_shared_font(archive):
+    """The shared font out of its system archive, decompressed: 3 MB the console would otherwise unpack from 1.4 MB every time a game starts.
+    None if the archive isn't there or holds no font."""
+    if not os.path.isfile(archive):
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import dvlb_to_log  # its romfs listing and its LZ11
+    with open(archive, 'rb') as f:
+        data = f.read()
+    for offset, _ in dvlb_to_log.romfs_files(data):
+        font = dvlb_to_log.lz(data, offset)
+        if font and font[:4] == b'CFNT':
+            return font
+    return None
+
+
+def art_pixels(path, w, h, background):
+    """A picture (cover art, say) as rows of (r, g, b), scaled to fit w x h and centred on the background. Read with Qt, which the builder
+    carries; None if it can't be read."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage, QPainter
+    src = QImage(path)
+    if src.isNull():
+        return None
+    fit = src.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    canvas = QImage(w, h, QImage.Format_RGB888)
+    canvas.fill(QColor(*background))
+    painter = QPainter(canvas)
+    painter.drawImage((w - fit.width()) // 2, (h - fit.height()) // 2, fit)
+    painter.end()
+    stride, data = canvas.bytesPerLine(), bytes(canvas.constBits())
+    return [[tuple(data[y * stride + 3 * x:y * stride + 3 * x + 3]) for x in range(w)] for y in range(h)]
+
+
+def write_art_tga(path, rows, bpp):
+    """rows of (r, g, b), top first, as the TGA the Wii U Menu expects (write_tga's layout)"""
+    h, w = len(rows), len(rows[0])
+    pixels = bytearray()
+    for row in reversed(rows):  # bottom-up
+        for r, g, b in row:
+            pixels += bytes((b, g, r, 255) if bpp == 32 else (b, g, r))
+    header = struct.pack('<BBBHHBHHHHBB', 0, 0, 2, 0, 0, 0, 0, 0, w, h, bpp, 8 if bpp == 32 else 0)
+    with open(path, 'wb') as f:
+        f.write(header + bytes(pixels) + TGA_FOOTER + (bytes(4) if bpp == 24 else b''))
+
+
+def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCHIVES, art=None):
+    """title: the folder to make. game: the unpacked game (exheader.bin, code.bin, romfs.bin, exefs/icon.bin). rpx and shaders: what the build made.
+    art: a picture for the start-up screens and the Wii U Menu icon, in place of the game's own 48x48 icon scaled up."""
     rpx_name = os.path.basename(rpx)
     shutil.rmtree(os.path.join(title, 'content'), ignore_errors=True)
     for d in ('code', 'content', 'meta'):
@@ -86,6 +138,19 @@ def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCH
     write_tga(os.path.join(meta_dir, 'bootLogoTex.tga'), icon, 170, 42, 32, 0, (0, 0, 0))
     write_tga(os.path.join(meta_dir, 'bootDrcTex.tga'), icon, 854, 480, 24, 6, BACKGROUND)
     write_tga(os.path.join(meta_dir, 'bootTvTex.tga'), icon, 1280, 720, 24, 10, BACKGROUND)
+    if art:
+        for tga, w, h, bpp in (('iconTex.tga', 128, 128, 32), ('bootDrcTex.tga', 854, 480, 24), ('bootTvTex.tga', 1280, 720, 24)):
+            rows = art_pixels(art, w, h, (0, 0, 0))
+            if rows is None:
+                print(f'the banner picture {art} could not be read: the game\'s own icon is used')
+                break
+            write_art_tga(os.path.join(meta_dir, tga), rows, bpp)
+    # the sound while the game starts, if this PC has one (tools/make_boot_sound.py); a title without the file starts silently
+    boot_sound = os.path.join(os.path.dirname(os.path.abspath(archives)), 'boot_sound.btsnd')
+    if os.path.isfile(boot_sound):
+        shutil.copyfile(boot_sound, os.path.join(meta_dir, 'bootSound.btsnd'))
+    elif os.path.exists(os.path.join(meta_dir, 'bootSound.btsnd')):
+        os.remove(os.path.join(meta_dir, 'bootSound.btsnd'))
     shutil.copyfile(os.path.join(TEMPLATE, 'meta', 'bootMovie.h264'), os.path.join(meta_dir, 'bootMovie.h264'))
     meta = open(os.path.join(TEMPLATE, 'meta', 'meta.xml'), encoding='utf-8', newline='').read()
     xml_name = name.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -104,6 +169,10 @@ def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCH
     link(icon_bin, os.path.join(content, 'exefs_icon.bin'))
     for f in os.listdir(archives):
         link(os.path.join(archives, f), os.path.join(content, f))
+    font = unpacked_shared_font(os.path.join(archives, SHARED_FONT + '.romfs'))
+    if font:  # the console reads it as it is, with nothing to search or decompress while the game starts (services/misc.cpp)
+        with open(os.path.join(content, 'shared_font.bcfnt'), 'wb') as f:
+            f.write(font)
     for f in ('shaders.gsh', 'shaders.idx'):
         shutil.copyfile(os.path.join(shaders, f), os.path.join(content, f))
     print('title folder:', title)

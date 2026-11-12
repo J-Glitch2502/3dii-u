@@ -1,5 +1,6 @@
 # Runs a title's RPX in the private Cemu copy in build_win\cemu, for check_ports.py, and asks Cemu itself to save its own game output with its screenshot key,
-# sent only to Cemu's own windows. Nothing else on the screen can end up in the result. Waits for another run to finish instead of closing it.
+# sent only to Cemu's own windows: the TV's picture and the GamePad's, $Shots times, as tv_NN.png and pad_NN.png in $Out.
+# Nothing else on the screen can end up in the result. Waits for another run to finish instead of closing it.
 # Cemu runs on a Windows desktop of its own, never shown, so it can't cover the user's screen or take their keyboard (the user's rule, 2026-11-07).
 param([string]$Rpx, [string]$Low, [int]$Seconds = 120, [int]$Shots = 6, [string]$Out, [switch]$Interpreter)
 Add-Type @"
@@ -46,24 +47,46 @@ while (Get-Process CemuMario -ErrorAction SilentlyContinue) {
 }
 New-Item -ItemType Directory -Force -Path $sd, $Out | Out-Null
 if (Test-Path -LiteralPath "$sd\log.txt") { Remove-Item -LiteralPath "$sd\log.txt" -Force -Confirm:$false }
-# Cemu killed while it writes this title's shader or pipeline cache leaves a half-written file, and the next start crashes in ntdll (heap corruption: Kirby,
-# NSMB2 and both Laytons on 2026-11-08/09; deleting the pipeline cache alone didn't stop it). So a run ends by asking Cemu to close, which lets it finish
-# writing, and any run that ends otherwise (a crash, or no answer) deletes both files, which Cemu then rebuilds.
-$caches = "${Low}_shaders.bin", "${Low}_vkpipeline.bin" | ForEach-Object { "$data\shaderCache\transferable\00050000$_" }
+# Cemu killed while it writes one of this title's shader caches leaves a half-written file, and the next start crashes in ntdll (heap corruption: Kirby,
+# NSMB2 and both Laytons on 2026-11-08/09; deleting the pipeline cache alone didn't stop it; NSMB2 again on 2026-11-11, from the precompiled one, on
+# every start with no shader cache). So a run ends by asking Cemu to close, which lets it finish writing, and any run that ends otherwise (a crash,
+# no answer, or this script stopped along with Cemu: the mark is still there at the next run) deletes all three, which Cemu then rebuilds.
+$caches = "transferable\00050000${Low}_shaders.bin", "transferable\00050000${Low}_vkpipeline.bin", "precompiled\00050000${Low}_spirv.bin" | ForEach-Object { "$data\shaderCache\$_" }
 function Drop-Caches { foreach ($f in $caches) { Remove-Item -LiteralPath $f -Force -Confirm:$false -ErrorAction SilentlyContinue } }
+$mark = "$data\running_$Low.txt"
+if (Test-Path -LiteralPath $mark) { Drop-Caches }
+Set-Content -LiteralPath $mark -Value (Get-Date)
 $shotDir = "$data\screenshots"
 if (Test-Path -LiteralPath $shotDir) { Get-ChildItem -LiteralPath $shotDir -File -Recurse | Remove-Item -Force -Confirm:$false }
 Get-ChildItem -LiteralPath $Out -File -ErrorAction SilentlyContinue | Remove-Item -Force -Confirm:$false
 $exe = "$cemuDir\CemuMario.exe"
 $cmd = "`"$exe`" -g `"$Rpx`"" + $(if ($Interpreter) { ' --force-interpreter' } else { '' })
 $p = Get-Process -Id ([W3]::Start($exe, $cmd, $cemuDir))
-$per = [int]($Seconds / [Math]::Max($Shots, 1))
-for ($n = 0; $n -lt $Shots -and -not $p.HasExited; $n++) {
-  Start-Sleep -Seconds $per
-  foreach ($h in [W3]::Windows([uint32]$p.Id, $true)) {
-    [W3]::PostMessage($h, 0x100, [IntPtr]0x7B, [IntPtr]0x00580001) | Out-Null
-    [W3]::PostMessage($h, 0x101, [IntPtr]0x7B, [IntPtr]([int64]0xC0580001)) | Out-Null
+function Post([uint32]$msg, [int]$key, [int64]$l) {  # a key message, to Cemu's own windows only
+  foreach ($h in [W3]::Windows([uint32]$p.Id, $true)) { [W3]::PostMessage($h, $msg, [IntPtr]$key, [IntPtr]$l) | Out-Null }
+}
+function Shot([string]$name) {  # Cemu's screenshot (F12) of what its window shows, moved to $Out under that name once Cemu has written it
+  Get-ChildItem -LiteralPath $shotDir -File -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -Confirm:$false  # one that came late
+  Post 0x100 0x7B 0x00580001
+  Post 0x101 0x7B 0xC0580001
+  for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 100
+    $f = Get-ChildItem -LiteralPath $shotDir -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($f) { try { Move-Item -LiteralPath $f.FullName -Destination "$Out\$name" -Force -ErrorAction Stop; return } catch { } }  # Cemu is still writing it
   }
+}
+# Both screens, each time: Cemu's window shows the GamePad's picture while Tab is held. (With its separate GamePad window open Cemu saves
+# that picture too, but the one run tried that way crashed in Cemu at the start of NSMB2, 2026-11-11.)
+$per = [int]($Seconds / [Math]::Max($Shots, 1))
+$from = Get-Date
+for ($n = 0; $n -lt $Shots -and -not $p.HasExited; $n++) {
+  $wait = [int]($from.AddSeconds($per * ($n + 1)) - (Get-Date)).TotalMilliseconds
+  if ($wait -gt 0) { Start-Sleep -Milliseconds $wait }
+  Shot ("tv_{0:d2}.png" -f $n)
+  Post 0x100 0x09 0x000F0001
+  Start-Sleep -Milliseconds 400
+  Shot ("pad_{0:d2}.png" -f $n)
+  Post 0x101 0x09 0xC00F0001
 }
 Start-Sleep -Seconds 3
 if ($p.HasExited) {
@@ -80,8 +103,4 @@ if ($p.HasExited) {
     "Cemu didn't close when asked within 15 s: stopped, and this title's caches deleted"
   }
 }
-Start-Sleep -Seconds 1
-if (Test-Path -LiteralPath $shotDir) {
-  $k = 0
-  Get-ChildItem -LiteralPath $shotDir -File -Recurse | Sort-Object LastWriteTime | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination ("$Out\{0:d2}_{1}" -f $k, $_.Name) -Force; $k++ }
-}
+Remove-Item -LiteralPath $mark -Force -Confirm:$false

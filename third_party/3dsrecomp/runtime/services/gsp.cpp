@@ -243,13 +243,13 @@ void gsp_process_gx() {
             irqs.push_back(DMA);
             break;
         case 0x01: {  // SubmitGpuCommandList(addr, size, flags)
-            u64 t0 = real_ns();
+            const u64 t0 = kMeasure ? real_ns() : 0;
             gpu::process_command_list(va2pa(c[1]), c[2]);
 #ifdef __WIIU__
             gpu::gx2_finish_list();
 #endif
             gx_stats.cmdlists++;
-            gx_stats.gpu_ns += real_ns() - t0;
+            if (kMeasure) gx_stats.gpu_ns += real_ns() - t0;
             irqs.push_back(P3D);
             break;
         }

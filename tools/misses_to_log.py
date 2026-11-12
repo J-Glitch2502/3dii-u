@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turns the console's shader_misses.bin into a log the shader generator reads: misses_to_log.py <shader_misses.bin> <out.bin> [fragment only.bin].
 Records are already little-endian: this drops the tags and repeats that the generator does not expect in fs_log.bin.
-Fragment shaders depend on render state, not on the game, so other games' builds take the fragment-only file too (tools/mario_wiiu.sh)."""
+Fragment shaders depend on render state, not on the game, so other games' builds take the fragment-only file too (build3ds.prepare_logs)."""
 import struct
 import sys
 

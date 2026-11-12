@@ -12,25 +12,12 @@ struct DspState {
     std::shared_ptr<Event> other_irq[2];  // interrupt types 0/1
     bool game_waits = false;              // the game has been seen waiting on the pipe event
     u32 held = 0;                         // calls in a row that found the game still busy
+    bool owed = false;                    // (dsp_tick's alone) a frame's interrupt hasn't gone to the game yet
 };
 DspState dsp;
 }  // namespace
 
-bool dsp_tick() {
-    {
-        // Like the real DSP, don't start a frame until the game is done with the last one. Otherwise the status table gets rewritten while
-        // the game reads it: one channel of a stereo stream misses "buffer finished", the stream reloads a buffer still queued on that
-        // channel, and the game hangs walking the voice's list, now a loop. The limit is for a game that polls for a later frame instead.
-        Lock lk(kmutex);
-        auto &ev = dsp.pipe_irq[2];
-        if (ev && ev->waiters.empty() && dsp.game_waits && ++dsp.held < 1000) return false;
-        dsp.held = 0;
-        if (ev && !ev->waiters.empty()) dsp.game_waits = true;
-    }
-    bool fresh = true;
-    bool on = audio::tick(&fresh);
-    if (!on) return true;
-    Lock lk(kmutex);
+static void dsp_interrupt() {  // (kernel lock held) the frame is there for the game
     static int n;
     if (n++ == 100) VLOG("[dsp] tick: pipe event %s\n", dsp.pipe_irq[2] ? dsp.pipe_irq[2]->name.c_str() : "none");
     // The interrupt only after a frame that worked on one the game submitted since the last interrupt, as on a 3DS, where the game submits
@@ -39,9 +26,32 @@ bool dsp_tick() {
     // and gets a status two frames old from the region it reads next. Luigi's Mansion: Dark Moon's stream took that old "stopped, no
     // buffer" for news, marked buffers still playing done and queued them again, and its voice lists became loops (the game then hung).
     // Sound goes on all the same: only the interrupt waits for the game, and its next submission comes within a frame.
-    if (fresh && dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
+    if (dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
     schedule_async();
-    return true;
+}
+
+void dsp_tick() {
+    // The sound doesn't wait for the kernel lock (lock_soon): a call of the game's can hold it for longer than there is sound queued, and one did
+    // in Kid Icarus's loading screens (2026-11-11). A frame made without the lock is one the game hasn't come for, and an interrupt that
+    // couldn't go to the game goes with the next frame that has the lock.
+    bool seen = false;
+    Lock lk(kmutex, std::defer_lock);
+    if (lock_soon(lk)) {
+        if (dsp.owed) dsp_interrupt();
+        dsp.owed = false;
+        // A frame the game hasn't come for (it isn't waiting on the pipe's event yet) is played all the same, but kept from the game: see
+        // generate_frame. Waiting for the game instead stopped the sound whenever its sound thread was late, by a file read or a busy frame:
+        // gaps of 5 ms about once a second in NSMB2 (2026-11-10). The limit is for a game that polls for a later frame instead of waiting.
+        auto &ev = dsp.pipe_irq[2];
+        seen = !(ev && ev->waiters.empty() && dsp.game_waits && ++dsp.held < 100);
+        if (seen) dsp.held = 0;
+        if (ev && !ev->waiters.empty()) dsp.game_waits = true;
+        lk.unlock();
+    }
+    bool fresh = true;
+    if (!audio::tick(seen, &fresh) || !fresh) return;  // fresh: taken (seen), and on a submission of the game's since the last interrupt
+    if (lock_soon(lk)) dsp_interrupt();
+    else dsp.owed = true;
 }
 
 struct Dsp : Service {

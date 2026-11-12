@@ -48,7 +48,7 @@ void gfx_thread_init();
 // GX2 is up: the main thread can wait for the TV's VBlanks
 bool gfx_ready();
 // (GPU thread) present the screens if a new VBlank arrived, service in-game overlay
-void gfx_pump();
+void gfx_pump(bool quiet);  // quiet: the GPU thread had nothing to do for its whole wait
 void gfx_shutdown();
 void gfx_reacquire();  // (GPU thread) back from the HOME Menu
 void gfx_note_busy(u32 us);
@@ -77,6 +77,7 @@ void menu_input(u32 pressed);
 bool menu_open();
 int game_speed();  // percent
 bool menu_wants_quit();
+void menu_quit_now();  // as choosing Quit there: a test route's "KEY quit", so a run in Cemu ends the way a player ends one
 // the game's software keyboard (GamePad pixels)
 void keyboard_input(u32 pressed, bool touch_began, u16 x, u16 y);
 bool keyboard_open();

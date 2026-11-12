@@ -58,8 +58,9 @@ public:
     void reset() { st = {}; frame = {}; }
     // Parses the configuration (clearing its dirty flags), generates this frame and returns the
     // status to report.
-    // publish: this frame's status goes to the game (dsp_core.cpp: generate_frame); changes are kept for the next one until then
-    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool publish = true);
+    // seen: the game takes this frame (generate_frame); if not, its settings are left unread. publish: this frame's status goes to the game (the game
+    // took it, and submitted since the last one): "buffer changed" is kept for the next one until then
+    SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish);
     void mix_into(QuadFrame &dst, int mix);
     const StereoFrame &output() const { return frame; }
 

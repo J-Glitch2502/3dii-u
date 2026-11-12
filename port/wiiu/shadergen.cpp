@@ -851,4 +851,43 @@ std::string gen_etc1_fs(bool alpha) {
          "}\n";
     return s;
 }
+
+// A texture of one of the PICA's plain formats (0 to 11) decoded by the GPU, as gen_etc1_fs does those two: the bytes as they are in the game's
+// memory in an RGBA8 staging texture, 8 staging rows to a row of 8x8 tiles (so a row of tiles starts a staging row, whatever the format's
+// size), and each pixel finds its texel through the tile's Morton order. uTint: the texture's width and height, 1 / the staging width and the
+// staging width. The colours are decode_level's.
+std::string gen_untile_fs(u32 fmt) {
+    static const char *const colour[12] = {
+        "    ivec4 c = ivec4(px(i, row)).wzyx;\n",
+        "    ivec4 c = ivec4(byte_at(3 * i + 2, row), byte_at(3 * i + 1, row), byte_at(3 * i, row), 255);\n",
+        "    int v = pair(i, row); ivec4 c = ivec4(c5(v >> 11), c5((v >> 6) & 31), c5((v >> 1) & 31), (v & 1) * 255);\n",
+        "    int v = pair(i, row); ivec4 c = ivec4(c5(v >> 11), c6((v >> 5) & 63), c5(v & 31), 255);\n",
+        "    int v = pair(i, row); ivec4 c = ivec4(c4(v >> 12), c4((v >> 8) & 15), c4((v >> 4) & 15), c4(v & 15));\n",
+        "    int v = pair(i, row); ivec4 c = ivec4(ivec3(v >> 8), v & 255);\n",
+        "    int v = pair(i, row); ivec4 c = ivec4(v >> 8, v & 255, 0, 255);\n",
+        "    ivec4 c = ivec4(ivec3(byte_at(i, row)), 255);\n",
+        "    ivec4 c = ivec4(0, 0, 0, byte_at(i, row));\n",
+        "    int v = byte_at(i, row); ivec4 c = ivec4(ivec3(c4(v >> 4)), c4(v & 15));\n",
+        "    int v = byte_at(i >> 1, row); ivec4 c = ivec4(ivec3(c4((i & 1) != 0 ? v >> 4 : v & 15)), 255);\n",
+        "    int v = byte_at(i >> 1, row); ivec4 c = ivec4(0, 0, 0, c4((i & 1) != 0 ? v >> 4 : v & 15));\n",
+    };
+    // the staging row by a multiplication: integer division compiles to an instruction Cemu's translator doesn't have (gen_etc1_fs)
+    return std::string("#version 450\n"
+                       "layout(location = 0) in vec2 vUv;\n"
+                       "layout(location = 0) out vec4 FragColor;\n"
+                       "layout(binding = 0) uniform sampler2D tBytes;\n"
+                       "layout(binding = 0, std140) uniform Blit { vec4 uTint; vec4 uAdd; };\n"
+                       "vec4 px(int q, int row) { int r = int((float(q) + 0.5) * uTint.z); return round(texelFetch(tBytes, ivec2(q - r * int(uTint.w), row + r), 0) * 255.0); }\n"
+                       "int byte_at(int k, int row) { vec4 p = px(k >> 2, row); int n = k & 3; return int(n < 2 ? (n == 0 ? p.x : p.y) : (n == 2 ? p.z : p.w)); }\n"
+                       "int pair(int i, int row) { vec4 p = px(i >> 1, row); return (i & 1) == 0 ? int(p.x) | (int(p.y) << 8) : int(p.z) | (int(p.w) << 8); }\n"
+                       "int c4(int v) { return v * 17; }\n"
+                       "int c5(int v) { return (v << 3) | (v >> 2); }\n"
+                       "int c6(int v) { return (v << 2) | (v >> 4); }\n"
+                       "void main() {\n"
+                       "    int x = int(vUv.x), m = int(uTint.y) - 1 - int(vUv.y), xi = x & 7, yi = m & 7;\n"
+                       "    int i = ((x >> 3) << 6) + ((xi & 1) | ((yi & 1) << 1) | ((xi & 2) << 1) | ((yi & 2) << 2) | ((xi & 4) << 2) | ((yi & 4) << 3));\n"
+                       "    int row = (m >> 3) << 3;\n") +
+           colour[fmt] + "    FragColor = vec4(c) / 255.0;\n}\n";
+}
+std::string untile_key(u32 fmt) { return "untile" + std::to_string(fmt); }
 }  // namespace gpu

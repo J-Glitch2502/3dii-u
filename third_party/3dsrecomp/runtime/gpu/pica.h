@@ -559,6 +559,7 @@ void *gx2_fog_lut();
 void gx2_flush_cpu_batch();
 bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control);  // true: done, guest memory needn't be filled too
 extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing will show
+bool gx2_skip_draw();       // the draw the registers describe is one to leave out: that, or a frame that isn't shown (frame_left_out)
 extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
 void gx2_copied_to_memory(u32 paddr, u32 size);  // a texture copy or display transfer wrote guest memory (an LCD buffer the game fills itself)
@@ -635,6 +636,13 @@ u64 hash_bytes(const u8 *p, size_t n);
 // timing statistics (GPU_STATS=1)
 extern bool g_stats, g_trace;
 extern double g_t_shade, g_t_setup, g_t_flush;
+// Draws whose vertices the CPU shaded because the GPU backend couldn't take them, by why; always counted, the Wii U report logs and clears them
+enum VtxCpuWhy { VCPU_NO_SHADER, VCPU_GEOMETRY, VCPU_CONTINUED, VCPU_COUNT };
+struct VtxCpuStats {
+    u64 draws[VCPU_COUNT], verts[VCPU_COUNT];
+    double ms[VCPU_COUNT];
+};
+extern VtxCpuStats vtx_cpu;
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)
 extern double g_tex_decode_ms;
 extern u32 g_tex_decodes;

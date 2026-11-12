@@ -27,10 +27,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get('THREEDII_ROOT') or os.path.dirname(HERE)  # the standalone app runs from elsewhere: app.py finds the repository
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, 'tools', 'win'))
+import credits  # noqa: E402
 import decrypt  # noqa: E402
 import dumps  # noqa: E402
 import mods  # noqa: E402
 import shaderlogs  # noqa: E402
+import user_files  # noqa: E402
 
 WORK = os.environ.get('THREEDII_WORK') or ROOT  # the standalone app's engine may be read-only: then it builds in a folder of the user's
 WORK_GAMES = os.path.join(WORK, 'builder_work')
@@ -107,14 +109,39 @@ def derived(dump):
             'folder': folder, 'status': 'Untested', 'note': 'Not tested on a console yet: it may not start, or stop partway.'}
 
 
-def make_title(game_dir, out, info):
+def console_learned(info, slug, card):
+    """What consoles learned playing this game, as shader logs for its build. A game leaves the list of what the console had to compile for it
+    on the SD card as it closes (sd:/3dii-u/<title id>/learned.bin, port/wiiu/frontend_wiiu.cpp). The card this build is for is read, and what
+    was read before is kept (with the game's other logs in the repository, in the work folder for the standalone app), so a later build has
+    it without the card. Returns the logs."""
+    kept = os.path.join(ROOT, 'games', slug, 'shader_logs') if WORK == ROOT else os.path.join(WORK, 'learned', slug)
+    new = os.path.join(card.rstrip('\\/') + os.sep, '3dii-u', info['title_id'].lower(), 'learned.bin') if card else ''
+    if os.path.isfile(new) and os.path.getsize(new):
+        import hashlib
+        with open(new, 'rb') as f:
+            log = os.path.join(kept, 'console_card_' + hashlib.sha1(f.read()).hexdigest()[:12] + '.bin')
+        if not os.path.exists(log):
+            os.makedirs(kept, exist_ok=True)
+            r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'misses_to_log.py'), new, log], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               errors='replace')
+            if r.returncode:  # cut short by a console switched off as it wrote: this build goes without it
+                if os.path.exists(log):
+                    os.remove(log)
+                print('What your console left on the SD card couldn\'t be read (the file is cut short): this build goes without it.', flush=True)
+            else:
+                made = sum(int(n) for n in re.findall(r'\d+', r.stdout))
+                print(f'From your console, on the SD card: the {made} shaders it had to make while you played are ready-made in this build.', flush=True)
+    return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
+
+
+def make_title(game_dir, out, info, art=None):
     """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
     import importlib.util
     spec = importlib.util.spec_from_file_location('make_game_title', os.path.join(ROOT, 'tools', 'make_game_title.py'))
     titles = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(titles)
     titles.make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
-                      info['title_id'], info['name'], info['product'], ARCHIVES)
+                      info['title_id'], info['name'], info['product'], ARCHIVES, art)
     content = os.path.join(out, 'title', 'content')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')):
@@ -148,8 +175,18 @@ def copy_to(source, target_dir):
 PROGRESS = Progress()
 
 
+class ShowCredits(argparse.Action):
+    """--credits: who the builder is built on, then exit, before the required options are asked for (as --version does)"""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(credits.text())
+        parser.exit()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--version', action='version', version=f'{credits.APP} {credits.VERSION} ({credits.LICENCE}, {credits.SOURCE})')
+    ap.add_argument('--credits', nargs=0, action=ShowCredits, help='the projects the builder is built on, and their licences')
     ap.add_argument('--game', required=True)
     ap.add_argument('--update')
     ap.add_argument('--dlc')
@@ -161,14 +198,17 @@ def main():
     ap.add_argument('--card', help='an SD card: the WUP goes in its install folder')
     ap.add_argument('--out', help='a folder to put the WUP in instead')
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
+    ap.add_argument('--art', help="a picture (the cover art, say) for the start-up screens and the Wii U Menu icon; the game's own icon otherwise")
+    ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode (build3ds.Game.mixed)')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) // 2))
     a = ap.parse_args()
     if sys.platform != 'win32':
         fail('Building on Linux isn\'t ready yet: this version builds on Windows.')
     if not (a.card or a.out):
         fail('Choose an SD card or a folder for the WUP.')
-    if not os.path.isfile(a.otp) or os.path.getsize(a.otp) != 1024:
-        fail('That otp.bin isn\'t a Wii U OTP dump: it should be exactly 1024 bytes.')
+    problem = user_files.check_otp(a.otp)
+    if problem:
+        fail(problem)
 
     PROGRESS.stage('Reading your game')
     decrypt.use_keys(a.keys)
@@ -186,6 +226,9 @@ def main():
         encrypted = [d for d in [game] + extras if d.encrypted()]
         if encrypted and not decrypt.have_keys(a.keys):
             fail(f'{os.path.basename(encrypted[0].path)} is encrypted. Put boot9.bin and seeddb.bin from your own 3DS in {a.keys or decrypt.KEYS_DEFAULT}.')
+        problem = user_files.check_key_folder(a.keys or decrypt.KEYS_DEFAULT) if encrypted else None
+        if problem:
+            fail(problem)
         game.read_names()
         mod_list = [mods.Mod(p, game.title_id) for p in a.mod]
     except (dumps.DumpError, decrypt.DecryptError, mods.ModError) as e:
@@ -249,6 +292,9 @@ def main():
         for f in os.listdir(logs):
             if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
                 shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
+    for f in console_learned(info, (known or derived(game))['slug'], a.card):
+        os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
+        shutil.copyfile(f, os.path.join(game_dir, 'shader_logs', os.path.basename(f)))
 
     # after the dumps, as it sets the toolchain up as it loads; by path, so the standalone app uses the repository's copy and its paths
     import importlib.util
@@ -268,11 +314,13 @@ def main():
     if not os.path.exists(b3.BIN + 'gcc.exe'):
         fail('The build tools aren\'t installed: see builder/README.md.')
     g = b3.Game(info['slug'], game_dir)  # the recipe every game gets, read from this game's own code (build3ds.py)
+    if a.mixed:
+        g.mixed()
     if g.mode == 'safe':
         print('hand-written code that keeps values in any register across its calls (Mobiclip\'s video decoder): every register goes through memory', flush=True)
     if update:
         g.upstream_functions = None  # the 3dsrecomp project's lists are of the base game's code, which the update replaces
-    out = os.path.join(game_dir, 'out')
+    out = os.path.join(game_dir, 'out_measure' if b3.MEASURE else 'out')  # a measuring build apart from the one for a console
     g.out, g.rpx, g.nm, g.shaders = out, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'game.nm'), os.path.join(out, 'shaders')
     os.makedirs(out, exist_ok=True)
 
@@ -327,7 +375,14 @@ def main():
         shutil.copyfile(dvlb, os.path.join(learned, 'dvlb.bin'))
 
     PROGRESS.stage('Making the title')
-    make_title(game_dir, out, info)
+    make_title(game_dir, out, info, a.art)
+
+    if b3.MEASURE:  # the checks' own kind of build, for Cemu (build3ds.py): never packed, so none can reach a console
+        print('a measuring build: not packed', flush=True)
+        PROGRESS.done, PROGRESS.share = 100, 0
+        PROGRESS.at(1)
+        print(f'@done {out}', flush=True)
+        return
 
     PROGRESS.stage('Packing the WUP')
     wup = os.path.join(a.out or game_dir, info['folder'])
