@@ -285,14 +285,15 @@ class Game:
         self.extra_functions = f'{self.dir}/functions.txt'  # what runs of the game found that static analysis missed
         # what the 3dsrecomp project's own runs of this game learned: its functions and the render states it uses
         with open(f'{self.dir}/info.json', encoding='utf-8') as f:
-            upstream = f'{ROOT}/third_party/3dsrecomp/games/{json.load(f)["program_id"].lower()}'
+            program = json.load(f)["program_id"].lower()
+        upstream = f'{ROOT}/third_party/3dsrecomp/games/{program}'
         self.upstream_functions = f'{upstream}/functions.txt' if os.path.isfile(f'{upstream}/functions.txt') else None
         self.pipelines = f'{upstream}/pipelines.bin' if os.path.isfile(f'{upstream}/pipelines.bin') else None
         # Hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder) runs right only when every register
         # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
         decoder = mobiclip_sites(self.dir)
         safe = len(decoder) >= 8 or coroutine_switches(self.dir) > 0
-        self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
+        self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', GAME_OPT_O2 if program in O2_GAMES else [])
         self.gen_dir = f'{self.dir}/{self.gen}'
         self.safe_ranges = []  # with mode 'abi': address ranges generated the safe way (mixed)
         # the decoder's sites span 65 KB of each game that has it; the margin takes in the rest of its library
@@ -408,6 +409,11 @@ def build_runtime(g, args):
 # A game's translated code is 15 to 25 times the size of its ARM code, and a console's core has 32 KB of instruction cache: for size, then
 # (NSMB2's code is 25.3 MB at -O2 and 21.5 MB at -Os). No frame pointer and no position-independent code, which are this compiler's defaults, said so.
 GAME_OPT = ['-Os', '-fomit-frame-pointer', '-fno-pic']
+# Games whose code goes wrong at -Os, by program ID: built at -O2 as before. Luigi's Mansion: Dark Moon at -Os stops at its start (Cemu,
+# 2026-11-13): an array copy (f_003fd8a0) asks its allocator for a garbage count and hits the game's own bkpt (f_003b4cc8). At -O2 it plays.
+# Why -Os goes wrong there isn't known yet.
+GAME_OPT_O2 = ['-O2', '-fomit-frame-pointer', '-fno-pic']
+O2_GAMES = {'0004000000055f00'}
 
 
 def game_flags(g, opt=None):

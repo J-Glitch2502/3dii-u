@@ -206,9 +206,10 @@ the console; the Cemu scripts set THREEDII_MEASURE=1 (out_measure). A Cemu-only 
 003b4cf4 (lr=003fd8e0)`. That's the game's own `bkpt` in a bump allocator (f_003b4cc8: out of room), asked for count*4 bytes by
 an array copy (f_003fd8a0), so a count is garbage. Not the cause (each tried alone, crash stayed): main's file reads letting
 other threads run (run_blocked), the DSP merge (pre-merge DSP back), and probably not the unpacked shared font (that run died in
-Cemu itself, inconclusive). Being tried when the PC went off: the game code at -O2 instead of main's new -Os (build3ds.py
-GAME_OPT). Next: that test; then bisect main's commits (y2r, gpu.cpp register runs, kernel lock_soon, frontend core changes).
-**Don't build the merged darkmoon for the console until this is found**; 34ad909 is the last good one.
+Cemu itself, inconclusive). **Found: main's -Os for game code** (a939b24). The same build at -O2 plays the intro in Cemu (60 fps,
+right picture). Dark Moon is now built at -O2 (build3ds.py O2_GAMES); why -Os breaks it isn't known (worth a look: a miscompile,
+or generated C that relies on something -Os changes). Next: a Cemu run of the committed fix, then Senne builds with
+`tools/win/builder_measuring.bat` and profiles on the console.
 
 ## Next step
 
