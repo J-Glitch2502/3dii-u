@@ -55,7 +55,6 @@ IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
   start the game again. Aroma comes with FTPiiU switched on. It works on the same processor cores as the game and holds it up: games have
   slowed to a crawl and frozen with their sound looping until it was off. With SDCafiine on, a tester's New Super Mario Bros. 2 ran very
   slowly everywhere.
-- If a game is still slow with both off, send its log (see below): it says what the console was busy with, and which plugins were running.
 - The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders. It keeps them,
   so the next time is smooth.
 
@@ -65,9 +64,6 @@ REPORTING A PROBLEM
 - If a build fails, press "Show details" and copy what it says.
 - Say which game it is (title and region), and whether you added an update, DLC or a mod.
 - For a game that goes wrong on the Wii U, say where in the game it happens and what you saw.
-- Send the game's log with it. When a game closes (click the left stick and choose Quit, or HOME and close the game), it leaves its files
-  on the SD card, in the folder 3dii-u, in a folder named after the game's number: log.txt is the run you just closed, log_before.txt the
-  run before it. For a freeze or a crash, start the game once more, close it, and send log_before.txt: that is the run that went wrong.
 
 
 WHAT STAYS ON YOUR PC
@@ -76,9 +72,10 @@ WHAT STAYS ON YOUR PC
   It keeps its compiled runtime there for the next game, plus up to 2 GB of each game's compiled code, so building a game again
   (with its update, or with a newer builder) only compiles what changed. It deletes each game's other work files when the build ends.
   Deleting that folder frees the space; the builder makes it again.
-- Next to its log a game leaves learned.bin: the shaders your console had to make while you played, because the build didn't have them
-  ready. Build the game again onto that SD card and the builder reads it: the new build has them ready-made, and the places that stuttered
-  the first time don't. The builder keeps what it read, so later builds have it too.
+- When a game closes it leaves learned.bin on the SD card, in the folder 3dii-u, in a folder named after the game's number: the shaders your
+  console had to make while you played, because the build didn't have them ready. Build the game again onto that SD card and the builder
+  reads it: the new build has them ready-made, and the places that stuttered the first time don't. The builder keeps what it read, so
+  later builds have it too.
 - Your dumps are never changed. Your keys are only read.
 - The games you build are made from your dumps and your keys: don't share them.
 

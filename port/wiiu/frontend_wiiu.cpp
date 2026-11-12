@@ -553,10 +553,9 @@ static void let_card_catch_up() {
     for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(ms); card_passes == seen && OSGetSystemTime() < until;) OSSleepTicks(OSMillisecondsToTicks(5));
 }
 
-// What a tester can send: this run's log, the log of the run before it (the one that froze or crashed, if one did), and what this console has
-// had to compile for the game, copied to the SD card as the game closes: sd:/3dii-u/<title id>/. All three live in the title's save, which
-// nothing on a PC reads, so a report of a slow place or a freeze used to come as a description alone. The builder folds learned.bin into
-// its next build of the game (builder/pipeline.py). With no card in, or no room on it, nothing happens.
+// What this console has had to compile for the game, copied to the SD card as the game closes: sd:/3dii-u/<title id>/learned.bin. It lives in
+// the title's save, which nothing on a PC reads. The builder folds it into its next build of the game (builder/pipeline.py). With no card
+// in, or no room on it, nothing happens. The game's log stays in its save: it is not copied anywhere.
 static void copy_to_card(const std::string &from, const std::string &to) {
     FILE *in = fopen(from.c_str(), "rb");
     if (!in) return;
@@ -576,8 +575,6 @@ static void leave_on_card() {
     wiiu::fs_begin(0xC00D);
     mkdir("fs:/vol/external01/3dii-u", 0777);
     mkdir(dir, 0777);
-    copy_to_card(from + "/log.txt", to + "/log.txt");
-    copy_to_card(from + "/log.txt.prev", to + "/log_before.txt");
     copy_to_card(from + "/shader_misses.bin", to + "/learned.bin");
     wiiu::fs_end();
 }

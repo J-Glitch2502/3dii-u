@@ -5,8 +5,7 @@
 sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
-has none) on a blank save, and a restart on what that saved, which ends by quitting the game as a player does: it has to close and leave its
-log on the SD card.
+has none) on a blank save, and a restart on what that saved, which ends by quitting the game as a player does: it has to close.
 Each leg's screenshots, of the TV and of the GamePad, are kept in games/<folder>/check_shots/<game>/<leg> and held to the good runs in
 games/<folder>/good_shots/<game>/<leg>: a game fails when, against the nearest good run, two or more pictures of a screen are in one and not in
 the other (pictures()), and so also when it draws nothing where a good run drew. A game with no good run says so. --bless runs nothing: it keeps
@@ -231,7 +230,6 @@ def judge(t, seconds, flags):
         os.remove(f)
     os.makedirs(d)
     route = ROUTES.get(t.route or t.name, GENERIC)
-    card_log = f'{CEMU}/portable/sdcard/3dii-u/00050000{t.low}/log.txt'  # where a game leaves its log as it closes (frontend_wiiu.cpp)
     for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp)
         open(f'{d}/{flag}', 'w').close()
     if t.env:
@@ -242,13 +240,10 @@ def judge(t, seconds, flags):
     # a scene is its level alone: a restart would stop before the route is back in it
     for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4)))[:1 if t.env else 2]:
         read_log = lambda: open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
-        # The restart ends as a player ends a game, quit from its menu (a route's KEY quit), not killed: closing is where consoles have hung,
-        # and the copy of its log a game leaves on the SD card then is what a tester sends
+        # The restart ends as a player ends a game, quit from its menu (a route's KEY quit), not killed: closing is where consoles have hung
         closing = name == 'restart'
         with open(d + '/live.txt', 'w', newline='\n') as f:
             f.write('\n'.join(until(route, secs - 15) + ['KEY quit'] if closing else route) + '\n')
-        if os.path.exists(card_log):
-            os.remove(card_log)
         saved_before = bool(save_files(t))
         said = cemu(t, secs, interp)
         text = read_log()
@@ -273,8 +268,6 @@ def judge(t, seconds, flags):
                 f.write(text)
         if closing and '[quit] sound system shut down' not in text:
             faults.append(f'{name}: the game did not close when it was quit')
-        elif closing and not (os.path.exists(card_log) and b'[quit]' in open(card_log, 'rb').read()):
-            faults.append(f'{name}: no log on the SD card after the game was quit')
         for k, v in t.env.items():
             if f'[test] {k} is {v}' not in text or (k == 'RECOMP_ROMFS_SWAP' and '[fs] romfs swap' not in text):
                 faults.append(f'{name}: {k} did not take: this is not the scene')
