@@ -159,6 +159,7 @@ GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GP
 // (all), "cpuattr8" and "cpuattr16" set them, and "cemu" the signed bytes. None by default: bytes fetched a 4-byte word at a time (gpu_fetched)
 // draw NSMB2's skinned models as the CPU path does, in Cemu (2026-11-11); fetched a byte at a time they stretched across the screen there.
 u32 gxt_cpu_attr;
+bool in_cemu;  // check_ports.py's runs say so with a file named "cemu": where Cemu can't do what a console does, the runtime shows what the console would
 bool gxt_cpu_tex;                     // a file named "cputex" in the data folder: every texture decoded by the CPU, as before
 // A vertex shader the pack lacks is compiled on the console, as pixel shaders are; a file named "noglslvs" leaves its draws with the CPU.
 // It was off: in Cemu the compiler hands back an empty program (16 bytes, no inputs) for whatever it compiles in its first second, and NSMB2's
@@ -446,6 +447,9 @@ struct Surface {
     bool first_use = true;                             // nothing has drawn into it yet: see upload_target
     bool gpu_chain = false;                            // made by gx2_texture_copy, or from one: the transfers that make its mipmaps stay on the GPU too
     bool shared_depth = false, clear_pending = false;  // see share_depth_block
+    // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
+    // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
+    bool in_list = false, sampled = false, was_sampled = false;
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
         return w * h * bpp;
@@ -455,6 +459,10 @@ struct Surface {
 };
 std::vector<std::unique_ptr<Surface>> surfaces;
 Surface *cur_color, *cur_depth;
+// A colour target in memory the game's code reads as it likes, and smaller than a screen: a picture the game may have drawn to pick up itself,
+// as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
+inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
+std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
 GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
@@ -1049,10 +1057,12 @@ void upload_texture(Tex &e, const u32 *rows = nullptr) {
     }
 }
 
-GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) {
+// from: where to say which surface the texture is, when it's one
+GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **from = nullptr) {
     // render to texture: sample the surface itself. Not if it's another format: that memory has since been given to an ordinary texture.
     const auto read_as_this = [&](const Surface &s) { return s.w == w && (s.h == h || s.tex_h == h) && s.fmt == fmt && !s.guest_newer; };
     if (Surface *s = find_surface(addr, false, read_as_this)) {
+        if (from) *from = s;
         flush_surface(*s);
         if (gxt()) LOG("[gxt] tex %08x %ux%u fmt %u from surface\n", addr, w, h, fmt);
         return &s->tex;
@@ -1462,7 +1472,15 @@ void set_state(const DrawState &ds) {
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail,
                               k_cmp[ds.st_func & 7], (GX2StencilFunction)ds.st_zpass, (GX2StencilFunction)ds.st_zfail, (GX2StencilFunction)ds.st_fail);
     if (stencil) GX2SetStencilMask(ds.st_mask_in, ds.st_mask_w, ds.st_ref, ds.st_mask_in, ds.st_mask_w, ds.st_ref);
-    if (ds.color_write) c.written_since_flush = c.gpu_newer = true;
+    if (ds.color_write) {
+        c.written_since_flush = c.gpu_newer = true;
+        if (cpu_reads(c) && !c.in_list) {
+            c.in_list = true;
+            c.was_sampled = c.sampled;
+            c.sampled = false;
+            read_targets.push_back(&c);
+        }
+    }
     if (has_depth && (ds.depth_write || (stencil && ds.st_mask_w))) cur_depth->written_since_flush = cur_depth->gpu_newer = true;
 }
 
@@ -1669,7 +1687,9 @@ void set_fragment(const DrawState &ds, bool uber) {
             }
             continue;
         }
-        GX2Texture *tex = get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels);
+        Surface *drawn = nullptr;  // a picture the game drew, sampled where it lies
+        GX2Texture *tex = get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels, &drawn);
+        if (drawn && !cpu_reads(*cur_color)) drawn->sampled = true;
         if (!tex) tex = &black_tex;
         GX2SetPixelTexture(tex, k);
         GX2SetPixelSampler(get_sampler(t, tex->surface.mipLevels), k);
@@ -2253,12 +2273,16 @@ void write_back(Surface &s) {
     st.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
     st.aa = GX2_AA_MODE1X;
     st.use = GX2_SURFACE_USE_TEXTURE;
-    st.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    // A console's copy is in memory when GX2DrawDone returns. Cemu hands a copy's pixels over some draws later (its LatteSurfaceCopy.cpp), which
+    // read here as whatever the memory held: a Mii's face came back blank. A copy to this tile mode it finishes at once, though not in the
+    // queue's turn, so the queue is emptied first.
+    st.tileMode = in_cemu ? GX2_TILE_MODE_LINEAR_SPECIAL : GX2_TILE_MODE_LINEAR_ALIGNED;
     GX2CalcSurfaceSizeAndAlignment(&st);
     st.image = memalign(st.alignment, st.imageSize);
     if (!st.image) return;  // still newer on the GPU: the next read back tries again
     s.gpu_newer = false;
     DCInvalidateRange(st.image, st.imageSize);
+    if (in_cemu) draw_done();
     GX2CopySurface(&s.cb.surface, 0, 0, &st, 0, 0);
     restore_context();
     draw_done();
@@ -3026,7 +3050,21 @@ void gx2_cpu_will_read(u32 paddr, u32 size) {
 // part, objects drawn over what's in front of them. Cemu takes commands as they're issued, so it never shows there. A 3DS's GPU has finished by then too.
 // Waiting for the GPU at each list would mean the CPU and GPU never work at the same time, which on a console costs a quarter or more of each frame. So gx2_draw copies
 // what the GPU reads, in every game, and the only wait is ring_next_segment's, which stops the CPU getting more than a couple of frames ahead.
-void gx2_finish_list() { GX2Flush(); }
+//
+// The game also takes it to mean that what the list drew is in memory. A picture it drew to pick up with its own code is put there first: Miitopia
+// draws a Mii's eyes and mouth into a scratch buffer, shrinks that twice, and copies the three sizes into the face's texture itself, which found
+// only what the memory held before, and the face was bare (2026-11-11). Not a target whose last picture the scene sampled where it lay: that is a
+// texture the game draws to (Tomodachi Life's faces), and reading it back each time would only hold the GPU up.
+void gx2_finish_list() {
+    for (Surface *s : read_targets) {
+        s->in_list = false;
+        if (s->was_sampled) continue;
+        write_back(*s);
+        mark_textures(s->addr, s->bytes(), true);  // other textures in that memory are whatever it holds now
+    }
+    read_targets.clear();
+    GX2Flush();
+}
 
 bool get_display_image_for(u32, u32, u32, const u32 **, int *, int *) { return false; }
 
@@ -3144,7 +3182,8 @@ void gfx_thread_init() {
     if (wiiu::debug_flag("cpuattr16")) gxt_cpu_attr |= 4;
     // check_ports.py's runs say they're in Cemu, which has no decoder for signed bytes made into floats and leaves such an attribute out
     // (NSMB2's world map lost its ground, 2026-11-11): there the CPU makes them. The console's GPU fetches them itself.
-    if (wiiu::debug_flag("cemu")) gxt_cpu_attr |= 1;
+    in_cemu = wiiu::debug_flag("cemu");
+    if (in_cemu) gxt_cpu_attr |= 1;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
