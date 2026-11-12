@@ -2641,6 +2641,23 @@ void dyn_res_update() {
     }
 }
 
+// What goes to a screen is a copy. Aroma draws its notifications, and its plugins their overlays, onto the buffer it is handed on its way
+// to the screen, and the buffers here are kept from frame to frame and only redrawn where and when the game draws: what was written beside
+// the picture stayed for good, letters of a notification in the corner of both screens (four testers, 2026-11-12).
+void to_screen(GX2ColorBuffer *from, GX2ScanTarget target) {
+    static GX2ColorBuffer copies[2];
+    GX2ColorBuffer &to = copies[target == GX2_SCAN_TARGET_DRC];
+    if (to.surface.width != from->surface.width || to.surface.height != from->surface.height || to.surface.format != from->surface.format) {
+        mem::host_free(to.surface.image);
+        to = *from;
+        to.surface.image = mem::host_alloc(to.surface.alignment, to.surface.imageSize);
+        if (!to.surface.image) to.surface.width = 0;  // no memory for it: the buffer itself goes, as before, and it's asked for again next time
+        else GX2InitColorBufferRegs(&to);
+    }
+    if (to.surface.image) GX2CopySurface(&from->surface, 0, 0, &to.surface, 0, 0);
+    GX2CopyColorBufferToScanBuffer(to.surface.image ? &to : from, target);
+}
+
 void present() {
     const OSTime tp = prof_now();
     if (dump_enabled && st_flips % 120 == 0) {
@@ -2675,8 +2692,8 @@ void present() {
         ps_seen.clear();
         ps_last_ds = nullptr;
     }
-    GX2CopyColorBufferToScanBuffer(tv_cb, GX2_SCAN_TARGET_TV);
-    GX2CopyColorBufferToScanBuffer(drc_cb, GX2_SCAN_TARGET_DRC);
+    to_screen(tv_cb, GX2_SCAN_TARGET_TV);
+    to_screen(drc_cb, GX2_SCAN_TARGET_DRC);
     restore_context();
     GX2SwapScanBuffers();
     GX2Flush();
