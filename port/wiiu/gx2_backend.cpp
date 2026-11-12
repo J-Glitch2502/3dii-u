@@ -2682,11 +2682,11 @@ void draw_text(u32 w, u32 h, const char *text, float x, float y, float scale) {
 void metal_display_transfer(u32, u32, u32, u32, u32) {}
 
 // a display transfer from a render target to a framebuffer is a frame finished: no need for the pixels in guest memory
-// the last frame sent to each screen, in case the game reads it back (for a photo, say)
+// the last frame sent to each screen, and the last to a buffer no screen shows, in case the game reads it back (for a photo, say)
 struct LastTransfer {
     Surface *src = nullptr;
     u32 in_paddr = 0, out_paddr = 0, in_dims = 0, out_dims = 0, flags = 0, out_size = 0;
-} last_transfer[2];
+} last_transfer[3];
 
 // A transfer between two surfaces the game draws at screen size stays on the GPU, at their higher resolution. Paper Mario draws its 3D at
 // double width, scales it down into a buffer, and copies that into the target it draws the 2D on. Through guest memory that would be a
@@ -2915,6 +2915,19 @@ struct HiddenRightEye {
 };
 static HiddenRightEye hidden_right_eye;
 
+// whether a destination no LCD has shown has come before, when its screen's count of pictures stood elsewhere
+static bool passed_over(u32 pa, u32 count) {
+    struct Spare {
+        u32 pa, count;
+    };
+    static Spare spares[4];
+    static u32 next;
+    for (const Spare &x : spares)
+        if (x.pa == pa) return x.count != count;
+    spares[next++ % 4] = {pa, count};
+    return false;
+}
+
 bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags, u32 out_size) {
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w = out_dims & 0xffff, out_h = out_dims >> 16;
     // the output size is given before the transfer's downscale (the flags' bits 24-25), so a 2x wide target has out_w 480 too
@@ -2982,8 +2995,14 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     // memory rows run top down, surface rows bottom up; a surface read as a taller texture has its window at the top of that texture
     const float h = (float)s->tex_h;
     const int which = shown_h == 400 ? 0 : 1;
-    show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
-    last_transfer[which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
+    // A picture for a buffer no LCD has shown is taken for the screen of its height, as a game fills a buffer before its LCD first shows it. One that
+    // comes again after that screen has had a picture in a buffer it does show is no screen's. Miitopia sends its cleared target to a spare buffer
+    // after each top screen, and the TV stayed black from start to finish (2026-11-11). It's kept in case the game reads it back (the Laytons do).
+    static u32 shown[2];  // pictures sent to each screen's own buffers
+    const bool spare = known_screen < 0 && passed_over(out_paddr, shown[which]);
+    if (known_screen >= 0) shown[which]++;
+    if (!spare) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
+    last_transfer[spare ? 2 : which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
     return true;
 }
 
