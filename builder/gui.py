@@ -82,14 +82,16 @@ def save_settings(s):
     json.dump(s, open(settings_file(), 'w', encoding='utf-8'), indent=1)
 
 
-def emulator_folders():
+def emulator_folders(everywhere=True):
     """Folders with a 3DS NAND, where the system archives (shared font, Mii data) can come from: Azahar's, Citra's and Lime3DS's user folders,
-    then any folder a few levels down in Downloads, Desktop and Documents, whatever its name: a portable emulator's user folder, or a copy of
-    one. A Miitopia built without them stopped on the console, the files being in such a copy in Downloads (Nov 9)."""
+    then (everywhere) any folder a few levels down in Downloads, Desktop and Documents, whatever its name: a portable emulator's user folder,
+    or a copy of one. A Miitopia built without them stopped on the console, the files being in such a copy in Downloads (Nov 9)."""
     home = os.path.expanduser('~')
     base = os.environ.get('APPDATA', '') if WIN else os.path.join(home, '.local', 'share')
     names = ('Azahar', 'Citra', 'Lime3DS') if WIN else ('azahar-emu', 'citra-emu', 'lime3ds-emu')
     found = [p for p in (os.path.join(base, n) for n in names) if dumps.nand_titles(p)]
+    if not everywhere:
+        return found
     places = (QStandardPaths.StandardLocation.DownloadLocation, QStandardPaths.StandardLocation.DesktopLocation,
               QStandardPaths.StandardLocation.DocumentsLocation)
     tops = [QStandardPaths.writableLocation(p) for p in places]  # where Windows really keeps them (OneDrive, moved), then where they usually are
@@ -518,6 +520,8 @@ class App(QObject):
                 self.tell('No keys there', 'There\'s no boot9.bin in that folder.', 'warn')
             self.st['keys'] = p
             decrypt.use_keys(p)
+            if self.st.get('system') and not dumps.have_system_archives(pipeline.ARCHIVES):
+                self.import_system(self.st['system'])  # a 3DS's own copy, chosen before the keys that open it
             self.refresh_files()
 
     @Slot()
@@ -526,7 +530,15 @@ class App(QObject):
                                              self.st.get('system', ''))
         if p:
             if not self.import_system(p):
-                self.tell('No 3DS system files there', HELP['system'][1], 'warn')
+                if not self.system_locked:
+                    self.tell('No 3DS system files there', HELP['system'][1], 'warn')
+                elif decrypt.have_keys(self.st['keys']):
+                    self.tell('Those files didn\'t open', f'That is the right folder, but its files couldn\'t be decrypted with the boot9.bin in '
+                              f'{self.st["keys"]}. They open with the keys of the same 3DS they were copied from.', 'warn')
+                else:
+                    self.tell('Those files need your 3DS keys', 'That is the right folder. A 3DS keeps these files encrypted, and they open with '
+                              'boot9.bin from your own 3DS.\n\nPress "Folder..." next to 3DS keys and choose the folder with your boot9.bin: the '
+                              'builder then reads the system files from here by itself.', 'warn')
             self.refresh_files()
 
     @Slot(str)
@@ -536,16 +548,32 @@ class App(QObject):
     def import_system(self, folder):
         """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games"""
         tmp = tempfile.mkdtemp(prefix='3diiu_sys_')  # for contents that need decrypting first
+        self.system_locked = False  # the folder has them, as a 3DS keeps them, and they didn't decrypt: two testers were told "none there"
         try:
             got = dumps.import_system_archives(folder, pipeline.ARCHIVES, tmp)
-        except (OSError, dumps.DumpError, decrypt.DecryptError):
+        except decrypt.DecryptError:
+            got, self.system_locked = [], True
+        except (OSError, dumps.DumpError):
             got = []
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        if got:
+        if got or self.system_locked:  # a locked folder is kept: it's read again once the keys are chosen
             self.st['system'] = folder
             save_settings(self.st)
         return got
+
+    def find_system(self, everywhere):
+        """the system files from an emulator's folder on this PC, if the builder has none yet"""
+        for folder in [] if dumps.have_system_archives(pipeline.ARCHIVES) else emulator_folders(everywhere):
+            if self.import_system(folder) and dumps.have_system_archives(pipeline.ARCHIVES):
+                break
+        self.refresh_files()
+
+    def came_back(self, state):
+        """Back in this window, from Azahar's File > Set Up System Files say: what that left is taken without being pointed at, as the help
+        says it is. Only the emulators' own folders are looked in, which costs nothing."""
+        if state == Qt.ApplicationState.ApplicationActive and not self._s['building']:
+            self.find_system(False)
 
     @Slot()
     def chooseOtp(self):
@@ -617,14 +645,10 @@ class App(QObject):
         if not dest or not os.path.isdir(dest):
             self.tell('Where should it go?', 'Choose an SD card or a folder for the game.', 'warn')
             return
+        self.find_system(True)
         if not dumps.have_system_archives(pipeline.ARCHIVES):
-            for folder in emulator_folders():
-                if self.import_system(folder) and dumps.have_system_archives(pipeline.ARCHIVES):
-                    break
-            self.refresh_files()
-            if not dumps.have_system_archives(pipeline.ARCHIVES):
-                self.tell('The 3DS system files are missing', HELP['system'][1], 'warn')
-                return
+            self.tell('The 3DS system files are missing', HELP['system'][1], 'warn')
+            return
         save_settings(self.st)
         argv = [sys.executable, '--pipeline'] if FROZEN else [sys.executable.replace('pythonw.exe', 'python.exe'), '-u', os.path.join(HERE, 'pipeline.py')]
         argv += ['--game', self.game.path, '--otp', self.st['otp'], '--card' if self._s['target'] == 'card' else '--out', dest, '--keys', self.st['keys']]
@@ -730,6 +754,7 @@ def create(argv=None):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('3DiiU.Builder')  # the taskbar shows this app's icon, not Python's
     state = App()
+    qt.applicationStateChanged.connect(state.came_back)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('app', state)
     engine.rootContext().setContextProperty('T', theme())
