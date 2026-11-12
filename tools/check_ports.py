@@ -124,8 +124,11 @@ def build_from_dump(name, src, otp):
     return built_from_dump(name, started) or 'build failed: no work folder made'
 
 
+SHOTS = 6  # pictures of each screen a leg (--shots): more of them follow a transition step by step
+
+
 def cemu(t, seconds, interp):
-    ps = ['powershell', '-NoProfile', '-File', ROOT + '/tools/win/cemu_run.ps1', '-Rpx', t.rpx, '-Low', t.low, '-Seconds', str(seconds), '-Out', t.data + '/shots/cemu']
+    ps = ['powershell', '-NoProfile', '-File', ROOT + '/tools/win/cemu_run.ps1', '-Rpx', t.rpx, '-Low', t.low, '-Seconds', str(seconds), '-Shots', str(SHOTS), '-Out', t.data + '/shots/cemu']
     if interp:
         ps.append('-Interpreter')
     return run(*ps).stdout
@@ -346,6 +349,7 @@ def judge(t, seconds, flags, measured=False):
 
 
 def main():
+    global SHOTS
     p = argparse.ArgumentParser()
     p.add_argument('games', nargs='*', default=['all'])
     p.add_argument('--no-build', action='store_true')
@@ -354,7 +358,9 @@ def main():
     p.add_argument('--route', help="a route of test_routes.py for every game named, instead of its own: nsmb2_stand to time a level's first screen")
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     p.add_argument('--measure', action='store_true', help="the measuring kind of build (build3ds.py's THREEDII_MEASURE): frame rates and costs on the log, and the scenes")
+    p.add_argument('--shots', type=int, default=6, help='pictures of each screen a leg; more than the usual six are for looking at, and fail the comparison with a good run')
     args = p.parse_args()
+    SHOTS = args.shots
     if args.measure:
         global MEASURE
         MEASURE = True
