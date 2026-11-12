@@ -60,6 +60,9 @@ os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ[
 # and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
 # packed for a console.
 MEASURE = bool(os.environ.get('THREEDII_MEASURE'))
+# THREEDII_MEASURE=console: packed all the same, for profiling a game on a console over the network (tools/console_watch.py, "test profile");
+# asked for by name only (tools/win/builder_measuring.bat). Slower than a normal build: not for playing.
+MEASURE_CONSOLE = os.environ.get('THREEDII_MEASURE') == 'console'
 
 
 class MemoryStatus(ctypes.Structure):
@@ -812,7 +815,7 @@ def build_title(g, args):
 
 
 def pack(g, otp):
-    if MEASURE:
+    if MEASURE and not MEASURE_CONSOLE:
         sys.exit('THREEDII_MEASURE is set: that build measures itself and is for Cemu only. Build the game again without it, then pack.')
     title = g.out + '/title'
     target = f'{ROOT}/dist/{known_game(g.name)["folder"]}'  # as tools/ship_card.py names them

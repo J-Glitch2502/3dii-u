@@ -377,7 +377,7 @@ def main():
     PROGRESS.stage('Making the title')
     make_title(game_dir, out, info, a.art)
 
-    if b3.MEASURE:  # the checks' own kind of build, for Cemu (build3ds.py): never packed, so none can reach a console
+    if b3.MEASURE and not b3.MEASURE_CONSOLE:  # the checks' own kind of build, for Cemu (build3ds.py): packed only when asked by name
         print('a measuring build: not packed', flush=True)
         PROGRESS.done, PROGRESS.share = 100, 0
         PROGRESS.at(1)
