@@ -51,9 +51,11 @@ WHICH GAMES WORK
 
 IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
 
-- Turn off the SDCafiine and FTP (ftpiiu) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch them off, then
-  start the game again. With SDCafiine on, a tester's New Super Mario Bros. 2 ran very slowly in the castles and ran well with it off; with
-  FTP on, games have frozen.
+- Turn off the SDCafiine and FTP (FTPiiU) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch both off, then
+  start the game again. Aroma comes with FTPiiU switched on. It works on the same processor cores as the game and holds it up: games have
+  slowed to a crawl and frozen with their sound looping until it was off. With SDCafiine on, a tester's New Super Mario Bros. 2 ran very
+  slowly everywhere.
+- If a game is still slow with both off, send its log (see below): it says what the console was busy with, and which plugins were running.
 - The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders. It keeps them,
   so the next time is smooth.
 
@@ -63,9 +65,9 @@ REPORTING A PROBLEM
 - If a build fails, press "Show details" and copy what it says.
 - Say which game it is (title and region), and whether you added an update, DLC or a mod.
 - For a game that goes wrong on the Wii U, say where in the game it happens and what you saw.
-- Send the game's log with it. When a game closes (HOME, then close the game), it leaves its files on the SD card, in the folder
-  3dii-u, in a folder named after the game's number: log.txt is the run you just closed, log_before.txt the run before it. For a freeze or
-  a crash, start the game once more, close it, and send log_before.txt: that is the run that went wrong.
+- Send the game's log with it. When a game closes (click the left stick and choose Quit, or HOME and close the game), it leaves its files
+  on the SD card, in the folder 3dii-u, in a folder named after the game's number: log.txt is the run you just closed, log_before.txt the
+  run before it. For a freeze or a crash, start the game once more, close it, and send log_before.txt: that is the run that went wrong.
 
 
 WHAT STAYS ON YOUR PC
