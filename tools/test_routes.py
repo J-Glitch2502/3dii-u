@@ -34,6 +34,8 @@ ROUTES = {
     # to the world map on A (it's there within a minute), then right to World 1-1's place on it, in, and running right with a jump now and
     # then: with A alone Mario stood on the map's first place until the run ended, and no run ever drew a level (2026-11-11)
     'nsmb2': A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 360'] + run_right(150),
+    # into the level as nsmb2 goes, and Mario stays where it starts: one place, drawn and run frame after frame, for timing a level against another
+    'nsmb2_stand': A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 30000'],
     'dream_team': A(8) + ['DDOWN 6', 'WAIT 40', 'A 6', 'WAIT 80'] * 6 + A(440, 30) + sweep(WALK) + A(500, 30),
     'sticker_star': A(6) + START(4) + A(300, 40) + sweep(WALK) + A(300, 40),
     'paper_jam': A(8) + A(500, 40) + sweep(WALK) + A(300, 40),

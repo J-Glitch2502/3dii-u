@@ -5,7 +5,8 @@
 sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
-has none) on a blank save, and a restart on what that saved.
+has none) on a blank save, and a restart on what that saved, which ends by quitting the game as a player does: it has to close and leave its
+log on the SD card.
 Each leg's screenshots, of the TV and of the GamePad, are kept in games/<folder>/check_shots/<game>/<leg> and held to the good runs in
 games/<folder>/good_shots/<game>/<leg>: a game fails when, against the nearest good run, two or more pictures of a screen are in one and not in
 the other (pictures()), and so also when it draws nothing where a good run drew. A game with no good run says so. --bless runs nothing: it keeps
@@ -199,6 +200,18 @@ def bless(t):
     return f'{n} pictures kept as a good run'
 
 
+def until(lines, seconds):
+    """a route's lines up to that many seconds in: each takes its frames and a few released ones (services/hid.cpp)"""
+    out, frames = [], 0
+    for line in lines:
+        n = line.split()[-1]
+        frames += (int(n) if n.isdigit() else 1) + 4
+        if frames > seconds * 60:
+            break
+        out.append(line)
+    return out
+
+
 def save_files(t):
     got = {}
     base = t.player + '/save'
@@ -217,8 +230,8 @@ def judge(t, seconds, flags):
     for f in glob.glob(f'{CEMU}/portable/shaderCache/transferable/00050000{t.low}_*'):
         os.remove(f)
     os.makedirs(d)
-    with open(d + '/live.txt', 'w', newline='\n') as f:
-        f.write('\n'.join(ROUTES.get(t.route or t.name, GENERIC)) + '\n')
+    route = ROUTES.get(t.route or t.name, GENERIC)
+    card_log = f'{CEMU}/portable/sdcard/3dii-u/00050000{t.low}/log.txt'  # where a game leaves its log as it closes (frontend_wiiu.cpp)
     for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp)
         open(f'{d}/{flag}', 'w').close()
     if t.env:
@@ -229,6 +242,13 @@ def judge(t, seconds, flags):
     # a scene is its level alone: a restart would stop before the route is back in it
     for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4)))[:1 if t.env else 2]:
         read_log = lambda: open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
+        # The restart ends as a player ends a game, quit from its menu (a route's KEY quit), not killed: closing is where consoles have hung,
+        # and the copy of its log a game leaves on the SD card then is what a tester sends
+        closing = name == 'restart'
+        with open(d + '/live.txt', 'w', newline='\n') as f:
+            f.write('\n'.join(until(route, secs - 15) + ['KEY quit'] if closing else route) + '\n')
+        if os.path.exists(card_log):
+            os.remove(card_log)
         saved_before = bool(save_files(t))
         said = cemu(t, secs, interp)
         text = read_log()
@@ -251,6 +271,10 @@ def judge(t, seconds, flags):
             os.makedirs(kept(t, 'check_logs'), exist_ok=True)
             with open(f'{kept(t, "check_logs")}/{name.replace(" ", "_")}.txt', 'w', encoding='utf-8', newline='\n') as f:
                 f.write(text)
+        if closing and '[quit] sound system shut down' not in text:
+            faults.append(f'{name}: the game did not close when it was quit')
+        elif closing and not (os.path.exists(card_log) and b'[quit]' in open(card_log, 'rb').read()):
+            faults.append(f'{name}: no log on the SD card after the game was quit')
         for k, v in t.env.items():
             if f'[test] {k} is {v}' not in text or (k == 'RECOMP_ROMFS_SWAP' and '[fs] romfs swap' not in text):
                 faults.append(f'{name}: {k} did not take: this is not the scene')
@@ -321,27 +345,30 @@ def main():
     p.add_argument('--no-build', action='store_true')
     p.add_argument('--seconds', type=int, default=200)
     p.add_argument('--flag', action='append', default=[], help='a debug file in the data folder, like top1080')
+    p.add_argument('--route', help="a route of test_routes.py for every game named, instead of its own: nsmb2_stand to time a level's first screen")
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     args = p.parse_args()
     src = sources()
     games = list(GAMES) + list(SCENES) + list(src['games']) if args.games == ['all'] else args.games
     built = args.no_build or args.bless
     bad = 0
-    for i, game in enumerate(games):
+    ports_built = set()
+    for game in games:
         started = time.time()
-        if game in GAMES:
-            t = port(game) if built else build_port(game)
-        elif game in SCENES:
-            of, env = SCENES[game]
-            t = port(of) if built or of in games[:i] else build_port(of)  # the port as this run has built it already
+        if game in GAMES or game in SCENES:
+            of, env = SCENES.get(game, (game, {}))
+            t = port(of) if built or of in ports_built else build_port(of)  # a scene's port as this run has built it already
             if not isinstance(t, str):
-                t.name, t.route, t.env = game, of, env
+                ports_built.add(of)
+                t.name, t.route, t.env = game, of if env else '', env
         elif game in src['games']:
             t = (built_from_dump(game) or 'not built yet') if built else build_from_dump(game, src['games'][game], src['otp'])
         else:
             t = f'no such game: not one of the ports and not in {SOURCES}'
         if not isinstance(t, str) and game in src['games']:
             t.route = src['games'][game].get('route', '')
+        if args.route and not isinstance(t, str):
+            t.route = args.route
         if args.bless and not isinstance(t, str):
             print(f'{game}: {bless(t)}', flush=True)
             continue

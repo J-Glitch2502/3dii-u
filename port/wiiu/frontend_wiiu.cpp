@@ -14,6 +14,7 @@
 #include <gx2/event.h>
 #include <proc_ui/procui.h>
 #include <sysapp/launch.h>
+#include <sys/stat.h>
 #include <malloc.h>
 #include <nn/act.h>
 #include <unistd.h>
@@ -112,8 +113,13 @@ extern const char *g_live_path;
 void frontend_wake() { OSSignalEvent(&gpu_event); }
 }  // namespace kernel
 void frontend_live_text(const std::string &) {}
+// A route's "KEY quit" quits as choosing Quit in the options menu does. Cemu has no Wii U Menu to leave for, so there the main loop ends
+// itself, as if the system had said so: what a game does as it closes then runs in a check too.
+static volatile bool route_quit;
 void frontend_live_key(const std::string &key) {  // a route's "KEY <name>"
-    if (key == "quit") wiiu::menu_quit_now();
+    if (key != "quit") return;
+    if (wiiu::debug_flag("cemu")) route_quit = true;
+    else wiiu::menu_quit_now();
 }
 namespace onescreen {
 u32 host_mask(const char *) { return 0; }
@@ -592,7 +598,7 @@ void frontend_run() {
     stage("graphics ready");
     OSTime next_clock = OSGetSystemTime();
     u64 frames = 0;
-    while (WHBProcIsRunning()) {
+    while (WHBProcIsRunning() && !route_quit) {
         // While the HOME Menu is up nothing may touch GX2, and with no VBlanks the game waits. WHBProcIsRunning blocks until we're back.
         if (gpu_pause) {
             if (!foreground_back) continue;
