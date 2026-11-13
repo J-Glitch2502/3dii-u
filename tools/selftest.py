@@ -28,13 +28,6 @@ def present_rule():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_present_rule.cpp', '-lpthread', '-o', exe], [exe]]
 
 
-def frame_cap():
-    """port/wiiu/frame_cap.h against made-up games, built for this PC"""
-    exe = build3ds.WORK + '/selftest/test_frame_cap.exe'
-    os.makedirs(os.path.dirname(exe), exist_ok=True)
-    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_frame_cap.cpp', '-lpthread', '-o', exe], [exe]]
-
-
 def latte_program():
     """port/wiiu/latte_program.h against small programs made up word by word, built for this PC"""
     exe = build3ds.WORK + '/selftest/test_latte_program.exe'
@@ -59,7 +52,6 @@ def main():
     checks = {
         'vertex arrays': vertex_arrays(),
         'present rule': present_rule(),
-        'frame cap': frame_cap(),
         'compiled programs': latte_program(),
         'open bools': open_bools(),
         'program rules': [[py, ROOT + '/tools/gsh_rules.py', '--self-check']],

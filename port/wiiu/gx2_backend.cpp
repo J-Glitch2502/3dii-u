@@ -46,7 +46,6 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "loader.h"
-#include "frame_cap.h"
 #include "present_rule.h"
 #include "shader_compile.h"
 #include "shadergen.h"
@@ -452,10 +451,6 @@ struct Surface {
     // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
     // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
     bool in_list = false, sampled = false, was_sampled = false;
-    // for the thirty-a-second cap (frame_left_out): the screens its picture has been shown on (1 the top, 2 the bottom, 3 both), whether
-    // the game has cleared it since its last transfer, and for how many frames in a row it has
-    u8 lcds = 0, steady = 0;
-    bool cleared = false;
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
         return w * h * bpp;
@@ -469,33 +464,6 @@ Surface *cur_color, *cur_depth;
 // as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
 inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
 std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
-
-// Thirty frames a second: every other frame of a game that makes sixty is left undrawn. frame_cap.h has the rule, which frames and why;
-// here is what it is told about a screen's surface, and where its answer is used: nothing is drawn to a surface whose frame is left out
-// (gx2_skip_draw, metal_flush), its clear is dropped (gx2_memory_fill), and its transfer shows nothing (metal_defer_transfer).
-// Only a picture the game is sure to draw again is ever left out: a surface both screens are drawn in has to be drawn afresh for each
-// (New Super Mario Bros. 2), and a screen's own surface counts while the game has cleared it in each of its last eight frames, as what is
-// wiped every frame is drawn every frame.
-FrameCap cap;
-
-// at a screen's transfer: true if the frame it ends was left out
-bool frame_left_out(Surface &s, int which) {
-    s.lcds |= 1 << which;
-    const bool shared = s.lcds == 3;
-    if (which == 0 || !shared) {  // a bottom screen drawn in the top's surface goes by the top's frames
-        s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
-        s.cleared = false;
-    }
-    return cap.frame_ends(which, shared, shared || s.steady >= 8);
-}
-
-// the screen's surface a draw is for, if the frame being made for that screen is left out
-Surface *left_out(u32 color_addr, u32 w, u32 h) {
-    if (!cap.marking()) return nullptr;
-    for (auto &s : surfaces)
-        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && cap.drops(s->lcds)) return s.get();
-    return nullptr;
-}
 GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
@@ -2282,7 +2250,7 @@ void gx2_flush_cpu_batch() {
 }
 
 void metal_flush(const RTConfig &rt, const MBatch &mb) {
-    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80) || left_out(rt.color_addr, rt.w, rt.h)) return;
+    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80)) return;
     // Textures first: a decode takes ring memory of its own, megabytes for a large one, and the batch's vertices mustn't already be lying in a
     // segment that the decodes go on to leave behind
     for (const MSeg &seg : mb.segs)
@@ -2446,13 +2414,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
         else gx2_skip_pass = gx2_skip_copies = true;
     }
-    bool left = false;  // the clear of a screen's frame that isn't drawn; a clear also says the game draws that screen afresh (frame_left_out)
-    for (auto &s : surfaces)
-        if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
-            s->cleared = true;
-            left |= cap.drops(s->lcds);
-        }
-    if (gx2_skip_pass || left) return true;
+    if (gx2_skip_pass) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
     for (auto &s : surfaces)
@@ -3016,10 +2978,6 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
 }
 
 bool gx2_skip_pass, gx2_skip_copies;
-bool gx2_skip_draw() {
-    const u32 dim = g.regs[R::FB_DIM];
-    return gx2_skip_pass || left_out((g.regs[R::COLOR_ADDR] & 0x0fffffff) * 8, dim & 0x7ff, ((dim >> 12) & 0x3ff) + 1);
-}
 
 // New Super Mario Bros. 2 draws a right eye every frame though the slider says 3D is off, and the Wii U couldn't show it: half its draws.
 // Once a right eye is seen right after a left one, the pass between those transfers isn't drawn. If something else turns up there, it stops.
@@ -3160,9 +3118,7 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     static u32 shown[2];  // pictures sent to each screen's own buffers
     const bool spare = known_screen < 0 && passed_over(out_paddr, shown[which]);
     if (known_screen >= 0) shown[which]++;
-    // a buffer its LCD has shown ends a frame of that screen's, which may be one that was left out
-    const bool out = known_screen >= 0 && frame_left_out(*s, which);
-    if (!spare && !out) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
+    if (!spare) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
     last_transfer[spare ? 2 : which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
     return true;
 }
@@ -3590,9 +3546,6 @@ static void draw_keyboard() {
 static std::atomic<bool> report_due;
 static std::atomic<float> report_draws_per_flip;
 static void write_report();
-
-// (the GPU thread) work has come after it had waited with nothing to do: where a game's own pace shows (frame_cap.h)
-void gfx_work_arrived(u64 now) { cap.work_arrived(now); }
 
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {

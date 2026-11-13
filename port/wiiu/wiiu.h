@@ -49,7 +49,6 @@ void gfx_thread_init();
 bool gfx_ready();
 // (GPU thread) present the screens if a new VBlank arrived, service in-game overlay
 void gfx_pump(bool quiet);  // quiet: the GPU thread had nothing to do for its whole wait
-void gfx_work_arrived(u64 now);  // the GPU thread has work again after such a wait, at this time in microseconds
 void gfx_shutdown();
 void gfx_reacquire();  // (GPU thread) back from the HOME Menu
 void gfx_note_busy(u32 us);
