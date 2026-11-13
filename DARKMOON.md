@@ -215,6 +215,15 @@ cap off the lab scene is right in Cemu; now a game whose top screen is put toget
 (`bash console_runs/cemu_cmd.sh cap1 120 st`, look at tv_01.png). Also seen: noise in the TV's side bars in the new Cemu pictures
 (not checked whether that's new). Then Senne builds with `tools/win/builder_measuring.bat` and profiles on the console.
 
+## Nov 13: main synced again; Josiah's review of PR #6
+
+Main of Nov 13 merged (6215f8b, 4bb53fe): the thirty-a-second cap is gone from main (so is darkmoon's way round it, 1c61227, which
+also didn't build: a line break in a string), textures come from main's host_alloc (relieve_memory frees with host_free now), main's
+vertex arrays in 4-byte steps go through the vertex cache, a JMPU on an open bool isn't settled by the variant's bools. Cemu: no
+crash, the lab scene right (one top screen), 60 fps. Josiah's review of PR #6 asks for, besides those: darkmoon-only logs and
+counters behind kMeasure; a cause for -Os instead of O2_GAMES; no packing of measuring builds for a console; this file out of main;
+and small pull requests one at a time (the DSP freeze fix first), each through `check_ports.py nsmb2_with_dlc` and `--cold`.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),
