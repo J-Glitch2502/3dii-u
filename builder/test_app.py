@@ -1,4 +1,4 @@
-"""Self-check for app.py's compiled-cache reset: python builder/test_app.py"""
+"""Self-check for app.py's compiled-cache reset and its output's encoding, and for make_app.py's release tag: python builder/test_app.py"""
 import importlib.util
 import os
 import shutil
@@ -48,5 +48,17 @@ try:
     r = subprocess.run([sys.executable, '-X', 'utf8=0', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app.py'), script], capture_output=True, env=env)
     assert r.returncode == 0 and r.stdout.decode('utf-8').strip() == 'Kumamon★ SUPER STREET FIGHTER™ ミイ', (r.returncode, r.stdout, r.stderr)
     print('output encoding ok')
+    # a build to publish is given its release's tag, and only one of this version's
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import make_app
+    tag = 'builder-1.0-beta-2026-11-13'
+    assert make_app.release_tag(['make_app.py'], '1.0') == '' and make_app.release_tag(['make_app.py', '--release', tag], '1.0') == tag
+    for bad in (['--release'], ['--release', 'deps-1'], ['--release', 'builder-2.0-beta-2026-11-13'], ['--release', '1.0']):
+        try:
+            make_app.release_tag(['make_app.py'] + bad, '1.0')
+        except SystemExit:
+            continue
+        raise AssertionError(f'{bad} was taken as a release tag')
+    print('release tag ok')
 finally:
     shutil.rmtree(base)

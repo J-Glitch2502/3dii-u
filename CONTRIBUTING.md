@@ -110,7 +110,9 @@ To build the standalone app, which bundles Python, Qt, devkitPPC and the shader 
 
     python builder/make_app.py
 
-It writes `builder/dist/3Dii U Builder/`, and a zip of it for testers.
+It writes `builder/dist/3Dii U Builder/`, and a zip of it for testers. A build that will be published takes
+`--release <tag>`, the tag of its GitHub release (`builder-1.0-beta-2026-11-13`): the app carries it, and that is how an
+app already out there knows a newer release and takes it (`builder/updater.py`, which lists what a release must keep).
 
 ## Checking a change
 
