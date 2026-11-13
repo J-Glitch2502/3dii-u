@@ -41,6 +41,10 @@ OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/
 MEASURE = False  # --measure: the measuring kind of build, which build3ds.py and the builder's pipeline keep in folders of their own
 COLD = False     # --cold: built as a game nobody has built before, under <name>_cold
 SOURCES = ROOT + '/games/sources.json'
+# A console's account always has a Mii, and Cemu's is a placeholder the runtime turns down, so a run had the games find none: a state no
+# console is in. Every run gets this one instead: made up ("Wii U Mii", no person's), and marked as born on a Wii U, as a console's are.
+ACCOUNT_MII = bytes.fromhex('030010403d500000000ab0cd98000002020000000002000026005700690069002000550020004d006900690000004040'
+                            '000021010268441826344614811217680d000029005248505700690069002000550000000000000000000000000021a4')
 # A scene is a port run once more with switches of the runtime set (env.txt in its data folder, frontend_wiiu.cpp): a level a route can't reach
 # by playing, loaded in place of the one it enters. NSMB2's files: <world>-14 is a world's tower, -16 its castle, -12 its ghost house.
 SCENES = {'nsmb2_tower': ('nsmb2', {'RECOMP_ROMFS_SWAP': 'Course/1-1.sarc=Course/1-14.sarc'}),
@@ -245,6 +249,8 @@ def judge(t, seconds, flags, measured=False):
     for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp); name=text for a file with something in it
         with open(f'{d}/{flag.split("=")[0]}', 'w') as f:
             f.write(flag.partition('=')[2])
+    with open(d + '/test_mii.bin', 'wb') as f:  # the current account's Mii, as frontend_wiiu.cpp takes it
+        f.write(ACCOUNT_MII)
     if t.env:
         with open(d + '/env.txt', 'w', newline='\n') as f:
             f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
