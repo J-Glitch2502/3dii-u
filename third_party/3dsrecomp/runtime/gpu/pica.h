@@ -641,6 +641,7 @@ enum VtxCpuWhy { VCPU_NO_SHADER, VCPU_GEOMETRY, VCPU_CONTINUED, VCPU_COUNT };
 struct VtxCpuStats {
     u64 draws[VCPU_COUNT], verts[VCPU_COUNT];
     double ms[VCPU_COUNT];
+    double geometry_vs_ms;  // of ms[VCPU_GEOMETRY], what the vertex shader took (the rest: the geometry shader and assembling)
 };
 extern VtxCpuStats vtx_cpu;
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)

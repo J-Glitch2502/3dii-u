@@ -803,9 +803,48 @@ void vtx_draw(bool indexed) {
                 logged.push_back(gp);
                 LOG("[vtx] geometry shader %p (entry %u, mode %u) shaded on the CPU, %u vertices in its first draw\n", (const void *)gp,
                     g.regs[R::GS + R::SH_ENTRY] & 0xffff, gsp.mode, n);
+                if (kMeasure) {  // its code and swizzles, to see what it does (for running it some other way)
+                    char line[8 * 9 + 32];
+                    for (u32 w = 0; w < g.gs.code_size; w += 8) {
+                        int k = snprintf(line, sizeof line, "[gscode] %03x", w);
+                        for (u32 j = w; j < w + 8 && j < g.gs.code_size; j++) k += snprintf(line + k, sizeof line - k, " %08x", g.gs.code[j]);
+                        LOG("%s\n", line);
+                    }
+                    for (u32 w = 0; w < g.gs.swizzle_size; w += 8) {
+                        int k = snprintf(line, sizeof line, "[gsswz] %03x", w);
+                        for (u32 j = w; j < w + 8 && j < g.gs.swizzle_size; j++) k += snprintf(line + k, sizeof line - k, " %08x", g.gs.swizzle[j]);
+                        LOG("%s\n", line);
+                    }
+                    u32 bools = 0;
+                    for (u32 j = 0; j < 16; j++) bools |= (u32)g.gs.b[j] << j;
+                    LOG("[gsconf] mode %u vs_out_num %u begin %u end %u outmask %04x bools %04x\n", gsp.mode, gsp.vs_out_num, gsp.begin, gsp.end,
+                        g.gs_emitter.output_mask, bools);
+                }
             }
         }
 #endif
+        if (gsp.mode != 1) {
+            // The vertex shader's work is each vertex's own: shaded first, in parallel where there are threads to share it (on a Wii U, one on
+            // core 0, which the profile finds idle most of the time), then the geometry shader takes them in order. Luigi's Mansion: Dark Moon's
+            // rain is drawn this way, 1600 vertices a frame, and took 30 ms of each frame on the GPU thread alone (2026-11-13).
+            static std::vector<V4> vs_out;
+            if (vs_out.size() < (size_t)n * 16) vs_out.resize((size_t)n * 16);
+            const double t0 = kMeasure ? now_ms() : 0;
+            constexpr u32 kChunk = 64;
+            parallel_for((n + kChunk - 1) / kChunk, [&](u32 c, u32 tid) {
+                ShaderUnit &u = unit_for(tid);
+                V4 in[16];
+                for (u32 i = c * kChunk, e = std::min(n, i + kChunk); i < e; i++) {
+                    load_vertex(L, idx_list[i], in);
+                    load_inputs(u, R::VS, in);
+                    shader_run(prog, u, g.vs, entry);
+                    gather_outputs(u, outmask, &vs_out[(size_t)i * 16]);
+                }
+            });
+            if (kMeasure) vtx_cpu.geometry_vs_ms += now_ms() - t0;
+            for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
+            return;
+        }
         ShaderUnit &u = unit_for(0);
         V4 in[16], buf[16];
         for (u32 i = 0; i < n; i++) {

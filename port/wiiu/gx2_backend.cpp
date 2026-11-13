@@ -55,6 +55,7 @@
 
 extern "C" void *GfxHeapAllocMEM1(uint32_t size, uint32_t alignment) __attribute__((weak));
 extern "C" void GfxHeapFreeMEM1(void *block) __attribute__((weak));
+extern "C" void *GfxHeapAllocForeground(uint32_t size, uint32_t alignment) __attribute__((weak));
 // in gx2.rpl, and wut's import library, but not its headers
 extern "C" void GX2SampleTopGPUCycle(uint64_t *cycle);
 extern "C" void GX2SampleBottomGPUCycle(uint64_t *cycle);
@@ -3695,9 +3696,11 @@ static void free_whb_depth() {
 
 // The TV's colour buffer only gets one blit per present, so once fast memory has been found full it gives its 8 MB to what's drawn thousands of times (relieve_mem1).
 // WHB keeps no pointer to it, as its depth buffers: it only frees what isn't null, and allocates a new one every time the foreground comes back.
+static bool tv_720;  // the TV is sent a 1280x720 picture, which the console scales to the TV's 1080 lines (tv_to_720)
+
 static void tv_buffer_to_mem2() {
     static GX2ColorBuffer in_mem2;
-    if (!mem1_relief || !GfxHeapFreeMEM1) return;
+    if (tv_720 || !mem1_relief || !GfxHeapFreeMEM1) return;
     GX2ColorBuffer *whb = WHBGfxGetTVColourBuffer();
     if (!in_mem2.surface.image) {
         void *p = memalign(whb->surface.alignment, whb->surface.imageSize);
@@ -3709,6 +3712,52 @@ static void tv_buffer_to_mem2() {
     if (whb->surface.image) GfxHeapFreeMEM1(whb->surface.image);
     whb->surface.image = nullptr;
     tv_cb = &in_mem2;
+}
+
+// A TV at 1080 lines is sent a 1280x720 picture, and the console's own scaler makes the 1080 lines: the top screen is drawn at 1200x720
+// anyway (top_720), so a 1920x1080 buffer only held it scaled up. Every present copies the TV's buffer twice (to_screen, then to the scan
+// buffer), and in Luigi's Mansion: Dark Moon, where that buffer had gone to MEM2, the present took 6.5 ms of each frame on the console's
+// GPU (2026-11-13); this has 44% of the pixels, and WHB's 8 MB of fast memory for its 1080 buffer goes to the game's targets. Not with
+// "top1080" or "tv1080" (debug flags). Again after the HOME Menu, which takes the foreground memory the scan buffer is in.
+static bool tv_to_720() {
+    if (!GfxHeapAllocForeground || wiiu::debug_flag("top1080") || wiiu::debug_flag("tv1080")) return false;
+    const GX2TVScanMode mode = GX2GetSystemTVScanMode();
+    if (mode != GX2_TV_SCAN_MODE_1080I && mode != GX2_TV_SCAN_MODE_1080P) return false;
+    uint32_t size = 0, unk = 0;
+    GX2CalcTVSize(GX2_TV_RENDER_MODE_WIDE_720P, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE, &size, &unk);
+    void *scan = GfxHeapAllocForeground(size, 0x1000);
+    if (!scan) return false;
+    static GX2ColorBuffer cb;
+    if (!cb.surface.image) {
+        GX2Surface &f = cb.surface;
+        f.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+        f.width = 1280;
+        f.height = 720;
+        f.depth = 1;
+        f.mipLevels = 1;
+        f.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+        f.aa = GX2_AA_MODE1X;
+        f.use = (GX2SurfaceUse)(GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_TEXTURE);
+        f.tileMode = GX2_TILE_MODE_DEFAULT;
+        cb.viewNumSlices = 1;
+        GX2CalcSurfaceSizeAndAlignment(&f);
+        GX2InitColorBufferRegs(&cb);
+        f.image = memalign(f.alignment, f.imageSize);
+        if (!f.image) return false;
+        memset(f.image, 0, f.imageSize);
+        DCFlushRange(f.image, f.imageSize);
+    }
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU, scan, size);
+    GX2SetTVBuffer(scan, size, GX2_TV_RENDER_MODE_WIDE_720P, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8, GX2_BUFFERING_MODE_DOUBLE);
+    GX2SetTVScale(1280, 720);
+    GX2ColorBuffer *whb = WHBGfxGetTVColourBuffer();  // nothing draws into it now: WHB frees only what isn't null
+    if (whb->surface.image && GfxHeapFreeMEM1) GfxHeapFreeMEM1(whb->surface.image);
+    whb->surface.image = nullptr;
+    tv_cb = &cb;
+    static bool told;
+    if (!told) LOG("[gx2] the TV is sent 1280x720, which the console scales to 1080 lines\n");
+    told = true;
+    return true;
 }
 
 // The first time a screen's render target finds fast memory full: the TV's buffer moves to MEM2, and the screens' depth buffers go into one shared block, those that have
@@ -3747,6 +3796,7 @@ void gfx_thread_init() {
     ring_end = RING_SIZE / 3;
     tv_cb = WHBGfxGetTVColourBuffer();
     drc_cb = WHBGfxGetDRCColourBuffer();
+    tv_720 = tv_to_720();
     tv_buffer_to_mem2();
     load_shader_tables();
     shader_compile_init();  // what the set lacks, the console compiles as it goes
@@ -4197,6 +4247,8 @@ void gfx_shutdown() { GX2DrawDone(); }
 // new memory too, in the order they first got it. What was in them is gone; the game draws them again every frame.
 void gfx_reacquire() {
     free_whb_depth();
+    if (tv_720) tv_720 = tv_to_720();
+    if (!tv_720) tv_cb = WHBGfxGetTVColourBuffer();
     tv_buffer_to_mem2();
     depth_block = nullptr;
     depth_owner = nullptr;
@@ -4310,6 +4362,7 @@ static void write_report() {
             if (vtx_cpu.draws[k])
                 n += snprintf(line + n, sizeof line - n, " | %s: %.1f draws, %.0f vertices, %.2f ms", why[k], vtx_cpu.draws[k] / flips, vtx_cpu.verts[k] / flips,
                               vtx_cpu.ms[k] / flips);
+        if (vtx_cpu.draws[VCPU_GEOMETRY]) n += snprintf(line + n, sizeof line - n, " (of which the vertex shader %.2f ms)", vtx_cpu.geometry_vs_ms / flips);
         if (n) LOG("[vtx] shaded on the CPU, per flip%s\n", line);
         vtx_cpu = {};
     }

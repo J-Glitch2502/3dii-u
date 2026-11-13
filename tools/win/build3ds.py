@@ -432,11 +432,16 @@ def build_game_code(g, args):
     obj_dir = f'{WORK}/ppc_{g.name}'
     os.makedirs(obj_dir, exist_ok=True)
     flags = game_flags(g, args.opt)
+    # Debugging: THREEDII_OS_ONLY=lo-hi builds the files lo to hi-1 (in name order) at -Os and the rest at -O2, to find which a game's -Os trouble is in
+    split = os.environ.get('THREEDII_OS_ONLY')
+    if split:
+        lo, hi = map(int, split.split('-'))
+        flag_os, flag_o2 = game_flags(g, ' '.join(GAME_OPT)), game_flags(g, ' '.join(GAME_OPT_O2))
     items = []
-    for c in sorted(glob.glob(g.gen_dir + '/*.c')):
+    for i, c in enumerate(sorted(glob.glob(g.gen_dir + '/*.c'))):
         c = c.replace('\\', '/')
         n = os.path.basename(c)[:-2]
-        items.append((n, c, f'{obj_dir}/{n}.o', flags))
+        items.append((n, c, f'{obj_dir}/{n}.o', (flag_os if lo <= i < hi else flag_o2) if split else flags))
     # a new generation can come in fewer files: the old ones' objects would be linked too, defining their functions twice
     wanted = {n for n, *_ in items}
     for o in glob.glob(obj_dir + '/*.o*'):
