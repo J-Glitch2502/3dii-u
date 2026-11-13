@@ -26,13 +26,20 @@ u16 mii_crc16(const u8 *p, size_t n) {
     return c;
 }
 
-// A host Mii as a 3DS game reads it. The Wii U and the 3DS store Miis the same way (version 3: big-endian fields, UTF-16LE names,
-// a CRC-16 over 0x00-0x5D at 0x5E), which is why QR codes go between them, so the bytes go across. If the first four come the other
-// way round (version last), they're turned. Copying is allowed: Tomodachi Life's look-alikes need it.
+// A host Mii as a 3DS game reads it. Two layouts are taken, told apart by where the version (3) stands. The 3DS's own, which a Mii also
+// has wherever the two consoles exchange one (a QR code, an account's Mii on its server): the version first, the ids as they read, every
+// other field little-endian, UTF-16LE names, a CRC-16 over 0x00-0x5D at 0x5E. Its bytes go across. And the one the Wii U's own processor
+// reads (wut's nn/ffl/miidata.h), which is what its software keeps in memory: the version last of the first four bytes, and every 16-bit
+// field from 0x18 on the other way round, but for height and build, a byte each. That one is turned back first. Copying is allowed:
+// Tomodachi Life's look-alikes need it.
 bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
     if (mii_crc16(h.data(), 0x5E) != (u16)(h[0x5E] << 8 | h[0x5F])) return false;  // the host's own copy must check out
     m = h;
-    if (m[0] != 3 && m[3] == 3) std::reverse(m.begin(), m.begin() + 4);
+    if (m[0] != 3 && m[3] == 3) {
+        std::reverse(m.begin(), m.begin() + 4);
+        for (size_t at = 0x18; at < 0x5C; at += 2)
+            if (at != 0x2E) std::swap(m[at], m[at + 1]);  // height and build are a byte each
+    }
     if (m[0] != 3 || !(m[0x0C] | m[0x0D] | m[0x0E] | m[0x0F])) return false;  // not version 3, or no Mii id (an empty slot)
     m[0x01] |= 1;
     // Born on a console that came after the 3DS (4: a Wii U, as its accounts' Miis are), it is said to be a 3DS's: Super Mario 3D Land's Mii
