@@ -582,6 +582,39 @@ static void copy_to_card(const std::string &from, const std::string &to) {
     fclose(in);
 }
 
+// Whether what a database slot held, as a 3DS game would read it, is a Mii: a name of printable characters, an author's name of them, the
+// padding empty, a birthday and a favourite colour that exist, a height and a build within their 127
+static bool looks_like_mii(const std::array<u8, 0x60> &m) {
+    const u32 about = m[0x18] | m[0x19] << 8;
+    if (m[0x16] || m[0x17] || (about >> 1 & 15) > 12 || (about >> 10 & 15) > 11 || m[0x2E] > 127 || m[0x2F] > 127) return false;
+    for (u32 name : {0x1Au, 0x48u})
+        for (u32 at = name; at < name + 20; at += 2) {
+            const u32 c = m[at] | m[at + 1] << 8;
+            if (!c) break;
+            if (c < 0x20 || (c >= 0xD800 && c < 0xE000) || c >= 0xFFFE) return false;
+        }
+    return m[0x1A] || m[0x1B];
+}
+
+// Mii Maker's Miis out of its database (FFL_ODB.dat: "FFOC", a version, then 3000 slots of 0x5C bytes, an unused one with no Mii id), each
+// with the checksum a Mii carries everywhere else. services/misc.cpp turns them into what a 3DS game reads, whichever way round the
+// console keeps their fields, and fs.cpp puts as many as fit into the game's own Mii Maker. That layout is what the 3DS's own database
+// suggests and no console's file has been read yet: so a slot is only taken if what it holds looks like a Mii, as the checksum, made
+// here, vouches for nothing.
+static void read_mii_maker(FILE *f) {
+    u8 head[8];
+    if (fread(head, 1, sizeof head, f) != sizeof head || memcmp(head, "FFOC", 4)) return;
+    std::array<u8, 0x60> m{}, as_3ds;
+    for (u32 slot = 0; slot < 3000 && fread(m.data(), 1, 0x5C, f) == 0x5C; slot++) {
+        if (!(m[0x0C] | m[0x0D] | m[0x0E] | m[0x0F])) continue;
+        m[0x5C] = m[0x5D] = 0;
+        const u16 crc = kernel::mii_crc16(m.data(), 0x5E);
+        m[0x5E] = (u8)(crc >> 8);
+        m[0x5F] = (u8)crc;
+        if (kernel::mii_3ds(m, as_3ds) && looks_like_mii(as_3ds)) kernel::g_host_miis.push_back(m);
+    }
+}
+
 static void leave_on_card() {
     char dir[64];
     snprintf(dir, sizeof dir, "fs:/vol/external01/3dii-u/%016llx", (unsigned long long)OSGetTitleID());
@@ -824,6 +857,18 @@ int main(int argc, char **argv) {
         }
         fclose(f);
     }
+    // The rest of the console's Miis, after the accounts': Mii Maker's own database, in its save, whichever region's Mii Maker the console
+    // has (Japan's, America's, Europe's). The same test aid first: a "test_mii_maker.bin" in the data folder is read as that database.
+    if (FILE *f = fopen((wiiu::data_dir() + "/test_mii_maker.bin").c_str(), "rb")) {
+        read_mii_maker(f);
+        fclose(f);
+    }
+    if (!wiiu::debug_flag("nowiimiis"))
+        for (const char *maker : {"1004a000", "1004a100", "1004a200"})
+            if (FILE *f = fopen((std::string("fs:/vol/storage_mlc01/usr/save/00050010/") + maker + "/user/common/db/FFL_ODB.dat").c_str(), "rb")) {
+                read_mii_maker(f);
+                fclose(f);
+            }
     kernel::init_services();
     stage("services up");
     frontend_init();

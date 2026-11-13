@@ -147,6 +147,20 @@ The rest of the backend, in the order of the file's sections:
 
 Guest threads share core 1, which has the 2 MB L2 cache. GPU work runs on core 2, and input and audio on core 0.
 
+### The console's Miis
+
+A game that takes Miis gets the Wii U's own. That is a rule for every game: the hand-over is shared code, and nothing about it is set per game.
+
+- At start, `frontend_wiiu.cpp` reads each account's Mii (`nn::act`) and then Mii Maker's own database (`FFL_ODB.dat`, in its save).
+  - The database is not proven on a console yet: whether a console lets a game open Mii Maker's save, and the file's layout, which is taken from the 3DS's. If it can't be opened, the game gets the accounts' Miis alone. A slot is only taken if what it holds looks like a Mii.
+- `mii_3ds()` in `services/misc.cpp` turns each one into what a 3DS game reads:
+  - A Mii comes either the way a 3DS keeps one or the way the Wii U's processor reads it, with its fields the other way round. The second kind is turned round, all of it.
+  - A Mii made on a console newer than the 3DS is said to be a 3DS's. Super Mario 3D Land, of 2011, takes no other: it said "You don't have any Mii characters", and a save file lost its face at the next start.
+- They go into the game's own Mii Maker database, 100 at most (`sync_mii_db()` in `services/fs.cpp`), where a game that lists Miis finds them.
+  - A Mii stays at the place it had at an earlier start, a new one takes the first free place, and each names the place it lies at. A 3DS keeps a Mii at the place it names, and games find it again by that: 3D Land showed no face on a save file whose Mii named a place where another Mii lay.
+- The current account's Mii is the player's. The friends service and the Mii selector applet hand it out, naming the same place as its copy in the database, where it is placed first and always has a place. The selector answers at once and shows no choice.
+- `tools/check_ports.py` gives every run an account Mii and a small Mii Maker database, made up, with Miis in both layouts and a slot that holds none. A run fails if the game's Mii Maker ends up with more or fewer Miis than those. Cemu's own account Mii is a placeholder, so without them a run tested a console with no Mii at all.
+
 ## The PC build: `port/pc/`
 
 `frontend_pc.cpp` runs the same runtime headless on Windows, with the software rasterizer. It mirrors the console's

@@ -20,6 +20,7 @@ of other regions and versions than this PC's, crashed on code only this PC's lis
 Cemu is a private copy in build_win/cemu (a renamed exe, so other sessions' scripts leave it alone), run by tools/win/cemu_run.ps1.
 """
 import argparse
+import binascii
 import glob
 import hashlib
 import json
@@ -43,8 +44,35 @@ COLD = False     # --cold: built as a game nobody has built before, under <name>
 SOURCES = ROOT + '/games/sources.json'
 # A console's account always has a Mii, and Cemu's is a placeholder the runtime turns down, so a run had the games find none: a state no
 # console is in. Every run gets this one instead: made up ("Wii U Mii", no person's), and marked as born on a Wii U, as a console's are.
+# Written here the way a 3DS keeps a Mii; a run is handed it the way the Wii U's own processor reads one (wiiu_order), which is how its
+# software keeps a Mii in memory, so the face a game shows for it has come through the turning round.
 ACCOUNT_MII = bytes.fromhex('030010403d500000000ab0cd98000002020000000002000026005700690069002000550020004d006900690000004040'
                             '000021010268441826344614811217680d000029005248505700690069002000550000000000000000000000000021a4')
+# How many a game's own Mii Maker must end up with: that one and the two of mii_maker_db. This counts on Cemu's own account Mii being
+# turned down, and on the private Cemu's storage holding no Mii Maker database of its own.
+MIIS = 3
+
+
+def wiiu_order(mii):
+    """a Mii's store data the way the Wii U's own processor reads it: the first four bytes and every 16-bit field from 0x18 on turned round
+    (height and build are a byte each), with the checksum of that"""
+    m = bytearray(mii[:0x5C]) + bytes(2)
+    m[0:4] = m[3::-1]
+    for at in range(0x18, 0x5C, 2):
+        if at != 0x2E:
+            m[at], m[at + 1] = m[at + 1], m[at]
+    return bytes(m) + binascii.crc_hqx(bytes(m), 0).to_bytes(2, 'big')
+
+
+def mii_maker_db():
+    """Mii Maker's database as frontend_wiiu.cpp reads it: two more made-up Miis, one in each order, as either may be what a console's file
+    holds, with a slot nobody uses between them, and a slot that holds no Mii (a name of control characters), which has to stay out"""
+    def another(n, name):
+        m = bytearray(ACCOUNT_MII[:0x5C])
+        m[0x0F] = n  # its own Mii id
+        m[0x1A:0x2E] = name.encode('utf-16-le').ljust(20, b'\0')
+        return bytes(m)
+    return b'FFOC' + bytes(4) + another(3, 'Maker One') + bytes(0x5C) + wiiu_order(another(4, 'Maker Two'))[:0x5C] + another(5, '\x01\x02\x03')
 # A scene is a port run once more with switches of the runtime set (env.txt in its data folder, frontend_wiiu.cpp): a level a route can't reach
 # by playing, loaded in place of the one it enters. NSMB2's files: <world>-14 is a world's tower, -16 its castle, -12 its ghost house.
 SCENES = {'nsmb2_tower': ('nsmb2', {'RECOMP_ROMFS_SWAP': 'Course/1-1.sarc=Course/1-14.sarc'}),
@@ -250,7 +278,9 @@ def judge(t, seconds, flags, measured=False):
         with open(f'{d}/{flag.split("=")[0]}', 'w') as f:
             f.write(flag.partition('=')[2])
     with open(d + '/test_mii.bin', 'wb') as f:  # the current account's Mii, as frontend_wiiu.cpp takes it
-        f.write(ACCOUNT_MII)
+        f.write(wiiu_order(ACCOUNT_MII))
+    with open(d + '/test_mii_maker.bin', 'wb') as f:  # and the console's other Miis
+        f.write(mii_maker_db())
     if t.env:
         with open(d + '/env.txt', 'w', newline='\n') as f:
             f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
@@ -325,6 +355,9 @@ def judge(t, seconds, flags, measured=False):
         formats = len(re.findall(r'save: formatting', text))
         if name == 'restart' and formats and saved_before:  # a game that saved nothing on its route formats again, rightly
             faults.append(f'restart: formatted the save again, {formats} times')
+        miis = re.findall(r"Mii Maker's database: (\d+) Mii", text)  # said when a game that reads Mii Maker gets the console's Miis
+        if miis and int(miis[-1]) != MIIS:
+            faults.append(f"{name}: {miis[-1]} of the console's {MIIS} Miis reached the game's Mii Maker")
         made = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ compiled in (\d+) ms', text)
         bad = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ failed', text)
         if 'compiler' not in text or '[glsl] off' in text:

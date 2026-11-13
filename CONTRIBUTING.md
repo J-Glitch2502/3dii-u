@@ -131,7 +131,9 @@ These need your own dumps and Cemu, and check a game end to end:
 For each game, the first builds the code, shaders and title, checks the RPX against what the console's loader wants,
 then plays a scripted route in a private Cemu copy on a blank save and restarts on what that saved. A game fails on a
 crash, missed code, a vertex shader that wasn't compiled, a save problem, a gap in the sound, or pictures unlike its
-good run's. Cemu runs off-screen, so it doesn't take over your desktop. `--cold` builds a game of
+good run's. Every run has the Miis a console would have, made-up ones (an account's, and two in Mii Maker), and a game
+that reads Mii Maker fails if they don't all arrive there: a game that takes Miis must take the Wii U's, so look at
+what it shows for them. Cemu runs off-screen, so it doesn't take over your desktop. `--cold` builds a game of
 `games/sources.json` as someone's first build of it, with none of this PC's lists of its code and shaders, and holds
 it to the same pictures.
 
