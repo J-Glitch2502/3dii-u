@@ -396,6 +396,11 @@ def main():
             t = (built_from_dump(name) or 'not built yet') if built else build_from_dump(name, src['games'][game], src['otp'])
             if COLD and not isinstance(t, str):
                 t.like = game
+                # A game the builder knows by name is built cold under its product code, which would give it a folder of its own in games/:
+                # its logs and pictures go into the usual build's folder, where the good pictures it's held to are.
+                usual = built_from_dump(game)
+                if usual:
+                    t.data = usual.data
         else:
             t = f'no such game: not one of the ports and not in {SOURCES}'
         if not isinstance(t, str) and game in src['games']:

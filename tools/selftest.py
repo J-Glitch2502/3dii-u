@@ -56,6 +56,7 @@ def main():
         'system archives': [[py, ROOT + '/builder/test_system_archives.py']],
         'builder app': [[py, ROOT + '/builder/test_app.py']],
         'learned shaders': [[py, ROOT + '/builder/test_learned.py']],
+        'DLC reader': [[py, ROOT + '/builder/selftest.py']],
     }
     failed = []
     for name, commands in checks.items():

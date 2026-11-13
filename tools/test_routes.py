@@ -29,13 +29,19 @@ GENERIC = ['WAIT 600'] + ['A 6', 'WAIT 90', 'T@160/120 4', 'WAIT 90', 'START 6',
 KID_ICARUS_PLAY = ['CUP+L+T@160/110 150', 'CLEFT+L+T@130/120 90', 'CUP+L 150', 'DRAG 110/120 200/120 12', 'CRIGHT+L+T@190/120 90', 'CUP+L 150',
                    'DRAG 210/120 120/120 12', 'A 6']
 
+# New Super Mario Bros. 2: to the world map on A (it's there within a minute), right to World 1-1's place on it, and in
+NSMB2_INTO_1_1 = A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 360']
+
 ROUTES = {
     'kid_icarus': GENERIC[:1 + 6 * 7] + A(2, 120) + KID_ICARUS_PLAY * 80,
-    # to the world map on A (it's there within a minute), then right to World 1-1's place on it, in, and running right with a jump now and
-    # then: with A alone Mario stood on the map's first place until the run ended, and no run ever drew a level (2026-11-11)
-    'nsmb2': A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 360'] + run_right(150),
-    # into the level as nsmb2 goes, and Mario stays where it starts: one place, drawn and run frame after frame, for timing a level against another
-    'nsmb2_stand': A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 30000'],
+    # Mario stays where the level starts: he jumps on the spot, the game is paused for 40 s, he jumps again. The check's pictures, one
+    # every 33 s, then show the same screens every run. Running right he died somewhere else each time, and runs with nothing wrong were
+    # flagged for their pictures (Continue in one, Game Over in another).
+    'nsmb2': NSMB2_INTO_1_1 + ['WAIT 300'] + A(12, 100) + ['WAIT 400', 'START 6', 'WAIT 2400', 'START 6', 'WAIT 120'] + A(6, 100) + ['WAIT 30000'],
+    # running right with a jump now and then, to wherever that gets him: for what a level draws further in
+    'nsmb2_run': NSMB2_INTO_1_1 + run_right(150),
+    # standing where the level starts for the whole run: one place, drawn frame after frame, for timing a level against another
+    'nsmb2_stand': NSMB2_INTO_1_1 + ['WAIT 30000'],
     'dream_team': A(8) + ['DDOWN 6', 'WAIT 40', 'A 6', 'WAIT 80'] * 6 + A(440, 30) + sweep(WALK) + A(500, 30),
     'sticker_star': A(6) + START(4) + A(300, 40) + sweep(WALK) + A(300, 40),
     'paper_jam': A(8) + A(500, 40) + sweep(WALK) + A(300, 40),
