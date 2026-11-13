@@ -18,7 +18,8 @@ def vertex_arrays():
     exe = build3ds.WORK + '/selftest/test_vertex_arrays.exe'
     os.makedirs(os.path.dirname(exe), exist_ok=True)
     return [build3ds.HOST_CXX + ['-std=c++20', '-w', '-D__WIIU__', f'-I{build3ds.PORT}/wiiu', f'-I{build3ds.PORT}/pc/win', f'-I{build3ds.PORT}/pc', f'-I{build3ds.RT}',
-                                 f'-I{build3ds.RT}/gpu', '-include', f'{build3ds.PORT}/pc/shim.h', '-static', ROOT + '/tools/test_vertex_arrays.cpp', '-o', exe], [exe]]
+                                 f'-I{build3ds.RT}/gpu', '-include', f'{build3ds.PORT}/pc/shim.h', '-static', ROOT + '/tools/test_vertex_arrays.cpp', '-lpthread',
+                                 '-o', exe], [exe]]
 
 
 def present_rule():

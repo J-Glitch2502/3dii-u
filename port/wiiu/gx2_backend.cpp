@@ -2114,20 +2114,22 @@ bool gx2_draw(const Gx2Draw &d) {
             if (bound < 0) {
                 const u8 *src = pptr(d.base + x.lo);
                 if (!src) return true;
-                // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later
-                const u32 bytes = vertex_array_bytes(x, maxv - minv + 1);
+                // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later.
+                // In steps of a multiple of 4 bytes, which is all a real GPU takes (vertex_arrays.h).
+                const u32 count = maxv - minv + 1, bytes = gpu_array_bytes(x, count), step = gpu_stride(x.stride);
                 u8 *copy = (u8 *)ring_alloc(bytes + 64, 64);
-                memcpy(copy, src + x.stride * minv, bytes);
+                copy_vertex_array(copy, src + x.stride * minv, x, count);
                 DCFlushRange(copy, bytes);
                 bound = (s32)buf++;
                 // addressed as if it held vertex 0 too, as the indices count from there
-                GX2SetAttribBuffer((u32)bound, (maxv + 1) * x.stride + 64, x.stride, copy - minv * x.stride);
+                GX2SetAttribBuffer((u32)bound, (maxv + 1) * step + 64, step, copy - minv * step);
             }
             GX2AttribStream s{};
             s.location = vs.location[r];
             s.buffer = (u32)bound;
-            const u32 lane = at->fmt < 2 ? at->offset & 3 : 0;  // bytes: the word they're in is fetched, and they start at this byte of it
-            s.offset = at->offset - lane - x.lo;
+            // the word an attribute's first component lies in is fetched from its start, and the attribute begins at this component of it
+            const u32 lane = fetch_lane(*at);
+            s.offset = fetch_offset(*at) - x.lo;
             // Cemu can't fetch one little-endian float: its sprites all got corner 0. Two do the same here, and the mask drops the second.
             s.format = at->fmt == 3 && at->elems == 1 ? GX2_ATTRIB_FORMAT_FLOAT_32_32 : attr_format(at->fmt, at->fmt < 2 ? 4 : at->elems);
             s.type = GX2_ATTRIB_INDEX_PER_VERTEX;
@@ -2194,7 +2196,8 @@ bool gx2_draw(const Gx2Draw &d) {
             u32 *copy = (u32 *)ring_alloc(count * stride + 64, 64), *dst = copy;
             const u8 *src = p + src_stride * minv;
             for (u32 v = 0; v < count; v++, src += src_stride) {
-                for (u32 c = 0; c < elems; c++) *dst++ = ((const u32 *)src)[c];
+                memcpy(dst, src, elems * 4);  // from wherever the game keeps them, a multiple of 4 or not
+                dst += elems;
                 if (elems == 1) *dst++ = 0;
             }
             DCFlushRange(copy, count * stride);
