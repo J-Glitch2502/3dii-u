@@ -353,7 +353,17 @@ SYSTEM_ARCHIVES = ('0004009b00010202', '0004009b00010402', '0004009b00014002', '
 
 
 ESSENTIAL_ARCHIVES = ('0004009b00010202', '0004009b00014002')  # the Mii data, without which Mii games stop (Miitopia, Nov 9), and the shared font
+ARCHIVE_NAMES = {'0004009b00010202': 'the Mii data', '0004009b00010402': 'the list of regions', '000400db00010302': 'the bad-word list'}  # the others are fonts
 NAND_ID = '00000000000000000000000000000000'
+
+
+def archives_named(code):
+    """The system archives a game's code names. A game mounts one by its title ID, which lies in the code as two words side by side, in
+    either order; the shared font isn't found this way, as games ask the system for it. Tomodachi Life mounts the bad-word list as it
+    starts and stops when it isn't there: three testers' builds did (2026-11-10 to 12), made from GodMode9's copy of title/0004009b alone,
+    which never holds it (it's title/000400db)."""
+    return [t for t in SYSTEM_ARCHIVES
+            if any(struct.pack('<II', *pair) in code for pair in ((int(t[8:], 16), int(t[:8], 16)), (int(t[:8], 16), int(t[8:], 16))))]
 
 
 def have_system_archives(folder):
@@ -362,14 +372,15 @@ def have_system_archives(folder):
 
 def nand_titles(folder):
     """The title folder of a 3DS NAND in what the user points at: an emulator's user folder (Azahar's and Citra's user/nand/<32 zeros>/title,
-    or a copy of one by any name), the nand folder in it, the title folder of a NAND dumped from a 3DS, or the 0004009b folder GodMode9 copies
-    off a 3DS (title in CTRNAND) or the folder holding it. None if there's none."""
-    if os.path.basename(os.path.normpath(folder)).lower() == '0004009b':
+    or a copy of one by any name), the nand folder in it, the title folder of a NAND dumped from a 3DS, or the 0004009b and 000400db folders
+    GodMode9 copies off a 3DS (title in CTRNAND): either of them, or the folder holding them. None if there's none."""
+    kinds = {t[:8] for t in SYSTEM_ARCHIVES}
+    if os.path.basename(os.path.normpath(folder)).lower() in kinds:
         folder = os.path.dirname(os.path.normpath(folder))
     for sub in (('nand', NAND_ID, 'title'), (NAND_ID, 'title'), ('title',), ('user', 'nand', NAND_ID, 'title'),
                 ('user_directory', 'nand', NAND_ID, 'title'), ()):
         p = os.path.join(folder, *sub)
-        if os.path.isdir(os.path.join(p, '0004009b')):
+        if any(os.path.isdir(os.path.join(p, k)) for k in kinds):
             return p
     return None
 

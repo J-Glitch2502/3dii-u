@@ -667,9 +667,9 @@ void lighting() {
 
 // Everything but the program's body, which shader_glsl_spec() writes. Output registers are mapped to what the rasterizer needs
 // here, so a program used with two output maps is two vertex shaders. Y is negated: rows in a surface are PICA window rows, y up.
-std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs) {
+std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs, u32 open) {
     u32 used = 0;
-    const std::string body = shader_glsl_spec(p, entry, b, iu, &used);
+    const std::string body = shader_glsl_spec(p, entry, b, iu, &used, open);
     if (body.empty()) return "";
     *inputs = used;
     const bool outline = slot_src[0] == kOutlineSlot;

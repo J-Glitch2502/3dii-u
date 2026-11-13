@@ -12,9 +12,11 @@ import sys
 import tempfile
 import threading
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QFontDatabase, QIcon, QImage, QPixmap
+import shiboken6
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 import covers
@@ -23,6 +25,7 @@ import decrypt
 import dumps
 import mods
 import pipeline
+import updater
 import user_files
 
 APP, VERSION = credits.APP, credits.VERSION
@@ -34,8 +37,8 @@ DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
 NO_ART = "The game's own icon"
-LIBRARY_MAX = 40  # games the bottom screen remembers
-# What each of "Your files" is and how to get it from your own consoles: the "How do I get this?" buttons, and the message when one is missing.
+LIBRARY_MAX = 40  # games the Games page remembers
+# What each of "Your Files" is and how to get it from your own consoles: the Info buttons, and the message when one is missing.
 # Testers asked what the system files were and how to get seeddb.bin (Nov 9 and 10).
 HELP = {
     'keys': ('3DS keys',
@@ -44,22 +47,24 @@ HELP = {
              '•  boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y. Open [0:] SDCARD, press Y again and choose Copy.\n'
              '•  seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card. It holds the seeds of '
              'the games installed on that 3DS, which newer eShop games need.\n\n'
-             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder..." and choose where they are.'),
+             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder" and choose where they are.'),
     'otp': ('Wii U otp.bin',
             'A small file (exactly 1024 bytes) from your own Wii U. The game is packed with a key from it so your console installs it. The '
             'builder never shows or stores that key.\n\n'
             'It comes from a Wii U with Aroma: run Wii U NAND Dumper, choose Dump OTP, and otp.bin is written to the SD card. If you already '
             'made a NAND backup when setting up Aroma, otp.bin is in that backup.\n\n'
-            'On the PC, press "File..." and choose it. Keep it private: it is unique to your console.'),
+            'On the PC, press "File" and choose it. Keep it private: it is unique to your console.'),
     'system': ('3DS system files',
-               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, and the parts (faces, '
-               'eyes, hair) Miis are drawn from. Games load them from the console, so a game dump doesn\'t have them. The builder puts them in '
-               'each game it makes and won\'t build without them: Mii games stop without the Mii parts.\n\n'
+               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, the parts (faces, '
+               'eyes, hair) Miis are drawn from, and the list of bad words games check typed names against. Games load them from the console, '
+               'so a game dump doesn\'t have them. The builder puts them in each game it makes and won\'t build a game without the ones it '
+               'reads: Mii games stop without the Mii parts, and Tomodachi Life without the word list.\n\n'
                'They come from your own 3DS, either way:\n'
                '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
-               '•  GodMode9 on your 3DS: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, '
-               'press Y again and choose Copy (not Move). Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD '
-               'card.\n\n'
+               '•  GodMode9 on your 3DS: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and '
+               '000400db (the word list). Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then '
+               'copy 000400db the same way, next to it. Back on the PC, press "Folder" here and choose that 0004009b folder on the SD '
+               'card. Copied this way they are encrypted, so the builder needs your 3DS keys to read them.\n\n'
                'The builder copies them once and keeps them for every game after.'),
 }
 
@@ -82,14 +87,16 @@ def save_settings(s):
     json.dump(s, open(settings_file(), 'w', encoding='utf-8'), indent=1)
 
 
-def emulator_folders():
+def emulator_folders(everywhere=True):
     """Folders with a 3DS NAND, where the system archives (shared font, Mii data) can come from: Azahar's, Citra's and Lime3DS's user folders,
-    then any folder a few levels down in Downloads, Desktop and Documents, whatever its name: a portable emulator's user folder, or a copy of
-    one. A Miitopia built without them stopped on the console, the files being in such a copy in Downloads (Nov 9)."""
+    then (everywhere) any folder a few levels down in Downloads, Desktop and Documents, whatever its name: a portable emulator's user folder,
+    or a copy of one. A Miitopia built without them stopped on the console, the files being in such a copy in Downloads (Nov 9)."""
     home = os.path.expanduser('~')
     base = os.environ.get('APPDATA', '') if WIN else os.path.join(home, '.local', 'share')
     names = ('Azahar', 'Citra', 'Lime3DS') if WIN else ('azahar-emu', 'citra-emu', 'lime3ds-emu')
     found = [p for p in (os.path.join(base, n) for n in names) if dumps.nand_titles(p)]
+    if not everywhere:
+        return found
     places = (QStandardPaths.StandardLocation.DownloadLocation, QStandardPaths.StandardLocation.DesktopLocation,
               QStandardPaths.StandardLocation.DocumentsLocation)
     tops = [QStandardPaths.writableLocation(p) for p in places]  # where Windows really keeps them (OneDrive, moved), then where they usually are
@@ -185,18 +192,33 @@ def theme():
     families = set(QFontDatabase.families())
     body = next((f for f in ('Segoe UI Variable Text', 'Segoe UI', 'Cantarell', 'Noto Sans') if f in families), '')
     display = next((f for f in ('Segoe UI Variable Display', 'Segoe UI', 'Cantarell') if f in families), body)
-    # the 3DS HOME Menu's palette: pale greys under white tiles, its blue for what you press, an aqua-blue console
-    return {'bg': '#dfe3e9', 'rail': '#f6f7f9', 'surface': '#ffffff', 'surface2': '#eef1f5', 'hover': '#e4f3fc', 'stripe': '#80ffffff',
-            'edge': '#c9ced6', 'shadow': '#5a6472', 'text': '#33363d', 'dim': '#626873', 'faint': '#9aa0ab', 'red': '#e60012', 'violet': '#7a5cf0',
-            'blue': '#1e9be0', 'sky': '#5cc4f5', 'blueDeep': '#127ab8', 'green': '#35b54a', 'amber': '#f39800', 'ink': '#ffffff', 'paper': '#ffffff',
-            'well': '#d3d9e1', 'font': body, 'display': display,
-            'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas'}
+    # the Wii U Menu's glass: grey cards with a curved gloss, grey text, cyan for chosen and red for missing; dark is the same glass inverted
+    light = {'pageTop': '#ffffff', 'pageBottom': '#eef1f0', 'card': '#cbd2d0', 'gloss': '#dde1e0', 'shadow': '#40000000',
+             'title': '#7e8b88', 'sub': '#a8b3b0', 'label': '#6c7976', 'subLabel': '#a3aeab',
+             'cyanBase': '#9fdde8', 'cyanText': '#35b5cb', 'redBase': '#eba3aa', 'redText': '#c93a4c', 'greyBase': '#bfc7c5', 'greyText': '#6c7976',
+             'lightRed': '#c9283c', 'lightCyan': '#2fb4cc', 'lightGrey': '#aab4b1', 'socket': '#98a3a0',
+             'tileGloss': '#ffffff', 'tileBase': '#cdd3d1', 'plus': '#8b9996', 'buildText': '#3c4846',
+             'rail': '#e6e9e8', 'railTop': '#dde1e0', 'railActive': '#f3f5f4', 'railLine': '#fbfcfc', 'railEdge': '#cfd5d3', 'railText': '#7b8885',
+             'help': '#5c6a67', 'helpActive': '#6e7d7a', 'helpText': '#ffffff', 'helpRing': '#3c4846', 'helpFace': '#ffffff',
+             'keycap': '#ffffff', 'keycapBase': '#c3cac8', 'keycapSide': '#a3aeab', 'keycapGlyph': '#a9b4b1', 'tileRim': '#e4e8e7', 'tileEdge': '#b9c3c0',
+             'red': '#d6394b', 'cyan': '#3dbdd6', 'builder': '#7b8885', 'ds': '#e5959f', 'screen': '#ffffff', 'dotFrom': '#e8a4ad', 'dotMid': '#c9c3d8',
+             'dotTo': '#a9dde7', 'pad': '#8fdbe7', 'dim': '#73000000', 'logBg': '#e9eceb', 'logText': '#4a5654'}
+    dark = dict(light, pageTop='#20272a', pageBottom='#1a2023', card='#313b3e', gloss='#3b4649', shadow='#80000000',
+                title='#d7dedc', sub='#8f9c99', label='#c5cecb', subLabel='#8b9895',
+                cyanBase='#1f6f80', cyanText='#9fe6f2', redBase='#7a2a34', redText='#ffb3bb', greyBase='#4a5558', greyText='#d0d7d5',
+                lightGrey='#5f6c6f', socket='#1d2427', tileGloss='#5f6c6f', tileBase='#2e383b', plus='#5a6769', buildText='#d7dedc',
+                rail='#2a3336', railTop='#252d30', railActive='#344043', railLine='#1d2427', railEdge='#1d2427', railText='#c5cecb',
+                help='#11181a', helpActive='#1f2a2d', helpRing='#000000', helpFace='#d7dedc',
+                keycap='#5a6669', keycapBase='#3a4548', keycapSide='#263033', keycapGlyph='#8f9c99', tileRim='#45524f', tileEdge='#252e31', builder='#c9d1cf', screen='#2a3336',
+                dim='#a6000000', logBg='#1d2427', logText='#c5cecb')
+    return {'font': body, 'display': display, 'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas', 'light': light, 'dark': dark}
 
 
 # ---- what the window shows, and what its buttons do
 class App(QObject):
     changed = Signal()
     coverReady = Signal(str, str)  # title id, path: from fetch_cover's thread
+    updateEvent = Signal(str, object)  # what, value: from the updater's worker threads, the value passed as it is
     logChanged = Signal()
 
     def _p(kind, name, notify=changed):
@@ -211,11 +233,14 @@ class App(QObject):
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
     target, destText, cards = _p(str, 'target'), _p(str, 'destText'), _p('QVariantList', 'cards')
-    canBuild, building, view = _p(bool, 'canBuild'), _p(bool, 'building'), _p(str, 'view')
+    building, view = _p(bool, 'building'), _p(str, 'view')
     stages, stage, failed, progress, detail = _p('QVariantList', 'stages'), _p(int, 'stage'), _p(bool, 'failed'), _p(float, 'progress'), _p(str, 'detail')
     log = _p(str, 'log', logChanged)
     resultText, where, dialog = _p(str, 'resultText'), _p(str, 'where'), _p('QVariant', 'dialog')
     games, others, version, rootOk = _p('QVariantList', 'games'), _p('QVariantList', 'others'), _p(str, 'version'), _p(bool, 'rootOk')
+    faq, themeMode, dark = _p('QVariantList', 'faq'), _p(str, 'themeMode'), _p(bool, 'dark')
+    updateState, updateTitle, updateNotes, updateProgress = _p(str, 'updateState'), _p(str, 'updateTitle'), _p(str, 'updateNotes'), _p(int, 'updateProgress')
+    updateMessage, releaseTag, updateSetAside = _p(str, 'updateMessage'), _p(str, 'releaseTag'), _p(bool, 'updateSetAside')
     del _p
 
     def __init__(self):
@@ -228,14 +253,34 @@ class App(QObject):
         self.proc, self.result, self.cancelled = None, None, False
         self.lines, self.log_lines, self.dialogs, self.flow = queue.Queue(), [], [], None
         compat = json.load(open(os.path.join(HERE, 'compat.json'), encoding='utf-8'))
+        try:  # the Help page's questions and answers: without them the app still runs
+            with open(os.path.join(HERE, 'faq.json'), encoding='utf-8') as f:
+                faq = json.load(f)
+        except (OSError, ValueError):
+            faq = []
+        faq = [e for e in faq if isinstance(e, dict) and isinstance(e.get('q'), str) and isinstance(e.get('a'), str) and e['q'] and e['a']]             if isinstance(faq, list) else []
+        theme_mode = self.st.get('theme')
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
                        updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
-                       otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], canBuild=False, building=False, view='form', stages=[],
+                       otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
                        games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')],
-                       others=compat.get('_cemu', []))  # shown only: they build as untested games, by their own code
+                       others=compat.get('_cemu', []),  # shown only: they build as untested games, by their own code
+                       faq=faq, themeMode=theme_mode if theme_mode in ('system', 'light', 'dark') else 'system', dark=False,
+                       updateState='', updateTitle='', updateNotes='', updateProgress=0, updateMessage='', releaseTag=updater.own_tag(),
+                       updateSetAside=False)
+        self.release, self.update_job, self.check_job, self.update_stop, self.shown, self.ask_again = None, None, None, threading.Event(), False, False
+        self.set(updateSetAside=self.set_aside(updater.failed_tags()))
+        ready = updater.activated()  # a version downloaded before (Later, or a start with Shift held) is ready without a check
+        if updater.tag_key(self._s['releaseTag']) and updater.tag_key(ready) and updater.tag_key(ready) > updater.tag_key(self._s['releaseTag']):
+            self.set(updateState='ready', updateTitle=ready)
+        self.updateEvent.connect(self.update_event)
+        self.auto_check = QTimer(self, singleShot=True, interval=4000)  # a few seconds after the window shows: the start isn't slowed
+        self.auto_check.timeout.connect(lambda: self.check_update(False))
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)  # "system" follows Windows switching while the window is open
+        self.apply_theme()
         self.coverReady.connect(self.cover_ready)
         self.refresh_library()
         self.timer = QTimer(self)
@@ -282,6 +327,25 @@ class App(QObject):
     def about(self):
         self.tell(f'About {APP}', credits.about())
 
+    @Slot(str)
+    def setThemeMode(self, mode):
+        if mode not in ('system', 'light', 'dark'):
+            return
+        self.st['theme'] = mode
+        save_settings(self.st)
+        self.set(themeMode=mode)
+        self.apply_theme()
+
+    def apply_theme(self, *_):
+        """asks Qt for the chosen scheme, so the native title bar follows it too; Unknown hands "system" back to Windows"""
+        hints, mode = QGuiApplication.styleHints(), self._s['themeMode']
+        asked = {'dark': Qt.ColorScheme.Dark, 'light': Qt.ColorScheme.Light}.get(mode, Qt.ColorScheme.Unknown)
+        if getattr(self, 'asked', None) != asked:  # setColorScheme signals colorSchemeChanged, which calls this again
+            self.asked = asked
+            hints.setColorScheme(asked)
+        # the mode, not colorScheme() alone: a platform without schemes (offscreen) ignores the request
+        self.set(dark=mode == 'dark' or mode == 'system' and hints.colorScheme() == Qt.ColorScheme.Dark)
+
     # ---- choosing
     def open_dump(self, path):
         try:
@@ -322,8 +386,8 @@ class App(QObject):
             return
         self.game, self.update, self.dlc, self.mod = d, None, None, None
         info = pipeline.profile_for(d) or pipeline.derived(d)
-        known = info['status'] == 'Plays'
-        self.set(hasGame=True, gameName=info['name'], maker=d.publisher or '', known=known, badge='Plays on Wii U' if known else 'Untested',
+        known = info['status'] in ('Plays', 'Complete')  # compat.json: tested on a real Wii U, or finished there
+        self.set(hasGame=True, gameName=info['name'], maker=d.publisher or '', known=known, badge=f'{info["status"]} on Wii U' if known else 'Untested',
                  icon=icon_url(d.icon) if d.icon else '', meta=f'{d.product}  ·  {d.title_id:016X}  ·  {describe(d)}', view='form')
         self.set_extra('update', None)
         self.set_extra('dlc', None)
@@ -337,7 +401,7 @@ class App(QObject):
         if ask:  # a game picked again from the library keeps quiet
             self.run_flow(self.extras())
 
-    # ---- the library: the games picked before, as the icons on the bottom screen
+    # ---- the library: the games picked before, as the tiles on the Games page
     def remember_game(self, d, name):
         games = [g for g in self.st.get('library', []) if g['path'] != d.path]
         games.append(dict(path=d.path, name=name, id=f'{d.title_id:016x}', product=d.product or '', icon=icon_url(d.icon) if d.icon else ''))
@@ -361,7 +425,7 @@ class App(QObject):
         if self._s['building'] or (self.game and self.game.path == path):
             return
         if not os.path.isfile(path):
-            self.tell('That game has moved', 'Its file is no longer where it was. Pick it again with the + tile.', 'warn')
+            self.tell('That game has moved', 'Its file is no longer where it was. Choose it again on the Build page (Ctrl+O).', 'warn')
             self.forgetGame(path)
             return
         self.open_game(path, ask=False)
@@ -487,7 +551,7 @@ class App(QObject):
             save_settings(self.st)
         cover = bool(path) and os.path.dirname(path) == os.path.join(os.path.dirname(settings_file()), 'covers')
         self.set(artText=('Its cover art, from GameTDB' if cover else os.path.basename(path)) if path else NO_ART, hasArt=bool(path),
-                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the top screen previews it
+                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the Build page's tile shows it
         if remember:
             self.refresh_library()
 
@@ -518,6 +582,8 @@ class App(QObject):
                 self.tell('No keys there', 'There\'s no boot9.bin in that folder.', 'warn')
             self.st['keys'] = p
             decrypt.use_keys(p)
+            if self.st.get('system') and not dumps.have_system_archives(pipeline.ARCHIVES):
+                self.import_system(self.st['system'])  # a 3DS's own copy, chosen before the keys that open it
             self.refresh_files()
 
     @Slot()
@@ -526,7 +592,15 @@ class App(QObject):
                                              self.st.get('system', ''))
         if p:
             if not self.import_system(p):
-                self.tell('No 3DS system files there', HELP['system'][1], 'warn')
+                if not self.system_locked:
+                    self.tell('No 3DS system files there', HELP['system'][1], 'warn')
+                elif decrypt.have_keys(self.st['keys']):
+                    self.tell('Those files didn\'t open', f'That is the right folder, but its files couldn\'t be decrypted with the boot9.bin in '
+                              f'{self.st["keys"]}. They open with the keys of the same 3DS they were copied from.', 'warn')
+                else:
+                    self.tell('Those files need your 3DS keys', 'That is the right folder. A 3DS keeps these files encrypted, and they open with '
+                              'boot9.bin from your own 3DS.\n\nPress "Folder" next to 3DS keys and choose the folder with your boot9.bin: the '
+                              'builder then reads the system files from here by itself.', 'warn')
             self.refresh_files()
 
     @Slot(str)
@@ -536,16 +610,32 @@ class App(QObject):
     def import_system(self, folder):
         """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games"""
         tmp = tempfile.mkdtemp(prefix='3diiu_sys_')  # for contents that need decrypting first
+        self.system_locked = False  # the folder has them, as a 3DS keeps them, and they didn't decrypt: two testers were told "none there"
         try:
             got = dumps.import_system_archives(folder, pipeline.ARCHIVES, tmp)
-        except (OSError, dumps.DumpError, decrypt.DecryptError):
+        except decrypt.DecryptError:
+            got, self.system_locked = [], True
+        except (OSError, dumps.DumpError):
             got = []
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        if got:
+        if got or self.system_locked:  # a locked folder is kept: it's read again once the keys are chosen
             self.st['system'] = folder
             save_settings(self.st)
         return got
+
+    def find_system(self, everywhere):
+        """the system files from an emulator's folder on this PC, if the builder has none yet"""
+        for folder in [] if dumps.have_system_archives(pipeline.ARCHIVES) else emulator_folders(everywhere):
+            if self.import_system(folder) and dumps.have_system_archives(pipeline.ARCHIVES):
+                break
+        self.refresh_files()
+
+    def came_back(self, state):
+        """Back in this window, from Azahar's File > Set Up System Files say: what that left is taken without being pointed at, as the help
+        says it is. Only the emulators' own folders are looked in, which costs nothing."""
+        if state == Qt.ApplicationState.ApplicationActive and not self._s['building']:
+            self.find_system(False)
 
     @Slot()
     def chooseOtp(self):
@@ -593,18 +683,153 @@ class App(QObject):
             dest = short(folder, 40) if folder else 'Choose a folder...'
         have = decrypt.have_keys(keys)
         system = dumps.have_system_archives(pipeline.ARCHIVES)
-        source = f', from {short(self.st["system"], 36)}' if self.st.get('system') else ''
-        self.set(sysOk=system, sysText=f'Ready: the shared font and Mii data{source}' if system else
-                 'Needed: the font and Mii parts games load from the 3DS itself')  # short: the window's first width cuts the line
+        source = short(self.st['system'], 26) if self.st.get('system') else ''
+        self.set(sysOk=system, sysText=(source or 'Found') if system else 'Not found yet')  # short: the row has its pills beside it
         self.set(keysOk=have, keysNeeded=needed and not have,
-                 keysText=f'Found in {short(keys, 44)}' if have else 'Needed for this encrypted game' if needed else 'Only needed for encrypted dumps',
-                 otpOk=otp_ok(otp), otpText=short(otp, 52) if otp_ok(otp) else 'Needed: it comes from your Wii U\'s NAND backup', destText=dest,
-                 canBuild=self.game is not None)
+                 keysText=short(keys, 26) if have else 'Not found yet' if needed else 'Only for encrypted dumps',
+                 otpOk=otp_ok(otp), otpText=short(otp, 26) if otp_ok(otp) else 'Not found yet', destText=dest)
+
+    # ---- updates (updater.py): every call that reaches the network or the disk runs on a worker, which reports through updateEvent
+    @Slot()
+    def windowShown(self):
+        """The window's first frame, or run()'s timer when no frame comes: tells updater a downloaded version came up (or every update would
+        be set aside after its first use), then, in a released app only, looks for a newer release a few seconds later"""
+        if self.shown:
+            return
+        self.shown = True
+        try:  # create()'s connection to every frame: the first was the one wanted
+            QObject.disconnect(self.frames)
+        except Exception:  # started() must run whatever happens to the connection
+            pass
+        threading.Thread(target=updater.started, daemon=True).start()  # it waits on the launch record's lock
+        if FROZEN and updater.tag_key(self._s['releaseTag']):  # a development build checks only when asked
+            self.auto_check.start()
+
+    def set_aside(self, failed):
+        """whether a release newer than this app failed to start here: older failures it has moved past aren't worth a note"""
+        mine = updater.tag_key(self._s['releaseTag'])
+        return any(mine is None or updater.tag_key(t) > mine for t in failed)
+
+    @Slot()
+    def checkUpdate(self):
+        self.check_update(True)
+
+    def check_update(self, asked):
+        """asked: the person pressed Check for updates, so a release that failed to start here before is offered again"""
+        if self._s['updateState'] in ('downloading', 'unpacking', 'ready', 'restarting'):
+            return  # the About line says what is under way
+        if self.check_job and self.check_job.is_alive():
+            if asked:  # the automatic check is under way: an asked one follows it, so its answer is shown
+                self.ask_again = True
+                self.set(updateState='checking', updateMessage='')
+            return
+        if asked:
+            self.set(updateState='checking', updateMessage='')
+        own = self._s['releaseTag']
+
+        def job():
+            release = updater.check(own, skip_failed=False) if asked else updater.check(own)
+            self.updateEvent.emit('checked', (release, asked, updater.failed_tags(), updater.activated()))
+        self.check_job = threading.Thread(target=job, daemon=True)
+        self.check_job.start()
+
+    @Slot()
+    def startUpdate(self):
+        """Update, or Try again: the whole update, which also clears a failed mark left on that release"""
+        if self._s['updateState'] not in ('available', 'failed') or (self.update_job and self.update_job.is_alive()):
+            return
+        if not self.release:  # a version made ready before this start, whose restart failed: find its release again
+            self.check_update(True)
+            return
+        release = self.release
+        self.update_stop.clear()
+        self.set(updateState='downloading', updateProgress=0, updateMessage='')
+
+        def job():
+            shown = [-1]
+
+            def progress(done, size):
+                percent = min(100, done * 100 // max(1, size))
+                if percent != shown[0]:  # a signal per percent, not per piece
+                    shown[0] = percent
+                    self.updateEvent.emit('progress', percent)
+            try:
+                zip_path = updater.download(release, updater.home(), progress, self.update_stop.is_set)
+                if zip_path is None:
+                    self.updateEvent.emit('cancelled', None)
+                    return
+                self.updateEvent.emit('unpacking', None)
+                updater.activate(updater.unpack(zip_path, updater.home()))
+                self.updateEvent.emit('ready', updater.failed_tags())
+            except updater.UpdateError as e:
+                self.updateEvent.emit('failed', str(e))
+            except Exception as e:  # anything else is said the same way, and the app carries on
+                self.updateEvent.emit('failed', f'The update stopped: {e}')
+        self.update_job = threading.Thread(target=job, daemon=True)
+        self.update_job.start()
+
+    @Slot()
+    def cancelUpdate(self):
+        self.update_stop.set()
+
+    @Slot()
+    def laterUpdate(self):
+        self.set(updateState='')
+
+    @Slot()
+    def restartForUpdate(self):
+        if self._s['updateState'] != 'ready':
+            return
+        if self._s['building']:
+            self.tell('A build is running', 'Restart once the build has finished, or cancel it first.', 'warn')
+            return
+        self.set(updateState='restarting', updateMessage='Starting the new version...')  # no build starts meanwhile
+
+        def job():
+            exe = updater.current(updater.own_tag())
+            self.updateEvent.emit('quit' if exe and updater.hand_over(exe, []) else 'restart failed', None)
+        self.update_job = threading.Thread(target=job, daemon=True)
+        self.update_job.start()
+
+    @Slot(str, object)
+    def update_event(self, what, value):
+        """a worker's result, on the window's thread"""
+        if what == 'checked':
+            self.check_job = None  # its last act was to send this: a check asked for meanwhile can start, though the thread may not have ended
+            release, asked, failed, ready = value
+            self.set(updateSetAside=self.set_aside(failed))
+            if self.ask_again and not asked:
+                self.ask_again = False
+                self.check_update(True)
+                return
+            if self._s['updateState'] in ('downloading', 'unpacking', 'ready', 'restarting'):
+                return
+            if release:
+                self.release = release
+                self.set(updateState='ready' if release.tag == ready else 'available', updateTitle=release.title,
+                         updateNotes=release.notes[:400], updateMessage='')  # ready: downloaded already, and Later was pressed
+            elif asked:
+                self.set(updateState='none')
+        elif what == 'progress':
+            self.set(updateProgress=value)
+        elif what == 'cancelled':
+            self.set(updateState='available', updateProgress=0)
+        elif what == 'unpacking':
+            self.set(updateState='unpacking', updateProgress=100)
+        elif what == 'ready':
+            self.set(updateState='ready', updateSetAside=self.set_aside(value), updateMessage='')
+        elif what == 'failed':
+            self.set(updateState='failed', updateMessage=value)
+        elif what == 'restart failed':
+            self.set(updateState='failed', updateMessage='The new version didn\'t start, so this one keeps running.')
+        elif what == 'quit':
+            self.stop_for_close()  # a build left running would go on behind the new window
+            QApplication.quit()
 
     # ---- building
     @Slot()
     def build(self):
-        if not self.game or self._s['building']:
+        if not self.game or self._s['building'] or self._s['updateState'] == 'restarting':
             return
         if not self._s['rootOk']:
             self.tell('The build engine is missing', 'The engine folder next to 3Dii U Builder.exe holds the recompiler and its toolchain. Copy the '
@@ -617,14 +842,10 @@ class App(QObject):
         if not dest or not os.path.isdir(dest):
             self.tell('Where should it go?', 'Choose an SD card or a folder for the game.', 'warn')
             return
+        self.find_system(True)
         if not dumps.have_system_archives(pipeline.ARCHIVES):
-            for folder in emulator_folders():
-                if self.import_system(folder) and dumps.have_system_archives(pipeline.ARCHIVES):
-                    break
-            self.refresh_files()
-            if not dumps.have_system_archives(pipeline.ARCHIVES):
-                self.tell('The 3DS system files are missing', HELP['system'][1], 'warn')
-                return
+            self.tell('The 3DS system files are missing', HELP['system'][1], 'warn')
+            return
         save_settings(self.st)
         argv = [sys.executable, '--pipeline'] if FROZEN else [sys.executable.replace('pythonw.exe', 'python.exe'), '-u', os.path.join(HERE, 'pipeline.py')]
         argv += ['--game', self.game.path, '--otp', self.st['otp'], '--card' if self._s['target'] == 'card' else '--out', dest, '--keys', self.st['keys']]
@@ -689,7 +910,7 @@ class App(QObject):
             self.set(building=False, view='form')
         else:
             self.set(building=False, view='failed', failed=True,
-                     resultText=self.result[7:] if self.result else 'The build stopped. Show details says where.')
+                     resultText=self.result[7:] if self.result else 'The build stopped. Details says where.')
 
     @Slot()
     def cancel(self):
@@ -730,11 +951,16 @@ def create(argv=None):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('3DiiU.Builder')  # the taskbar shows this app's icon, not Python's
     state = App()
+    qt.applicationStateChanged.connect(state.came_back)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('app', state)
     engine.rootContext().setContextProperty('T', theme())
-    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(132)))
+    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(512)))  # the rail shows it at 162: 512 stays sharp up to a 4K window
     engine.load(QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Main.qml')))
+    for win in engine.rootObjects():  # its first frame on screen is when it has really been shown (App.windowShown)
+        quick = shiboken6.wrapInstance(shiboken6.getCppPointer(win)[0], QQuickWindow)
+        # it comes at every frame, from the render thread: windowShown ends the connection at the first
+        state.frames = quick.frameSwapped.connect(state.windowShown, Qt.ConnectionType.QueuedConnection)
     return qt, engine, state
 
 
@@ -742,4 +968,15 @@ def run():
     qt, engine, state = create()
     if not engine.rootObjects():
         return 1
-    return qt.exec()
+    win = engine.rootObjects()[0]  # loaded hidden, so a check can load it without showing it
+    area = win.screen().availableGeometry()  # its own screen's free area, not the whole desktop: "Build It!" stays above the taskbar
+    w = int(min(1280, area.width() * 0.9, area.height() * 0.9 * 16 / 9))
+    win.setMinimumSize(QSize(min(960, area.width()), min(540, area.height())))
+    win.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - w * 9 // 16) // 2, w, w * 9 // 16)
+    win.show()
+    # The first frame is the sign the window came up. A window started minimised draws none, so a timer says it for one that isn't showing.
+    # One that is showing and has still drawn nothing is broken, and is left unconfirmed: updater sets that version aside.
+    QTimer.singleShot(10000, lambda: None if win.isExposed() else state.windowShown())
+    code = qt.exec()
+    del engine  # before the App it shows, or its bindings read a gone app on the way out
+    return code

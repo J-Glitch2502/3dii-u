@@ -458,14 +458,14 @@ static int guest_entry(int, void *t) {
 }
 
 static void start_guest_host(Thread *t) {
-    auto *host = (GuestHost *)memalign(16, sizeof(GuestHost));
+    auto *host = (GuestHost *)mem::host_alloc(16, sizeof(GuestHost));
     if (!host) FATAL("no memory for a guest thread\n");
     if (!OSCreateThread(&host->os, guest_entry, 0, t, host->stack + sizeof host->stack, sizeof host->stack, 16, (OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_CPU1 | OS_THREAD_ATTRIB_DETACHED)))
         FATAL("cannot create a guest thread\n");
     char *name = guest_names[t->id % 64];
     snprintf(name, sizeof guest_names[0], "guest %u", t->id);
     OSSetThreadName(&host->os, name);
-    OSSetThreadDeallocator(&host->os, [](OSThread *th, void *) { free(th); });
+    OSSetThreadDeallocator(&host->os, [](OSThread *th, void *) { mem::host_free(th); });
     OSSetThreadRunQuantum(&host->os, 1000);  // as wut's pthreads have
     OSResumeThread(&host->os);
 }
@@ -661,6 +661,7 @@ static u32 svc_control_memory(CPU *c) {
         return RES_OK;
     }
     case 4: {  // MAP addr1 -> addr0 (alias)
+        if (mem::lent(addr0, size)) return RES_INVALID_ADDRESS;  // below the heap: a 3DS maps nothing there either
         LOG("[svc] ControlMemory MAP %08x -> %08x size %x (copying, no alias)\n", addr1, addr0, size);
         memmove(gptr(addr0), gptr(addr1), size);
         add_region(addr0, size, perm, 6);
@@ -911,6 +912,7 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         auto sm = get<SharedMem>(c->r[0]);
         if (!sm) { c->r[0] = RES_INVALID_HANDLE; break; }
         u32 addr = c->r[1];
+        if (addr && mem::lent(addr, sm->size)) { c->r[0] = RES_INVALID_ADDRESS; break; }
         VLOG("[svc] MapMemoryBlock %s at %08x (backing %08x size %x)\n", sm->name.c_str(), addr, sm->backing, sm->size);
         if (addr && sm->backing && addr != sm->backing) {
             // No aliasing: the block moves to where the game maps it.
@@ -1121,6 +1123,11 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
             LOG("[svc] r%d-r%d: %08x %08x %08x %08x\n", i, i + 3, c->r[i], c->r[i + 1], c->r[i + 2], c->r[i + 3]);
         for (u32 a = c->r[13]; a < c->r[13] + 0x80; a += 16)
             LOG("[svc] stack %08x: %08x %08x %08x %08x\n", a, r32(a), r32(a + 4), r32(a + 8), r32(a + 12));
+        // Said first, as the screen shows only the start: the last thing the game asked for was a system archive its build lacks, and it has
+        // opened nothing since. Three testers' Tomodachi Life stopped here with only the numbers below (2026-11-10 to 12): the bad-word list.
+        if (const u64 tid = g_missing_system_archive)
+            FATAL("This game asked for %s from your 3DS (system archive %016llx), which its build doesn't have, and stopped. Build it again with "
+                  "your 3DS system files.\n[svc] Break(%u) from thread %u, lr=%08x\n", system_archive_name(tid), (unsigned long long)tid, c->r[0], t->id, c->r[14]);
         FATAL("[svc] Break(%u) from thread %u, lr=%08x\n", c->r[0], t->id, c->r[14]);
     }
     case 0x3D: {
@@ -1179,6 +1186,8 @@ std::string kstats_report(u64 frames) {
     return out + "\n";
 }
 
+volatile u32 svcs;
+
 void svc_dispatch(CPU *c, u32 imm) {
     while (lock_wanted.load(std::memory_order_relaxed)) std::this_thread::yield();  // lock_soon's caller first
     Lock lk(kmutex);
@@ -1186,6 +1195,7 @@ void svc_dispatch(CPU *c, u32 imm) {
     t->in_svc = (s32)imm;
     t->in_service = nullptr;
     kstats.svc[imm & 127]++;
+    svcs = svcs + 1;
     flush_deferred();
     static int svclog = getenv("RECOMP_SVCLOG") ? atoi(getenv("RECOMP_SVCLOG")) : -1;
     if (svclog >= 0 && (svclog == 0 || current_thread()->id == (u32)svclog))
@@ -1273,6 +1283,8 @@ void start(const BootInfo &bi) {
 #ifdef __WIIU__
     OSInitEvent(&tq_event, FALSE, OS_EVENT_MODE_AUTO);
     tq_event_ready = true;
+    // from a megabyte clear of the program (its data and bss come last) to the heap
+    mem::lend(((g_game.data_addr + g_game.data_size + g_game.bss_size + 0xFFFFF) & ~0xFFFFFu) + 0x100000, mem::HEAP_BASE);
 #endif
     tq.th = std::thread(timeout_thread);
     tq.th.detach();

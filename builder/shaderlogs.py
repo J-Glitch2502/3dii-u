@@ -11,7 +11,11 @@ A memory no DVLB program starts goes as a recipe instead (.vsr): where its words
 together from the user's dump and checks it against the fingerprint. The Mario & Luigi engine keeps a shader as plain words in its code.bin and
 loads a romfs program after it (115 records the app used to leave out, Nov 9), and Zelda keeps some in an SPBD3 inside a compressed archive. Only
 a long run may lie anywhere; a short one must lie near a long one, so a recipe can't spell code out of coincidences, and a memory whose words
-aren't in the dump (another game's, in a log that collects every game) gets none."""
+aren't in the dump (another game's, in a log that collects every game) gets none.
+
+A game confirmed finished on a console keeps the list of fragment states that build compiled ahead (confirmed.bin, confirm below). A build
+that takes the game's logs compiles the list whatever the others hold: the states it guesses beyond the logs are picked up to a limit, in
+an order one more logged state changes, so without the list a later build could lose shaders the finished one had."""
 import functools
 import hashlib
 import importlib.util
@@ -27,6 +31,7 @@ SOURCES = ('code.bin', 'romfs.bin')  # where a recipe's pieces lie in a game's f
 UNPACKED = len(SOURCES)  # or in a romfs file's unpacked contents (Yaz0, LZ10, LZ11)
 LONG = 3  # words in a run that may lie anywhere in a file
 NEAR = 64 << 10  # how close to a long run a shorter one must lie
+CONFIRMED = 'confirmed.bin'  # a finished game's fragment states, in its shader_logs (confirm)
 ROOT = os.environ.get('THREEDII_ROOT') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # as pipeline.py finds it
 
 
@@ -406,9 +411,41 @@ def write_recipes(game_dir, logs):
     return sum(1 for _ in recipes(bytes(out))), left
 
 
+def confirm(build_logs, game_logs):
+    """confirmed.bin in a game's shader_logs: every fragment state the build the game was confirmed finished with compiled ahead, read from that
+    build's own shader_logs folder in the order the shader generator met them (tools/shadergen_main.cpp: an earlier list first, then the folder
+    as it lists), so a build with the same logs numbers its shaders the same. Later builds compile the list first, and no tool learns from it:
+    it holds earlier guesses, not what runs met. Returns how many states it holds."""
+    if not os.path.isfile(os.path.join(build_logs, 'variants.bin')):  # what a build's shader stage leaves (prepare_logs in tools/win/build3ds.py)
+        raise SystemExit(f'{build_logs} is not a finished build\'s shader_logs: a list from it would lack what the build guessed')
+    names = [f for f in os.listdir(build_logs) if f.endswith('.bin')]
+    names.sort(key=lambda f: f != CONFIRMED)  # a stable sort: the rest stay as the folder lists them
+    seen, out = set(), bytearray()
+    for name in names:
+        with open(os.path.join(build_logs, name), 'rb') as f:
+            for kind, raw, *_ in records(f.read()):
+                if kind != 'fs':
+                    continue
+                key = raw[4:] if raw[:4] == b'FS  ' else raw  # its length and the key, without a miss list's tag
+                if len(key) != 4 + struct.unpack_from('<I', key)[0]:
+                    continue  # the last record of a log cut short as it was written: in one file, it would run into the next record
+                if key not in seen:
+                    seen.add(key)
+                    out += key
+    if not seen:
+        raise SystemExit(f'{build_logs} holds no fragment states: is it a build\'s shader_logs folder?')
+    with open(os.path.join(game_logs, CONFIRMED), 'wb') as f:
+        f.write(out)
+    return len(seen)
+
+
 if __name__ == '__main__':
     import sys
-    if len(sys.argv) != 4 or sys.argv[1] != '--recipes':
-        raise SystemExit('shaderlogs.py --recipes <folder with the game\'s code.bin and romfs.bin> <its games/<slug>/shader_logs>')
-    made, left = write_recipes(sys.argv[2], sys.argv[3])
-    print(f'{made} vertex records as recipes, {left} left out')
+    if len(sys.argv) == 4 and sys.argv[1] == '--recipes':
+        made, left = write_recipes(sys.argv[2], sys.argv[3])
+        print(f'{made} vertex records as recipes, {left} left out')
+    elif len(sys.argv) == 4 and sys.argv[1] == '--confirm':
+        print(f'{confirm(sys.argv[2], sys.argv[3])} fragment states confirmed')
+    else:
+        raise SystemExit('shaderlogs.py --recipes <folder with the game\'s code.bin and romfs.bin> <its games/<slug>/shader_logs>\n'
+                         'shaderlogs.py --confirm <the shader_logs of the build confirmed finished> <the game\'s games/<slug>/shader_logs>')

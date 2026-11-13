@@ -46,7 +46,7 @@ this repository or in the app. Everything comes from your own consoles and your 
 | `otp.bin` | Your Wii U's one-time-programmable memory. The WUP is packed with the key in it | Your own Wii U's NAND backup ([Wii U Hacks Guide](https://wiiu.hacks.guide/)) |
 | `boot9.bin` | Your 3DS's ARM9 boot ROM. Only needed for encrypted dumps | Dumped from your own 3DS with GodMode9 |
 | `seeddb.bin` | Your 3DS's seed database. Only some digital games need it | Dumped from your own 3DS with GodMode9 |
-| 3DS system files (`0004009b`) | Your 3DS's shared font and Mii data, which games load from the console itself | Your own 3DS: GodMode9, or Azahar's "Set Up System Files" with the Artic Setup Tool |
+| 3DS system files (`0004009b` and `000400db`) | Your 3DS's shared font, Mii data and bad-word list, which games load from the console itself | Your own 3DS: GodMode9, or Azahar's "Set Up System Files" with the Artic Setup Tool |
 
 The builder checks each file before a build uses it. It never prints, stores or uploads what's in them, and it never
 bundles them: the app refuses to package if one of these files is inside it. Don't ask for these files in the issue

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [--bless] [game ... | all]
+"""Builds games and checks each one in Cemu before anything goes near a console: check_ports.py [--no-build] [--seconds N] [--bless] [--cold] [game ... | all]
 "all" is every game this PC has: the nine ports (GAMES, built by tools/win/build3ds.py), the scenes of them a route can't play its way to
 (SCENES: NSMB2's tower and castle) and every game in games/sources.json, built from its dump by the builder's pipeline as a tester's would be.
 sources.json is this PC's own (git-ignored):
@@ -14,9 +14,13 @@ the other (pictures()), and so also when it draws nothing where a good run drew.
 the last run's pictures as a good run, for once they've been looked at (tools/contact_sheet.py lays them out, a sheet per game).
 A game also fails on a crash, code the translation missed, a vertex shader that wasn't compiled, a failed save flush, a save that formats itself twice, a save in common storage
 instead of the player's, or files not going straight to the file system. Fragment misses and frame rates are reported, not judged: Cemu has no real GPU. Shaders a run missed go to shader_logs, for the next build. Exit code 0 if all passed.
+--cold checks what a tester gets from a game nobody has built before: sources.json's games built with none of this PC's lists of their code and
+shaders (pipeline.py --cold), run the same way and held to the usual builds' good pictures. The usual check passed for weeks while testers' games,
+of other regions and versions than this PC's, crashed on code only this PC's lists named (2026-11-12).
 Cemu is a private copy in build_win/cemu (a renamed exe, so other sessions' scripts leave it alone), run by tools/win/cemu_run.ps1.
 """
 import argparse
+import binascii
 import glob
 import hashlib
 import json
@@ -36,7 +40,39 @@ CEMU = ROOT + '/build_win/cemu'
 GAMES = {'sticker_star': '77', 'nsmb2': '78', 'dream_team': '79', 'paper_jam': '80', 'superstar_saga': '83', 'bowsers_inside': '84', 'layton_azran': '85', 'layton_mask': '86', 'tomodachi': '67'}
 OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/layton_azran', 'tomodachi': 'build'}
 MEASURE = False  # --measure: the measuring kind of build, which build3ds.py and the builder's pipeline keep in folders of their own
+COLD = False     # --cold: built as a game nobody has built before, under <name>_cold
 SOURCES = ROOT + '/games/sources.json'
+# A console's account always has a Mii, and Cemu's is a placeholder the runtime turns down, so a run had the games find none: a state no
+# console is in. Every run gets this one instead: made up ("Wii U Mii", no person's), and marked as born on a Wii U, as a console's are.
+# Written here the way a 3DS keeps a Mii; a run is handed it the way the Wii U's own processor reads one (wiiu_order), which is how its
+# software keeps a Mii in memory, so the face a game shows for it has come through the turning round.
+ACCOUNT_MII = bytes.fromhex('030010403d500000000ab0cd98000002020000000002000026005700690069002000550020004d006900690000004040'
+                            '000021010268441826344614811217680d000029005248505700690069002000550000000000000000000000000021a4')
+# How many a game's own Mii Maker must end up with: that one and the two of mii_maker_db. This counts on Cemu's own account Mii being
+# turned down, and on the private Cemu's storage holding no Mii Maker database of its own.
+MIIS = 3
+
+
+def wiiu_order(mii):
+    """a Mii's store data the way the Wii U's own processor reads it: the first four bytes and every 16-bit field from 0x18 on turned round
+    (height and build are a byte each), with the checksum of that"""
+    m = bytearray(mii[:0x5C]) + bytes(2)
+    m[0:4] = m[3::-1]
+    for at in range(0x18, 0x5C, 2):
+        if at != 0x2E:
+            m[at], m[at + 1] = m[at + 1], m[at]
+    return bytes(m) + binascii.crc_hqx(bytes(m), 0).to_bytes(2, 'big')
+
+
+def mii_maker_db():
+    """Mii Maker's database as frontend_wiiu.cpp reads it: two more made-up Miis, one in each order, as either may be what a console's file
+    holds, with a slot nobody uses between them, and a slot that holds no Mii (a name of control characters), which has to stay out"""
+    def another(n, name):
+        m = bytearray(ACCOUNT_MII[:0x5C])
+        m[0x0F] = n  # its own Mii id
+        m[0x1A:0x2E] = name.encode('utf-16-le').ljust(20, b'\0')
+        return bytes(m)
+    return b'FFOC' + bytes(4) + another(3, 'Maker One') + bytes(0x5C) + wiiu_order(another(4, 'Maker Two'))[:0x5C] + another(5, '\x01\x02\x03')
 # A scene is a port run once more with switches of the runtime set (env.txt in its data folder, frontend_wiiu.cpp): a level a route can't reach
 # by playing, loaded in place of the one it enters. NSMB2's files: <world>-14 is a world's tower, -16 its castle, -12 its ghost house.
 SCENES = {'nsmb2_tower': ('nsmb2', {'RECOMP_ROMFS_SWAP': 'Course/1-1.sarc=Course/1-14.sarc'}),
@@ -53,6 +89,7 @@ class Target:
     data: str      # its folder in games/, for screenshots and the shaders a run missed
     interp: bool = False  # Cemu's own recompiler can't run this one's code: its interpreter does
     route: str = ''       # whose route in test_routes.py it plays, if not one under its own name
+    like: str = ''        # a cold build: the usual build of the game, whose good pictures it's held to
     env: dict = field(default_factory=dict)  # a scene's switches (SCENES)
 
     @property
@@ -102,13 +139,13 @@ def built_from_dump(name, since=0):
         if os.path.exists(mark) and open(mark).read() == name and os.path.getmtime(out) >= since and os.path.exists(out + '/title/code/app.xml'):
             tid = re.search(r'00050000([0-9A-Fa-f]{8})', open(out + '/title/code/app.xml').read())
             slug = os.path.basename(os.path.dirname(out))
-            return Target(name, tid.group(1).lower(), out.replace('\\', '/'), f'{ROOT}/games/{slug.split("_v")[0]}')
+            return Target(name, tid.group(1).lower(), out.replace('\\', '/'), f'{ROOT}/games/{re.sub(r"(_v[0-9]+)?(_cold)?$", "", slug)}')
     return None
 
 
 def build_from_dump(name, src, otp):
     started = time.time()
-    argv = [sys.executable, '-u', 'builder/pipeline.py', '--game', src['game'], '--otp', otp, '--out', ROOT + '/dist/builder', '--keep']
+    argv = [sys.executable, '-u', 'builder/pipeline.py', '--game', src['game'], '--otp', otp, '--out', ROOT + '/dist/builder', '--keep'] + ['--cold'] * COLD
     for part in ('update', 'dlc'):
         if src.get(part):
             argv += ['--' + part, src[part]]
@@ -165,7 +202,7 @@ def strangers(mine, theirs):
 
 def pictures(t, leg):
     """Keeps the leg's screenshots, of both screens, and says what's wrong with them against the good runs: (fault or None, note or None)"""
-    mine, good = f'{kept(t, "check_shots")}/{leg}', f'{kept(t, "good_shots")}/{leg}'
+    mine, good = f'{kept(t, "check_shots")}/{leg}', f'{t.data}/good_shots/{t.like or t.name}/{leg}'
     shutil.rmtree(mine, ignore_errors=True)
     os.makedirs(mine)
     for f in glob.glob(t.data + '/shots/cemu/*.png'):  # tv_NN.png and pad_NN.png (cemu_run.ps1)
@@ -240,6 +277,10 @@ def judge(t, seconds, flags, measured=False):
     for flag in ['cemu'] + flags:  # cemu: the runtime's word that it isn't a console running it (gx2_backend.cpp); name=text for a file with something in it
         with open(f'{d}/{flag.split("=")[0]}', 'w') as f:
             f.write(flag.partition('=')[2])
+    with open(d + '/test_mii.bin', 'wb') as f:  # the current account's Mii, as frontend_wiiu.cpp takes it
+        f.write(wiiu_order(ACCOUNT_MII))
+    with open(d + '/test_mii_maker.bin', 'wb') as f:  # and the console's other Miis
+        f.write(mii_maker_db())
     if t.env:
         with open(d + '/env.txt', 'w', newline='\n') as f:
             f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
@@ -314,6 +355,9 @@ def judge(t, seconds, flags, measured=False):
         formats = len(re.findall(r'save: formatting', text))
         if name == 'restart' and formats and saved_before:  # a game that saved nothing on its route formats again, rightly
             faults.append(f'restart: formatted the save again, {formats} times')
+        miis = re.findall(r"Mii Maker's database: (\d+) Mii", text)  # said when a game that reads Mii Maker gets the console's Miis
+        if miis and int(miis[-1]) != MIIS:
+            faults.append(f"{name}: {miis[-1]} of the console's {MIIS} Miis reached the game's Mii Maker")
         made = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ compiled in (\d+) ms', text)
         bad = re.findall(r'\[glsl\] (?:pixel|vertex) [0-9a-f]+ failed', text)
         if 'compiler' not in text or '[glsl] off' in text:
@@ -338,8 +382,9 @@ def judge(t, seconds, flags, measured=False):
             notes.append(note)
         misses = d + '/shader_misses.bin'
         if os.path.exists(misses) and os.path.getsize(misses):
-            os.makedirs(t.data + '/shader_logs', exist_ok=True)
-            run(sys.executable, 'tools/misses_to_log.py', misses, f'{t.data}/shader_logs/cemu_{time.strftime("%m%d_%H%M%S")}.bin')
+            if not t.like:  # what a cold build missed stays out of the lists the usual builds are made from
+                os.makedirs(t.data + '/shader_logs', exist_ok=True)
+                run(sys.executable, 'tools/misses_to_log.py', misses, f'{t.data}/shader_logs/cemu_{time.strftime("%m%d_%H%M%S")}.bin')
             os.remove(misses)
     if os.path.isdir(d + '/save'):
         faults.append("the game saved in common storage, not the player's")
@@ -359,14 +404,17 @@ def main():
     p.add_argument('--bless', action='store_true', help="runs nothing: the pictures the last run kept become a good run, once they've been looked at")
     p.add_argument('--measure', action='store_true', help="the measuring kind of build (build3ds.py's THREEDII_MEASURE): frame rates and costs on the log, and the scenes")
     p.add_argument('--shots', type=int, default=6, help='pictures of each screen a leg; more than the usual six are for looking at, and fail the comparison with a good run')
+    p.add_argument('--cold', action='store_true', help="sources.json's games as a tester's first build of a game nobody has built: none of this PC's lists of its code and shaders")
     args = p.parse_args()
     SHOTS = args.shots
+    global COLD
+    COLD = args.cold
     if args.measure:
         global MEASURE
         MEASURE = True
         os.environ['THREEDII_MEASURE'] = '1'  # the builds this run starts inherit it
     src = sources()
-    games = list(GAMES) + (list(SCENES) if args.measure else []) + list(src['games']) if args.games == ['all'] else args.games
+    games = ([] if COLD else list(GAMES) + (list(SCENES) if args.measure else [])) + list(src['games']) if args.games == ['all'] else args.games
     built = args.no_build or args.bless
     bad = 0
     ports_built = set()
@@ -374,6 +422,8 @@ def main():
         started = time.time()
         if game in SCENES and not args.measure:
             t = 'a scene needs --measure: its switches reach the game through the measuring build alone'
+        elif COLD and game not in src['games']:
+            t = f'--cold builds a game from its dump: only the games in {SOURCES}'
         elif game in GAMES or game in SCENES:
             of, env = SCENES.get(game, (game, {}))
             t = port(of) if built or of in ports_built else build_port(of)  # a scene's port as this run has built it already
@@ -381,7 +431,15 @@ def main():
                 ports_built.add(of)
                 t.name, t.route, t.env = game, of if env else '', env
         elif game in src['games']:
-            t = (built_from_dump(game) or 'not built yet') if built else build_from_dump(game, src['games'][game], src['otp'])
+            name = game + '_cold' * COLD
+            t = (built_from_dump(name) or 'not built yet') if built else build_from_dump(name, src['games'][game], src['otp'])
+            if COLD and not isinstance(t, str):
+                t.like = game
+                # A game the builder knows by name is built cold under its product code, which would give it a folder of its own in games/:
+                # its logs and pictures go into the usual build's folder, where the good pictures it's held to are.
+                usual = built_from_dump(game)
+                if usual:
+                    t.data = usual.data
         else:
             t = f'no such game: not one of the ports and not in {SOURCES}'
         if not isinstance(t, str) and game in src['games']:

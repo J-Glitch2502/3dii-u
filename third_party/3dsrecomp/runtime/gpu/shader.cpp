@@ -1121,6 +1121,9 @@ struct SpecGen {
     const ShaderProgram *P;
     u32 n, b;
     const u8 (*iu)[4];
+    u32 open = 0;  // the bools left to run time (shader_glsl_spec): a test of one is written out, like a test of a per-vertex condition
+    bool decided(const DInst &I) const { return !((open >> I.bid) & 1); }
+    static std::string open_bool(const DInst &I) { return "((uInt[0].w >> " + std::to_string(I.bid) + ") & 1) != 0"; }
     int loops = 0, ifs = 0, calls = 0, counter = 0;
     bool fail = false;
     int why = 0;  // the source line that gave up, and the instruction (shader_glsl_fail)
@@ -1190,11 +1193,12 @@ struct SpecGen {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
-                if (I.op == OP_JMPU) {
+                if (I.op == OP_JMPU && decided(I)) {
                     if (((b >> I.bid) & 1) == !(num & 1)) cont = dst;
                     break;
                 }
-                w.o += "    if (" + w.cond(I) + ") {\n";
+                // JMPU jumps on its bool being set, or with the low bit of num on its being clear
+                w.o += "    if (" + (I.op == OP_JMPC ? w.cond(I) : (num & 1) ? "!(" + open_bool(I) + ")" : open_bool(I)) + ") {\n";
                 const bool r1 = block(dst, e, in_loop, inc);
                 w.o += "    } else {\n";
                 const bool r2 = block(i + 1, e, in_loop, inc);
@@ -1208,13 +1212,13 @@ struct SpecGen {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
-                if (I.op == OP_CALLU && !((b >> I.bid) & 1)) break;
-                const bool dyn = I.op == OP_CALLC;
+                if (I.op == OP_CALLU && decided(I) && !((b >> I.bid) & 1)) break;
+                const bool dyn = I.op == OP_CALLC || (I.op == OP_CALLU && !decided(I));
                 if (!enter(dst + num)) {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
-                if (dyn) w.o += "    if (" + w.cond(I) + ") {\n";
+                if (dyn) w.o += "    if (" + (I.op == OP_CALLC ? w.cond(I) : open_bool(I)) + ") {\n";
                 calls++;
                 block(dst, dst + num, false, 0);
                 calls--;
@@ -1233,17 +1237,18 @@ struct SpecGen {
                     return false;
                 }
                 cont = dst + num;
-                const bool taken = I.op == OP_IFC || ((b >> I.bid) & 1);
+                const bool known = I.op == OP_IFU && decided(I);
+                const bool taken = !known || ((b >> I.bid) & 1);
                 if (taken && !enter(dst)) {  // the true branch is a region ending at dst
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 ifs++;
-                if (I.op == OP_IFU) {
+                if (known) {
                     if (taken) block(i + 1, dst, false, 0);
                     else block(dst, dst + num, false, 0);
                 } else {
-                    w.o += "    if (" + w.cond(I) + ") {\n";
+                    w.o += "    if (" + (I.op == OP_IFC ? w.cond(I) : open_bool(I)) + ") {\n";
                     block(i + 1, dst, false, 0);
                     if (num) {
                         w.o += "    } else {\n";
@@ -1272,8 +1277,10 @@ struct SpecGen {
                 }
                 // The count, start and step come from the uniform block (uInt, the integer uniforms the key already fixes), not the number itself:
                 // a bound the compiler can see gets the loop unrolled, and a 7-turn body of relative reads never came out of CafeGLSL on a console.
+                // Counted with signed numbers (the count is a byte): from an unsigned compare the console's compiler makes PRED_SETGE_UINT, which
+                // no program the PC's compiler makes holds and Cemu doesn't know, so there the draws of a shader compiled on the console vanished.
                 const int k = counter++;
-                w.f("    aL = uInt[%u].y;\n    for (uint it%d = 0u; it%d < uint(uInt[%u].x) + 1u; it%d++) {\n", I.iid, k, k, I.iid, k);
+                w.f("    aL = uInt[%u].y;\n    for (int it%d = 0; it%d <= uInt[%u].x; it%d++) {\n", I.iid, k, k, I.iid, k);
                 loops++;
                 const int saved_ifs = ifs, saved_calls = calls;
                 ifs = calls = 0;  // a BREAKC directly in this body ends this loop
@@ -1306,7 +1313,7 @@ struct SpecGen {
 int shader_glsl_fail_line;  // why the last shader_glsl_spec gave up: the line in this file, and the instruction
 u32 shader_glsl_fail_at;
 
-std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs) {
+std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open) {
     const u32 n = (u32)P->ins.size();
     if (entry >= n) return "";
     u32 in_used = 0;
@@ -1319,7 +1326,7 @@ std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 
     *inputs = in_used;
     MslWriter w{P};
     w.al = "aL";
-    SpecGen g{w, P, n, b, iu};
+    SpecGen g{w, P, n, b, iu, open};
     g.block(entry, n, false, 0);
     if (g.fail) {
         shader_glsl_fail_line = g.why;

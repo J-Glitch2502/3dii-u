@@ -130,7 +130,8 @@ u64 shader_program_hash(const ShaderProgram *p);  // of the code and swizzle wor
 std::string shader_msl(const ShaderProgram *p, u32 entry, const char *name);
 // the same for one set of bool/int uniforms (flow resolved statically), or "" if it cannot be done exactly
 std::string shader_msl_spec(const ShaderProgram *p, u32 entry, const char *name, u32 b, const u8 (*iu)[4]);
-std::string shader_glsl_spec(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs);
+// open: the bools not decided here. The code reads those as it runs, each a bit of the uniform block's uInt[0].w, so one shader serves every set of them.
+std::string shader_glsl_spec(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open = 0);
 extern int shader_glsl_fail_line;  // why the last one came out empty: the line in shader.cpp that gave up, and the instruction
 extern u32 shader_glsl_fail_at;
 // the bool uniforms (bit mask) and int uniforms (*loops, bit mask) the program's flow control reads
@@ -559,7 +560,6 @@ void *gx2_fog_lut();
 void gx2_flush_cpu_batch();
 bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control);  // true: done, guest memory needn't be filled too
 extern bool gx2_skip_pass;  // what's being drawn now is a right eye nothing will show
-bool gx2_skip_draw();       // the draw the registers describe is one to leave out: that, or a frame that isn't shown (frame_left_out)
 extern bool gx2_skip_copies;  // and its texture copies only feed that same right eye
 bool gx2_texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 out_width_gap);  // true: done on the GPU, guest memory left as it was
 void gx2_copied_to_memory(u32 paddr, u32 size);  // a texture copy or display transfer wrote guest memory (an LCD buffer the game fills itself)

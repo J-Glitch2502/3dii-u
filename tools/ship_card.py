@@ -15,29 +15,18 @@ FOLDERS = {'sticker_star': 'Paper_Mario_Sticker_Star', 'nsmb2': 'New_Super_Mario
            'superstar_saga': 'Mario_Luigi_Superstar_Saga', 'bowsers_inside': 'Mario_Luigi_Bowsers_Inside_Story', 'layton_azran': 'Layton_Azran_Legacy', 'layton_mask': 'Layton_Miracle_Mask',
            'tomodachi': 'Tomodachi_Life'}
 OUT = {'layton_mask': 'build_layton/layton_mask', 'layton_azran': 'build_layton/layton_azran', 'tomodachi': 'build'}
-FREE_MB = 1500
 PREVIOUS = ROOT + '/dist/previous'  # the build each title had on the card before this one
-
-
-def free_mb():
-    r = subprocess.run(['powershell', '-NoProfile', '-Command', '[int]((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory/1KB)'], capture_output=True, text=True)
-    return int(r.stdout.strip() or 0)
 
 
 def pack(otp, game):
     target = f'{ROOT}/dist/{FOLDERS[game]}'
     title = f'{ROOT}/{OUT.get(game, "build_mario/" + game)}/title'
-    for attempt in range(3):
-        end = time.time() + 4 * 3600
-        while free_mb() < FREE_MB and time.time() < end:
-            time.sleep(60)
-        shutil.rmtree(target, ignore_errors=True)
-        r = subprocess.run([sys.executable, ROOT + '/tools/pack_game_wup.py', otp, title, target], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
-        if r.returncode == 0:
-            return target
-        print(f'{game}: pack try {attempt + 1} failed: {r.stdout[-200:]}', flush=True)
-        shutil.rmtree(target, ignore_errors=True)
-        time.sleep(120)
+    shutil.rmtree(target, ignore_errors=True)
+    r = subprocess.run([sys.executable, ROOT + '/tools/pack_game_wup.py', otp, title, target], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    if r.returncode == 0:
+        return target
+    print(f'{game}: packing failed: {r.stdout[-200:]}', flush=True)
+    shutil.rmtree(target, ignore_errors=True)
     return None
 
 

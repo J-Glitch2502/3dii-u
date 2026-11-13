@@ -1,6 +1,8 @@
 // Logging, guest memory reservation, and the address -> recompiled function dispatcher.
 #ifdef __WIIU__
 #include <coreinit/memdefaultheap.h>
+#include <coreinit/memexpheap.h>
+#include <malloc.h>
 #else
 #include <sys/mman.h>
 #include <dlfcn.h>
@@ -215,6 +217,34 @@ u32 hle_alloc(u32 size, u32 align) {
     memset(g_mem + a, 0, size);
     return a;
 }
+
+#ifdef __WIIU__
+// The block is 512 MB of real memory whatever the game maps of it, and what the title's heap had left held every texture, every guest thread's
+// stack and the shader compiler. With that full, a 4 MB texture or one more thread ended the game: "out of memory for a 4194304 byte texture"
+// in Bowser's Inside Story and "no memory for a guest thread" in Omega Ruby (two testers' consoles, 2026-11-11 and 12). Between the end of its
+// program and 0x08000000, where its heap starts, a game can map nothing on a 3DS, and kernel.cpp lets it map nothing here: that stretch, about
+// 100 MB of the block, is a heap for the host's largest needs.
+static MEMHeapHandle lent_heap;
+static u32 lent_from, lent_to;
+
+void lend(u32 from, u32 to) {
+    if (lent_heap || to < from + (8 << 20)) return;
+    lent_heap = MEMCreateExpHeapEx(g_mem + from, to - from, MEM_HEAP_FLAG_USE_LOCK);  // the GPU's thread and the game's threads both ask
+    if (lent_heap) lent_from = from, lent_to = to;
+}
+
+bool lent(u32 addr, u32 size) { return lent_heap && addr < lent_to && addr + size > lent_from; }
+
+void *host_alloc(u32 align, u32 size) {
+    void *p = lent_heap ? MEMAllocFromExpHeapEx(lent_heap, size, (int)align) : nullptr;
+    return p ? p : memalign(align, size);
+}
+
+void host_free(void *p) {
+    if (lent_heap && (u8 *)p >= g_mem + lent_from && (u8 *)p < g_mem + lent_to) MEMFreeToExpHeap(lent_heap, p);
+    else free(p);
+}
+#endif
 }  // namespace mem
 
 // ---------------------------------------------------------------- dispatch

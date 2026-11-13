@@ -38,8 +38,10 @@ struct IPC {
     void static_desc(int pos, int index, u32 size);
 };
 
-// the last system archive the game asked for that its build doesn't have (fs.cpp): err:f names it if the game then stops, as Miitopia did
+// the last system archive the game asked for that its build doesn't have (fs.cpp): named if the game then stops, through err:f as Miitopia
+// did or through a Break as Tomodachi Life does
 extern u64 g_missing_system_archive;
+const char *system_archive_name(u64 title_id);
 
 struct Service : std::enable_shared_from_this<Service> {
     std::string name;

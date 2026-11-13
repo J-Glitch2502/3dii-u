@@ -6,8 +6,12 @@ Its engine/ folder holds what a build needs, in the repository's own layout: the
 devkitPro, the shader compilers, and what the games' runs learned: where their code starts and the render states they met, with the vertex
 programs they ran named by fingerprints (shaderlogs.py), as those are the games' own code. None of the games' code or data goes in.
 The 3DS system archives aren't in it: they are each user's own files, imported from their emulator into the work folder.
-Run: python builder/make_app.py (needs the toolchain installed here, as the shader generator is built for the app)"""
+Run: python builder/make_app.py [--release <tag>] (needs the toolchain installed here, as the shader generator is built for the app).
+--release: this build's tag, like builder-1.0-beta-2026-11-13. The app carries it and its zip is named after it, which is how an app out
+there knows a newer build from its own, whichever release the zip is put under, and hands over to one it downloaded (updater.py); a build
+without it never updates itself."""
 import glob
+import json
 import os
 import shutil
 import sys
@@ -149,8 +153,34 @@ def make_icon(path):
     os.remove(png)
 
 
+def unconfirmed(compat, games):
+    """the games compat.json calls Complete that have no confirmed shader list under games (shaderlogs.py --confirm): built without it, such a
+    game could lose shaders the build it was confirmed with had"""
+    def listed(slug):
+        path = os.path.join(games, slug, 'shader_logs', shaderlogs.CONFIRMED)
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    return sorted(g['slug'] for k, g in compat.items() if not k.startswith('_') and g['status'] == 'Complete' and not listed(g['slug']))
+
+
+def release_tag(argv, version):
+    """the tag after --release, or '' without one; an exit if it isn't one of this version's"""
+    if '--release' not in argv:
+        return ''
+    import updater
+    tag = (argv[argv.index('--release') + 1:] + [''])[0]
+    if not updater.tag_key(tag) or not tag.startswith(f'builder-{version}-'):
+        sys.exit(f'--release takes this build\'s tag, like builder-{version}-beta-2026-11-13')
+    return tag
+
+
 def main():
     import PyInstaller.__main__
+    import gui
+    release = release_tag(sys.argv, gui.VERSION)
+    with open(os.path.join(HERE, 'compat.json'), encoding='utf-8') as f:
+        loose = unconfirmed(json.load(f), os.path.join(ROOT, 'games'))
+    if loose:
+        sys.exit('Complete in compat.json, but with no confirmed shader list (shaderlogs.py --confirm): ' + ', '.join(loose))
     os.makedirs(WORK, exist_ok=True)
     ico = os.path.join(WORK, 'icon.ico')
     make_icon(ico)
@@ -158,6 +188,7 @@ def main():
             '--workpath', WORK, '--specpath', WORK, '--icon', ico, '--paths', HERE,
             '--add-data', f'{os.path.join(HERE, "ui")}{os.pathsep}ui',
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
+            '--add-data', f'{os.path.join(HERE, "faq.json")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "icon.png")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "bin", "makerom.exe")}{os.pathsep}bin',
             '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'covers', '--hidden-import', 'cia_to_decrypted_3ds']
@@ -170,7 +201,6 @@ def main():
     freed = prune(os.path.join(OUT, NAME, '_internal', 'PySide6'))
     engine = bundle_engine(os.path.join(OUT, NAME, 'engine'))
     print(f'{NAME}: {os.path.join(OUT, NAME, NAME + ".exe")} ({freed >> 20} MB of unused Qt left out, engine {engine >> 20} MB)')
-    import gui
     app = os.path.join(OUT, NAME)
     with open(os.path.join(HERE, 'app_readme.txt'), encoding='utf-8') as f:
         readme = f.read().replace('{version}', gui.VERSION)
@@ -185,12 +215,16 @@ def main():
     if leaked:  # keys and console dumps are each user's own: an app carrying one must never ship
         sys.exit('The app holds files only a user may supply, so it was not packed:\n  ' + '\n  '.join(leaked))
     shutil.copyfile(os.path.join(app, 'engine', 'stamp.txt'), os.path.join(app, '_internal', 'stamp.txt'))  # app.py: one version, not two mixed
+    if release:  # updater.py: the release this app is, which an older app checks before it takes it
+        with open(os.path.join(app, '_internal', 'release.txt'), 'w') as f:
+            f.write(release)
     files = sum(len(fs) for _, _, fs in os.walk(app)) + 1  # and files.txt, which app.py checks by that a tester unzipped the whole app
     with open(os.path.join(app, '_internal', 'files.txt'), 'w') as f:
         f.write(str(files))
     for old in glob.glob(os.path.join(OUT, '*.zip')):  # one zip, this build's
         os.remove(old)
-    z = shutil.make_archive(os.path.join(OUT, f'{NAME} {gui.VERSION} beta'), 'zip', OUT, NAME)
+    # a release's zip is named after its tag, which is how the updater knows the build (updater.NAMED), with no spaces for GitHub to change
+    z = shutil.make_archive(os.path.join(OUT, release.replace('builder-', '3Dii-U-Builder-', 1) if release else f'{NAME} {gui.VERSION} beta'), 'zip', OUT, NAME)
     print(f'for testers: {z} ({os.path.getsize(z) >> 20} MB)')
 
 

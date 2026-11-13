@@ -78,6 +78,31 @@ def use_engine(root):
     os.environ.setdefault('THREEDII_ROOT', root)  # pipeline.py reads these, and the build's own processes inherit them
 
 
+PYTHON_FLAGS = ('-B', '-E', '-I', '-O', '-OO', '-P', '-S', '-s', '-u')  # python.exe's own options, which the build's scripts pass along
+
+
+def hand_over():
+    """An app with a downloaded update opens that version's window instead (updater.py), so the folder the person unzipped is never changed.
+    Holding Shift while it starts opens this one. Done before use_engine(), which would otherwise start the work folder's compiled cache
+    over for this engine at every start, and the newer version's again after it."""
+    if not FROZEN:
+        return
+    try:
+        import ctypes
+        import updater
+        args = sys.argv[1:]
+        while args and args[0] in PYTHON_FLAGS:
+            args = args[1:]
+        if updater.may_hand_over(args, os.environ) and not ctypes.windll.user32.GetAsyncKeyState(0x10) & 0x8000:
+            exe = updater.current(updater.own_tag())
+            if exe and updater.hand_over(exe, sys.argv[1:]):
+                sys.exit(0)
+        updater.hold_version()  # a downloaded version, in any mode: its folder mustn't be cleared away while it runs
+    except Exception:  # an update must never stop the app starting as itself
+        pass
+
+
+hand_over()
 use_engine(find_root())
 
 
@@ -101,14 +126,16 @@ def run_script(argv):
     runpy.run_path(argv[0], run_name='__main__')
 
 
-PYTHON_FLAGS = ('-B', '-E', '-I', '-O', '-OO', '-P', '-S', '-s', '-u')  # python.exe's own options, which the build's scripts pass along
-
-
 def headless(work):
     """The build and the scripts write to the window's log, never to the screen: an error is printed and ends the process. Left alone, the
     standalone app would show it in a box of its own and wait there for someone to close it, with the build hanging behind it."""
     try:
         quiet_children()
+        # The window reads this as UTF-8. Left to Windows, Python writes the PC's own code page, and the first character that lacks (the ★
+        # in Kumamon's name, the ™ in Street Fighter's: two testers, 2026-11-11) ends the build with an encoding error.
+        for s in (sys.stdout, sys.stderr):
+            if s:
+                s.reconfigure(encoding='utf-8', errors='backslashreplace')
         work()
     except SystemExit:
         raise
@@ -150,10 +177,19 @@ MISSING = ('Some of its files are missing.\n\nUnzip the whole zip again, into a 
            'folders and skips files there. If it happens again, check whether your antivirus removed any of them.')
 MIXED = ('This folder holds parts of two versions of the app.\n\nDelete the folder, then unzip the whole new zip into an empty one: don\'t unzip '
          'a new version over an old one. Your games and settings are kept elsewhere and stay.')
+DAMAGED = ('The downloaded update is damaged, so it was set aside.\n\nStart 3Dii U Builder again: the version you had opens, and can download '
+           'the update afresh.')
 
 
 def cannot_start(why=MISSING):
-    """said before Qt loads, as Qt may be what's missing"""
+    """said before Qt loads, as Qt may be what's missing. A downloaded update that is damaged is set aside, so the app the person unzipped
+    opens next time instead of handing over to it again."""
+    try:
+        import updater
+        if FROZEN and updater.runs_from_home() and updater.set_aside():
+            why = DAMAGED
+    except Exception:  # the damage may include updater.py itself
+        pass
     import ctypes
     ctypes.windll.user32.MessageBoxW(None, why, '3Dii U Builder can\'t start', 0x10)
     sys.exit(1)

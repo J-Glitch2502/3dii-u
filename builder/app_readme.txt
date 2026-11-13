@@ -11,14 +11,17 @@ WHAT YOU NEED
 - For encrypted dumps: boot9.bin and seeddb.bin from your own 3DS, from GodMode9. Put them in C:\Users\<you>\.3ds, or choose their folder in the builder.
   - boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y, then open [0:] SDCARD, press Y again and choose Copy.
   - seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card.
-  Each row under "Your files" in the builder has a "How do I get this?" button with these steps.
+  Each row under "Your Files" in the builder has an "Info" button with these steps, and the Help page's questions and answers have them too.
 - Your Wii U's otp.bin, from your own console's NAND backup. The game is packed with it. The builder never shows the key and never stores it.
 - A Wii U with Aroma and WUP Installer GX2, and its SD card.
-- Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in and the
-  parts Miis are drawn from. Games load them from the console, so dumps don't have them, and Mii games stop without them. From your own 3DS, either way:
+- Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in, the
+  parts Miis are drawn from and the list of bad words games check typed names against. Games load them from the console, so dumps don't
+  have them: Mii games stop without the Mii parts, and Tomodachi Life without the word list. From your own 3DS, either way:
   - Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.
-  - GodMode9: in [1:] SYSNAND CTRNAND > title, highlight the 0004009b folder and press Y, then open [0:] SDCARD, press Y again and choose Copy (not Move).
-    In the builder, press "Folder..." next to "3DS system files" and choose that 0004009b folder.
+  - GodMode9: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and 000400db (the word list).
+    Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then copy 000400db the same way, next to it.
+    In the builder, press "Folder" next to "3DS System Files" and choose that 0004009b folder. Copied this way the files are
+    encrypted, so the builder needs your 3DS keys (boot9.bin) to read them.
   The builder also looks in Citra's user folder, and in Downloads, Desktop and Documents. It copies them once and keeps them for every game after.
 
 
@@ -27,9 +30,9 @@ GETTING STARTED
 1. Unzip the whole "3Dii U Builder" folder to a short path such as C:\Games. Keep the engine folder next to the exe, and don't run it from inside the zip.
    If Windows says a path is too long while unzipping, or the builder says files are missing, unzip it again into a shorter folder.
 2. Open "3Dii U Builder.exe". This beta isn't signed, so Windows may say it "protected your PC": click "More info", then "Run anyway".
-3. Click the empty game card (or press Ctrl+O) and choose your dump. The builder then asks about the game's update, DLC and mods.
-4. Under "Your files", each dot turns green once the builder has that file.
-5. Under "Put it on", choose your SD card or a folder, then press "Build it!".
+3. Click the big "+" tile (or press Ctrl+O) and choose your dump. The builder then asks about the game's update, DLC and mods.
+4. Under "Your Files", each light turns cyan once the builder has that file.
+5. Under "Put it on", choose your SD card or a folder, then press "Build It!".
    Big games take a while: the game's code is recompiled for the Wii U and its shaders are compiled ahead of time.
    The first build also compiles the builder's own runtime, so it takes a few minutes longer than the rest.
 6. Put the SD card in the Wii U and install the game with WUP Installer GX2.
@@ -38,10 +41,13 @@ GETTING STARTED
 
 WHICH GAMES WORK
 
-- "Plays on Wii U": the games tested on a real Wii U. The badge shows when your dump is the same edition that was tested:
-  Tomodachi Life, New Super Mario Bros. 2, Paper Mario: Sticker Star, Mario & Luigi: Dream Team, Mario & Luigi: Paper Jam,
+- "Complete on Wii U": finished. Confirmed on a real Wii U to run as the game should, with no known problems left:
+  New Super Mario Bros. 2.
+- "Plays on Wii U": tested on a real Wii U, and it plays; some things may still be rough:
+  Tomodachi Life, Paper Mario: Sticker Star, Mario & Luigi: Dream Team, Mario & Luigi: Paper Jam,
   Mario & Luigi: Superstar Saga + Bowser's Minions, Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey,
-  Professor Layton and the Azran Legacy, and Professor Layton and the Miracle Mask. They were tested without updates.
+  Professor Layton and the Azran Legacy, and Professor Layton and the Miracle Mask.
+  Either badge shows when your dump is the same edition that was tested. They were tested without updates.
 - "Runs in Cemu" (the Games page): built with this builder and played in the Cemu emulator, not yet on a real Wii U:
   Mario Kart 7, The Legend of Zelda: A Link Between Worlds, Metroid: Samus Returns, Kirby: Triple Deluxe, Rhythm Heaven Megamix,
   Phoenix Wright: Ace Attorney Trilogy, Animal Crossing: New Leaf, Kid Icarus: Uprising, Super Mario 3D Land and Miitopia.
@@ -59,9 +65,20 @@ IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
   so the next time is smooth.
 
 
+UPDATES
+
+- When it starts, the builder asks GitHub for the list of its releases; it only downloads the one you choose. If a newer one is out, the
+  Build page offers it; Help > Check for updates asks again at any time.
+- Press "Update" and the new version is downloaded into the builder's data folder, %LOCALAPPDATA%\3Dii U Builder\app. It opens from then
+  on: at once with "Restart now", or the next time you start the builder. The folder you unzipped is never changed.
+- If an update goes wrong: hold Shift while starting the builder to open the copy you unzipped, or delete the folder
+  %LOCALAPPDATA%\3Dii U Builder\app and the copy you unzipped runs again. A version that fails to start is set aside by itself, and
+  Help > Check for updates offers it again.
+
+
 REPORTING A PROBLEM
 
-- If a build fails, press "Show details" and copy what it says.
+- If a build fails, press "Details" and copy what it says.
 - Say which game it is (title and region), and whether you added an update, DLC or a mod.
 - For a game that goes wrong on the Wii U, say where in the game it happens and what you saw.
 
@@ -80,7 +97,8 @@ WHAT STAYS ON YOUR PC
 - The games you build are made from your dumps and your keys: don't share them.
 
 - When you pick a game, the builder downloads its cover art from GameTDB (art.gametdb.com) for the game's start-up screens and Wii U Menu icon.
-  It sends only the four letters of the game's product code. Under Extras, "Banner art" lets you choose your own picture, or remove it to use the game's icon.
+  It sends only the four letters of the game's product code. The "Art" pill on the game's tile lets you choose your own picture, or "Remove art" to use the game's icon.
+- The builder asks GitHub for the list of its releases, and downloads one from there only when you press "Update".
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
 Third-party notices.txt lists the open-source software it carries.

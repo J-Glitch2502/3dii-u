@@ -110,31 +110,36 @@ To build the standalone app, which bundles Python, Qt, devkitPPC and the shader 
 
     python builder/make_app.py
 
-It writes `builder/dist/3Dii U Builder/`, and a zip of it for testers.
+It writes `builder/dist/3Dii U Builder/`, and a zip of it for testers. A build that will be published takes
+`--release <tag>`, the tag of its GitHub release (`builder-1.0-beta-2026-11-13`): the app carries it, and that is how an
+app already out there knows a newer release and takes it (`builder/updater.py`, which lists what a release must keep).
 
 ## Checking a change
 
-These need no game files and run in seconds:
+This needs no game files and runs in under a minute. Run it before every commit:
 
-    python builder/test_app.py
-    python builder/test_shaderlogs.py
-    python builder/selftest.py
+    python tools/selftest.py
 
-`builder/selftest.py` builds a synthetic DLC in memory and runs it through the dump reader. The other two check the
-app's compiled-cache reset and the shader-log fingerprint and recipe round trips.
+It runs every check of that kind: the small PC tests of the Wii U port's rules (`tools/test_*.cpp`), the tools' own
+self-checks, and the builder's tests (`builder/test_*.py`, `builder/selftest.py`).
 
-This one needs your own dumps and Cemu, and checks the ports end to end:
+These need your own dumps and Cemu, and check a game end to end:
 
     python tools/check_ports.py [game ... | all]
+    python tools/check_ports.py --cold [game ...]
 
-For each game, it builds the code, shaders and title, checks the RPX against what the console's loader wants, then
-plays a scripted route in a private Cemu copy on a blank save and restarts on what that saved. A game fails on a crash,
-missed code, a vertex shader that wasn't compiled, or a save problem. Cemu runs off-screen, so it doesn't take over
-your desktop.
+For each game, the first builds the code, shaders and title, checks the RPX against what the console's loader wants,
+then plays a scripted route in a private Cemu copy on a blank save and restarts on what that saved. A game fails on a
+crash, missed code, a vertex shader that wasn't compiled, a save problem, a gap in the sound, or pictures unlike its
+good run's. Every run has the Miis a console would have, made-up ones (an account's, and two in Mii Maker), and a game
+that reads Mii Maker fails if they don't all arrive there: a game that takes Miis must take the Wii U's, so look at
+what it shows for them. Cemu runs off-screen, so it doesn't take over your desktop. `--cold` builds a game of
+`games/sources.json` as someone's first build of it, with none of this PC's lists of its code and shaders, and holds
+it to the same pictures.
 
-Run it on the games you have whenever you change the runtime, the recompiler or `port/wiiu`. Cemu has no real GPU and
-forgives things a console doesn't (see the lessons at the end of ARCHITECTURE.md), so say in your pull request whether
-you also tried a console.
+Run both on the game you're working on before every commit that changes the runtime, the recompiler or `port/wiiu`,
+look at the pictures they keep, and say in the commit what you ran. Cemu has no real GPU and forgives things a console
+doesn't (see the lessons at the end of ARCHITECTURE.md), so say in your pull request whether you also tried a console.
 
 ## Trying it on a console
 

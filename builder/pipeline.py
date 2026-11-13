@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -200,8 +199,13 @@ def main():
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
     ap.add_argument('--art', help="a picture (the cover art, say) for the start-up screens and the Wii U Menu icon; the game's own icon otherwise")
     ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode (build3ds.Game.mixed)')
+    ap.add_argument('--cold', action='store_true', help="for the checks: build it as a game nobody has built before, with none of this PC's lists of "
+                                                        'its code and shaders (tools/check_ports.py --cold)')
     ap.add_argument('--jobs', type=int, default=max(1, (os.cpu_count() or 2) // 2))
     a = ap.parse_args()
+    for s in (sys.stdout, sys.stderr):  # run from a console, whose code page may lack a character of a game's name: shown escaped, not fatal
+        if s:
+            s.reconfigure(errors='backslashreplace')
     if sys.platform != 'win32':
         fail('Building on Linux isn\'t ready yet: this version builds on Windows.')
     if not (a.card or a.out):
@@ -236,10 +240,12 @@ def main():
         fail(str(e))
     update = next((d for d in extras if d.kind == 'update'), None)
     dlc = next((d for d in extras if d.kind == 'dlc'), None)
-    known = profile_for(game)
+    known = None if a.cold else profile_for(game)
     info = dict(known or derived(game))
     if update:
         info['slug'] += f'_v{update.version}'
+    if a.cold:
+        info['slug'] += '_cold'  # work folders of its own, and no list of entries under that name
     print(f'{info["name"]} ({game.title_id:016X}): {info["status"]}' + (f', update v{update.version}' if update else '') + (', with DLC' if dlc else '')
           + (f', {len(mod_list)} mod{"s" * (len(mod_list) > 1)}' if mod_list else ''), flush=True)
 
@@ -285,15 +291,22 @@ def main():
     if not dumps.have_system_archives(archives):  # a Miitopia built without them stopped on the console with FS "not found" (Nov 9)
         fail('The 3DS system files are missing: the Mii data, without which Mii games stop, and the shared font. Give --emulator Azahar\'s '
              'user folder (after its File > Set Up System Files) or the 0004009b folder GodMode9 copies off your 3DS (title, in CTRNAND).')
+    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:  # and what this game's own code names of them (dumps.archives_named)
+        lacking = [t for t in dumps.archives_named(f.read()) if not os.path.isfile(os.path.join(archives, t + '.romfs'))]
+    if lacking:
+        t = lacking[0]
+        fail(f'This game reads {dumps.ARCHIVE_NAMES.get(t, "a font")} from the 3DS itself, and your 3DS system files don\'t have it: the game would '
+             f'stop as it starts. It is in the {t[:8]} folder: with GodMode9, copy that folder off your 3DS too ([1:] SYSNAND CTRNAND > title), '
+             f'next to the 0004009b one, and choose the folder again under "3DS system files". Azahar\'s File > Set Up System Files brings it too.')
     # what earlier runs of a game learned (render states it uses; code only static analysis misses) goes with it, if the code is the same.
     # An untested game's live under its own slug (games/g_<code>/shader_logs): a run's shader_misses.bin put there is compiled ahead next time.
     logs = os.path.join(ROOT, 'games', (known or derived(game))['slug'], 'shader_logs')
-    if os.path.isdir(logs):
+    if os.path.isdir(logs) and not a.cold:
         os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
         for f in os.listdir(logs):
             if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
                 shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
-    for f in console_learned(info, (known or derived(game))['slug'], a.card):
+    for f in [] if a.cold else console_learned(info, (known or derived(game))['slug'], a.card):
         os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
         shutil.copyfile(f, os.path.join(game_dir, 'shader_logs', os.path.basename(f)))
 
@@ -315,6 +328,8 @@ def main():
     if not os.path.exists(b3.BIN + 'gcc.exe'):
         fail('The build tools aren\'t installed: see builder/README.md.')
     g = b3.Game(info['slug'], game_dir)  # the recipe every game gets, read from this game's own code (build3ds.py)
+    if a.cold:
+        g.twin = derived(game)['slug']  # its own folder in games/ is no other game's: nothing of it is borrowed
     if a.mixed:
         g.mixed()
     if g.mode == 'safe':
@@ -371,7 +386,7 @@ def main():
         fail(f'The build stopped: {e}')
     sys.stdout = sys.__stdout__
     learned, dvlb = os.path.join(ROOT, 'games', derived(game)['slug'], 'shader_logs'), os.path.join(game_dir, 'shader_logs', 'dvlb.bin')
-    if not known and WORK == ROOT and os.path.isfile(dvlb):  # its vertex programs, where its runs' logs go: make_app.py fingerprints the
+    if not known and not a.cold and WORK == ROOT and os.path.isfile(dvlb):  # its vertex programs, where its runs' logs go: make_app.py fingerprints the
         os.makedirs(learned, exist_ok=True)  # shipped logs' vertex records by them (shaderlogs.py), and ships no dvlb.bin
         shutil.copyfile(dvlb, os.path.join(learned, 'dvlb.bin'))
 
@@ -387,10 +402,6 @@ def main():
 
     PROGRESS.stage('Packing the WUP')
     wup = os.path.join(a.out or game_dir, info['folder'])
-    for _ in range(120):  # the packer holds the whole game in memory
-        if b3.free_mb() > 1500:
-            break
-        time.sleep(15)
     shutil.rmtree(wup, ignore_errors=True)
     r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'pack_game_wup.py'), a.otp, os.path.join(out, 'title'), wup], cwd=ROOT,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')

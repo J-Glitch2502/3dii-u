@@ -46,7 +46,6 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "loader.h"
-#include "frame_cap.h"
 #include "present_rule.h"
 #include "shader_compile.h"
 #include "shadergen.h"
@@ -608,10 +607,6 @@ struct Surface {
     // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
     // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
     bool in_list = false, sampled = false, was_sampled = false;
-    // for the thirty-a-second cap (frame_left_out): the screens its picture has been shown on (1 the top, 2 the bottom, 3 both), whether
-    // the game has cleared it since its last transfer, and for how many frames in a row it has
-    u8 lcds = 0, steady = 0;
-    bool cleared = false;
     u32 bytes() const {
         const u32 bpp = depth ? (fmt == 0 ? 2 : fmt == 2 ? 3 : 4) : (fmt == 0 ? 4 : fmt == 1 ? 3 : 2);
         return w * h * bpp;
@@ -625,39 +620,6 @@ Surface *cur_color, *cur_depth;
 // as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
 inline bool cpu_reads(const Surface &s) { return !s.depth && s.addr >= mem::FCRAM_PADDR && s.w * s.h < 240 * 320; }
 std::vector<Surface *> read_targets;  // those the list being run has drawn to, in order
-
-// Thirty frames a second: every other frame of a game that makes sixty is left undrawn. frame_cap.h has the rule, which frames and why;
-// here is what it is told about a screen's surface, and where its answer is used: nothing is drawn to a surface whose frame is left out
-// (gx2_skip_draw, metal_flush), its clear is dropped (gx2_memory_fill), and its transfer shows nothing (metal_defer_transfer).
-// Only a picture the game is sure to draw again is ever left out: a surface both screens are drawn in has to be drawn afresh for each
-// (New Super Mario Bros. 2), and a screen's own surface counts while the game has cleared it in each of its last eight frames, as what is
-// wiped every frame is drawn every frame.
-FrameCap cap;
-// Not for a game that puts its top screen together in its LCD buffer with texture copies (show_lcd_from_memory): Luigi's Mansion: Dark Moon
-// draws each half of it in turn, and with every other frame left out one half was never drawn, so the TV showed the same picture twice, one over
-// the other (Cemu, 2026-11-13). Such a game turns the cap off for good (lcd_composed). "set cap 0|1" over the network.
-bool use_cap = true, lcd_composed;
-inline bool cap_on() { return use_cap && !lcd_composed; }
-
-// at a screen's transfer: true if the frame it ends was left out
-bool frame_left_out(Surface &s, int which) {
-    s.lcds |= 1 << which;
-    if (!cap_on()) return false;
-    const bool shared = s.lcds == 3;
-    if (which == 0 || !shared) {  // a bottom screen drawn in the top's surface goes by the top's frames
-        s.steady = s.cleared ? (u8)std::min<u32>(s.steady + 1u, 255) : 0;
-        s.cleared = false;
-    }
-    return cap.frame_ends(which, shared, shared || s.steady >= 8, OSTicksToMicroseconds((u64)OSGetSystemTime()));
-}
-
-// the screen's surface a draw is for, if the frame being made for that screen is left out
-Surface *left_out(u32 color_addr, u32 w, u32 h) {
-    if (!cap_on() || !cap.marking()) return nullptr;
-    for (auto &s : surfaces)
-        if (s->addr == color_addr && s->w == w && s->h == h && !s->depth && cap.drops(s->lcds)) return s.get();
-    return nullptr;
-}
 GX2ContextState *ctx;
 GX2DepthBuffer scratch_depth;
 bool frame_started;
@@ -1317,8 +1279,8 @@ void relieve_memory(u32 wanted) {
         const u64 m = (*it)->spare ? 2ull * (*it)->mem : (*it)->mem;
         tex_memory -= m;
         freed += m;
-        free((*it)->t.surface.image);
-        free((*it)->spare);
+        mem::host_free((*it)->t.surface.image);
+        mem::host_free((*it)->spare);
         tex_index.erase(tex_key((*it)->addr, (*it)->w, (*it)->h, (*it)->fmt, (*it)->levels));
         textures.erase(it);
         if (freed > 4ull * wanted && freed > (8u << 20)) break;
@@ -1327,14 +1289,14 @@ void relieve_memory(u32 wanted) {
         (u32)(vtx_cache_size >> 10));
 }
 
-void evict_textures() {
-    while (tex_memory > TEX_MEMORY_LIMIT && !textures.empty()) {
+void evict_textures(u64 keep = TEX_MEMORY_LIMIT) {
+    while (tex_memory > keep && !textures.empty()) {
         auto it = std::min_element(textures.begin(), textures.end(), [](const auto &a, const auto &b) { return a->last_use < b->last_use; });
         if ((*it)->last_use + 2 >= use_counter) break;  // the GPU may still be reading it
         draw_done();
         tex_memory -= (*it)->spare ? 2ull * (*it)->mem : (*it)->mem;
-        free((*it)->t.surface.image);
-        free((*it)->spare);
+        mem::host_free((*it)->t.surface.image);
+        mem::host_free((*it)->spare);
         tex_index.erase(tex_key((*it)->addr, (*it)->w, (*it)->h, (*it)->fmt, (*it)->levels));
         textures.erase(it);
     }
@@ -1351,7 +1313,7 @@ bool replace_image(Tex &e) {
         return false;
     }
     if (!e.spare) {
-        e.spare = memalign(f.alignment, e.mem);
+        e.spare = mem::host_alloc(f.alignment, e.mem);
         if (!e.spare) {
             draw_done();
             return false;
@@ -1529,7 +1491,15 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
     GX2CalcSurfaceSizeAndAlignment(&f);
     GX2InitTextureRegs(&e.t);
     e.mem = f.imageSize + f.mipmapSize;
-    f.image = gpu_memalign(f.alignment, e.mem);
+    f.image = mem::host_alloc(f.alignment, e.mem);
+    if (!f.image) {  // the cache's limit is a budget, not what's left: half of what no queued draw reads goes, and it's asked again
+        evict_textures(tex_memory / 2);
+        f.image = mem::host_alloc(f.alignment, e.mem);
+    }
+    if (!f.image) {  // still none: the vertex cache and the textures no draw of this frame reads go too (relieve_memory)
+        relieve_memory(e.mem);
+        f.image = mem::host_alloc(f.alignment, e.mem);
+    }
     if (!f.image) FATAL("out of memory for a %u byte texture\n", e.mem);
     junk(f.image, e.mem, 2);
     if (e.gpu) for_gpu_writes(f.image, e.mem);  // the CPU decoder's writes are flushed as it goes; the GPU's decode isn't
@@ -2136,11 +2106,15 @@ void set_fragment(const DrawState &ds, bool uber) {
 }
 
 // The vertex uniform block: f[96], uDraw, uInt[4] (the integer uniforms: loop counts, starts and steps, read by the shader's loops since 11-06),
-// then the outline's two vectors when a draw has them (shadergen.cpp)
+// then the outline's two vectors when a draw has them (shadergen.cpp). An integer uniform has three parts, so uInt[0].w is free: it holds the
+// bool uniforms, a bit each, for the shaders that read them as they run (kVsBoolsMade).
 constexpr u32 VS_BLOCK_WORDS = (96 + 1 + 4) * 4;
 inline void put_vs_ints(u32 *u) {
     for (u32 n = 0; n < 4; n++)
         for (u32 c = 0; c < 4; c++) u[388 + n * 4 + c] = __builtin_bswap32((u32)g.vs.i[n][c]);
+    u32 bools = 0;
+    for (u32 i = 0; i < 16; i++) bools |= (u32)g.vs.b[i] << i;
+    u[388 + 3] = __builtin_bswap32(bools);
 }
 
 // the vertex program's uniforms; often the same as for the last draw
@@ -2148,10 +2122,12 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
     static V4 last_f[96];
     static float last_depth[2];
     static u8 last_i[4][4];
+    static bool last_b[16];
     static u32 *last;
     static u32 last_seg = ~0u;
     const float dp[2] = {ds.depth_scale, ds.depth_offset};
-    if (!(last && last_seg == ring_seg && !memcmp(last_f, f, sizeof last_f) && !memcmp(last_depth, dp, sizeof dp) && !memcmp(last_i, g.vs.i, sizeof last_i))) {
+    if (!(last && last_seg == ring_seg && !memcmp(last_f, f, sizeof last_f) && !memcmp(last_depth, dp, sizeof dp) && !memcmp(last_i, g.vs.i, sizeof last_i) &&
+          !memcmp(last_b, g.vs.b, sizeof last_b))) {
         constexpr u32 size = VS_BLOCK_WORDS * 4;
         u32 *u = (u32 *)ring_alloc((size + 255) & ~255u, 256);
         const u32 *src = (const u32 *)f;
@@ -2164,6 +2140,7 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
         memcpy(last_f, f, sizeof last_f);
         memcpy(last_depth, dp, sizeof dp);
         memcpy(last_i, g.vs.i, sizeof last_i);
+        memcpy(last_b, g.vs.b, sizeof last_b);
         last = u;
         last_seg = ring_seg;
     }
@@ -2302,6 +2279,18 @@ bool gx2_draw(const Gx2Draw &d) {
     }
     const u64 key = vk.key;
     auto it = vs_table.find(key);
+    if (it == vs_table.end()) {
+        // No shader for this draw's own set of bools. Where its entry reads more of them than a build makes every set of, the pack has one
+        // that reads them as it runs (kVsBoolsMade), and this draw's key gets that shader.
+        if (const u32 open = vs_open_bools(d.prog, d.entry)) {
+            const auto any = vs_table.find(vs_variant_key(d.prog, d.entry, g.vs.b, d.slot_src, open));
+            if (any != vs_table.end() && any->second.index != MISSED) {
+                if (!any->second.shader) prepare_vs(any->second);
+                const VsEntry shared = any->second;
+                it = vs_table.emplace(key, shared).first;
+            }
+        }
+    }
     if (it == vs_table.end()) {
         vs_table[key];  // log it once
         vs_table.find(key)->second.index = ~0u;
@@ -2457,23 +2446,25 @@ bool gx2_draw(const Gx2Draw &d) {
                 const u8 *src = pptr(d.base + x.lo);
                 if (!src) return true;
                 // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later.
-                // The copy is kept (vtx_cached) until the game says it wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices,
-                // and copying each draw's arrays again took 20 to 50 MB a frame.
-                const u32 count = maxv - minv + 1, bytes = vertex_array_bytes(x, count);
+                // In steps of a multiple of 4 bytes, which is all a real GPU takes (vertex_arrays.h). The copy is kept (vtx_cached) until the game says it
+                // wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices, and copying each draw's arrays again took 20 to 50 MB a frame.
+                const u32 count = maxv - minv + 1, bytes = gpu_array_bytes(x, count), step = gpu_stride(x.stride);
                 st_attr_verts += count;
                 st_attr_bytes += bytes;
                 st_attr_streams++;
                 const u8 *copy = (const u8 *)vtx_cached(d.base + x.lo + x.stride * minv, src + x.stride * minv, x.stride, count, 0x80, bytes,
-                                                        [&](void *out, const u8 *from) { memcpy(out, from, bytes); }, bytes);
+                                                        [&](void *out, const u8 *from) { copy_vertex_array((u8 *)out, from, x, count); },
+                                                        vertex_array_bytes(x, count));
                 bound = (s32)buf++;
                 // addressed as if it held vertex 0 too, as the indices count from there
-                GX2SetAttribBuffer((u32)bound, (maxv + 1) * x.stride + 64, x.stride, copy - minv * x.stride);
+                GX2SetAttribBuffer((u32)bound, (maxv + 1) * step + 64, step, copy - minv * step);
             }
             GX2AttribStream s{};
             s.location = vs.location[r];
             s.buffer = (u32)bound;
-            const u32 lane = at->fmt < 2 ? at->offset & 3 : 0;  // bytes: the word they're in is fetched, and they start at this byte of it
-            s.offset = at->offset - lane - x.lo;
+            // the word an attribute's first component lies in is fetched from its start, and the attribute begins at this component of it
+            const u32 lane = fetch_lane(*at);
+            s.offset = fetch_offset(*at) - x.lo;
             // Cemu can't fetch one little-endian float: its sprites all got corner 0. Two do the same here, and the mask drops the second.
             s.format = at->fmt == 3 && at->elems == 1 ? GX2_ATTRIB_FORMAT_FLOAT_32_32 : attr_format(at->fmt, at->fmt < 2 ? 4 : at->elems);
             s.type = GX2_ATTRIB_INDEX_PER_VERTEX;
@@ -2547,7 +2538,8 @@ bool gx2_draw(const Gx2Draw &d) {
                                                       [&](void *out, const u8 *src) {
                 u32 *dst = (u32 *)out;
                 for (u32 v = 0; v < count; v++, src += src_stride) {
-                    for (u32 c = 0; c < elems; c++) *dst++ = ((const u32 *)src)[c];
+                    memcpy(dst, src, elems * 4);  // from wherever the game keeps them, a multiple of 4 or not
+                    dst += elems;
                     if (elems == 1) *dst++ = 0;
                 }
             });
@@ -2603,7 +2595,7 @@ void gx2_flush_cpu_batch() {
 }
 
 void metal_flush(const RTConfig &rt, const MBatch &mb) {
-    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80) || left_out(rt.color_addr, rt.w, rt.h)) return;
+    if (mb.segs.empty() || !rt.color_addr || !pptr(rt.color_addr) || (rt.color_fmt & 0x80)) return;
     // Textures first: a decode takes ring memory of its own, megabytes for a large one, and the batch's vertices mustn't already be lying in a
     // segment that the decodes go on to leave behind
     for (const MSeg &seg : mb.segs)
@@ -2794,13 +2786,7 @@ bool gx2_memory_fill(u32 start, u32 end, u32 value, u32 control) {
         if (size == 240 * 320 * 4 || size == 240 * 320 * 3) left_done = false;  // on to the bottom screen, so no right eye this time
         else gx2_skip_pass = gx2_skip_copies = true;
     }
-    bool left = false;  // the clear of a screen's frame that isn't drawn; a clear also says the game draws that screen afresh (frame_left_out)
-    for (auto &s : surfaces)
-        if (s->lcds && !s->depth && s->addr == start && end - start >= s->bytes() && end - start < s->bytes() + 64) {
-            s->cleared = true;
-            left |= cap_on() && cap.drops(s->lcds);
-        }
-    if (gx2_skip_pass || left) return true;
+    if (gx2_skip_pass) return true;
     const Fill f{start, end, value, control};
     bool any = false, other = false;
     // A target that lies wholly inside the fill is filled too, as its memory would be: Luigi's Mansion: Dark Moon keeps its top screen's target, its bottom
@@ -3039,6 +3025,23 @@ void dyn_res_update() {
     }
 }
 
+// What goes to a screen is a copy. Aroma draws its notifications, and its plugins their overlays, onto the buffer it is handed on its way
+// to the screen, and the buffers here are kept from frame to frame and only redrawn where and when the game draws: what was written beside
+// the picture stayed for good, letters of a notification in the corner of both screens (four testers, 2026-11-12).
+void to_screen(GX2ColorBuffer *from, GX2ScanTarget target) {
+    static GX2ColorBuffer copies[2];
+    GX2ColorBuffer &to = copies[target == GX2_SCAN_TARGET_DRC];
+    if (to.surface.width != from->surface.width || to.surface.height != from->surface.height || to.surface.format != from->surface.format) {
+        mem::host_free(to.surface.image);
+        to = *from;
+        to.surface.image = mem::host_alloc(to.surface.alignment, to.surface.imageSize);
+        if (!to.surface.image) to.surface.width = 0;  // no memory for it: the buffer itself goes, as before, and it's asked for again next time
+        else GX2InitColorBufferRegs(&to);
+    }
+    if (to.surface.image) GX2CopySurface(&from->surface, 0, 0, &to.surface, 0, 0);
+    GX2CopyColorBufferToScanBuffer(to.surface.image ? &to : from, target);
+}
+
 void present() {
     const OSTime tp = prof_now();
     gt_mark(GT_PRESENT, 0);
@@ -3074,8 +3077,8 @@ void present() {
         ps_seen.clear();
         ps_last_ds = nullptr;
     }
-    GX2CopyColorBufferToScanBuffer(tv_cb, GX2_SCAN_TARGET_TV);
-    GX2CopyColorBufferToScanBuffer(drc_cb, GX2_SCAN_TARGET_DRC);
+    to_screen(tv_cb, GX2_SCAN_TARGET_TV);
+    to_screen(drc_cb, GX2_SCAN_TARGET_DRC);
     restore_context();
     GX2SwapScanBuffers();
     GX2Flush();
@@ -3485,10 +3488,6 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
 }
 
 bool gx2_skip_pass, gx2_skip_copies;
-bool gx2_skip_draw() {
-    const u32 dim = g.regs[R::FB_DIM];
-    return gx2_skip_pass || left_out((g.regs[R::COLOR_ADDR] & 0x0fffffff) * 8, dim & 0x7ff, ((dim >> 12) & 0x3ff) + 1);
-}
 
 // New Super Mario Bros. 2 draws a right eye every frame though the slider says 3D is off, and the Wii U couldn't show it: half its draws.
 // Once a right eye is seen right after a left one, the pass between those transfers isn't drawn. If something else turns up there, it stops.
@@ -3629,9 +3628,7 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
     static u32 shown[2];  // pictures sent to each screen's own buffers
     const bool spare = known_screen < 0 && passed_over(out_paddr, shown[which]);
     if (known_screen >= 0) shown[which]++;
-    // a buffer its LCD has shown ends a frame of that screen's, which may be one that was left out
-    const bool out = known_screen >= 0 && frame_left_out(*s, which);
-    if (!spare && !out) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
+    if (!spare) show_screen(which, &s->tex, flags & 1, (h - first_row - skip_rows - shown_h) / h, (h - first_row - skip_rows) / h, (float)shown_w / in_w);
     last_transfer[spare ? 2 : which] = {s, in_paddr, out_paddr, in_dims, out_dims, flags, out_size};
     return true;
 }
@@ -4087,9 +4084,6 @@ static void show_lcd_from_memory() {
     for (auto &s : surfaces)
         if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride && (!lcd || s->drawn > lcd->drawn)) lcd = s.get();
     if (lcd) {
-        if (!lcd_composed) LOG("[gx2] the top screen is put together in its LCD buffer: no thirty-a-second cap for this game
-");
-        lcd_composed = true;
         if (pa == shown_pa && lcd->drawn == shown_drawn) return;
         shown_pa = pa;
         shown_drawn = lcd->drawn;
@@ -4248,8 +4242,7 @@ bool gfx_set(const char *name, u32 v) {
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
-    else if (!strcmp(name, "gputime")) gt_on = v;
-    else if (!strcmp(name, "cap")) use_cap = v;  // the thirty-a-second cap (frame_cap.h)  // the GPU's own time per pass (gt_mark), in the [prof] lines
+    else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
     else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way

@@ -667,17 +667,21 @@ static void create_gamecoin(const std::string &dir) {
 // Mii Maker's database (CFL_DB.dat, in the same extdata), with the console's own Miis put in, once a boot: games list them as Mii Maker's
 // (Tomodachi Life's import, Mario Kart 7's drivers). Laid out as the games' own Mii library writes it when it's missing, which this
 // matches byte for byte: "CFOG", 100 Mii slots of 0x5C at 0x8, "CFHE" with 3000 empty hidden-Mii entries, a CRC-16 of all of it at 0xC81E
-// (big-endian), then "CFRA" with its own CRC at 0xE4BE. A Mii already there with the same id and console is replaced.
+// (big-endian), then "CFRA" with its own CRC at 0xE4BE. A Mii already there with the same id and console stays where it is, a new one
+// takes the first free place, and each is written naming the place it lies at (page and slot, in its third byte). A 3DS keeps a Mii at
+// the place it names, and games find it again by that: Super Mario 3D Land shows no face on a save file whose Mii names a place where the
+// database holds another Mii. So a Mii keeps its place from one start to the next, whatever else the console gains or loses. The
+// player's own is placed first and always gets a place: with all hundred taken by others, the last.
+static std::vector<int> mii_places;  // where each of console_miis() lies, or -1: every place was taken
 static void sync_mii_db(const std::string &dir) {
     static bool done;
     if (done) return;
     done = true;
-    std::vector<std::array<u8, 0x60>> miis;
-    for (const auto &h : g_host_miis) {
-        std::array<u8, 0x60> m;
-        if (mii_3ds(h, m)) miis.push_back(m);
-    }
+    int mine;
+    const auto &miis = console_miis(&mine);
+    mii_places.assign(miis.size(), -1);
     if (miis.empty()) return;
+    const size_t players = mine < 0 ? 0 : (size_t)mine;  // as player_mii() has it
     const std::string path = dir + "/CFL_DB.dat";
     std::vector<u8> db(0x4BD20, 0);
     bool had = false;
@@ -700,16 +704,21 @@ static void sync_mii_db(const std::string &dir) {
     }
     const std::vector<u8> before(db.begin(), db.begin() + 0xC820);
     u32 placed = 0;
-    for (const auto &m : miis) {
+    for (size_t k = 0; k < miis.size(); k++) {
+        const size_t n = k == 0 ? players : k <= players ? k - 1 : k;  // the player's, then the rest in their order
         int slot = -1, empty = -1;
         for (int i = 0; i < 100 && slot < 0; i++) {
             const u8 *s = &db[8 + i * 0x5C];
-            if (!memcmp(s + 0x0C, &m[0x0C], 10)) slot = i;  // the same Mii: its id and the console that made it
+            if (!memcmp(s + 0x0C, &miis[n][0x0C], 10)) slot = i;  // the same Mii: its id and the console that made it
             else if (empty < 0 && !(s[0x0C] | s[0x0D] | s[0x0E] | s[0x0F])) empty = i;
         }
         if (slot < 0) slot = empty;
-        if (slot < 0) break;  // all 100 slots taken
-        memcpy(&db[8 + slot * 0x5C], m.data(), 0x5C);
+        if (slot < 0 && n == players) slot = 99;
+        if (slot < 0) continue;  // all 100 places taken, by other Miis
+        u8 *s = &db[8 + slot * 0x5C];
+        memcpy(s, miis[n].data(), 0x5C);
+        s[0x02] = (u8)(slot / 10 | slot % 10 << 4);
+        mii_places[n] = slot;
         placed++;
     }
     put_crc(0, 0xC81E);
@@ -720,6 +729,15 @@ static void sync_mii_db(const std::string &dir) {
         fclose(f);
     }
     LOG("[fs] Mii Maker's database: %u Mii%s from this console\n", placed, placed == 1 ? "" : "s");
+}
+
+// A Mii handed out elsewhere (the player's: misc.cpp) has to name the same place as its copy in the database, so the database is
+// brought up to date here if the game hasn't opened it yet: in the folder a console has from the start, as open_archive makes it.
+int mii_maker_place(u32 n) {
+    const std::string dir = g_save_base + "/shared/extdata/00000000f000000b";
+    if (!fsys::exists(dir)) create_gamecoin(dir);
+    sync_mii_db(dir);
+    return n < mii_places.size() ? mii_places[n] : -1;
 }
 
 // ---- fs:USER

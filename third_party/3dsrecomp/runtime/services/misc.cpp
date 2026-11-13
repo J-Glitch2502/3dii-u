@@ -26,15 +26,26 @@ u16 mii_crc16(const u8 *p, size_t n) {
     return c;
 }
 
-// A host Mii as a 3DS game reads it. The Wii U and the 3DS store Miis the same way (version 3: big-endian fields, UTF-16LE names,
-// a CRC-16 over 0x00-0x5D at 0x5E), which is why QR codes go between them, so the bytes go across. If the first four come the other
-// way round (version last), they're turned. Copying is allowed: Tomodachi Life's look-alikes need it.
+// A host Mii as a 3DS game reads it. Two layouts are taken, told apart by where the version (3) stands. The 3DS's own, which a Mii also
+// has wherever the two consoles exchange one (a QR code, an account's Mii on its server): the version first, the ids as they read, every
+// other field little-endian, UTF-16LE names, a CRC-16 over 0x00-0x5D at 0x5E. Its bytes go across. And the one the Wii U's own processor
+// reads (wut's nn/ffl/miidata.h), which is what its software keeps in memory: the version last of the first four bytes, and every 16-bit
+// field from 0x18 on the other way round, but for height and build, a byte each. That one is turned back first. Copying is allowed:
+// Tomodachi Life's look-alikes need it.
 bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
     if (mii_crc16(h.data(), 0x5E) != (u16)(h[0x5E] << 8 | h[0x5F])) return false;  // the host's own copy must check out
     m = h;
-    if (m[0] != 3 && m[3] == 3) std::reverse(m.begin(), m.begin() + 4);
+    if (m[0] != 3 && m[3] == 3) {
+        std::reverse(m.begin(), m.begin() + 4);
+        for (size_t at = 0x18; at < 0x5C; at += 2)
+            if (at != 0x2E) std::swap(m[at], m[at + 1]);  // height and build are a byte each
+    }
     if (m[0] != 3 || !(m[0x0C] | m[0x0D] | m[0x0E] | m[0x0F])) return false;  // not version 3, or no Mii id (an empty slot)
     m[0x01] |= 1;
+    // Born on a console that came after the 3DS (4: a Wii U, as its accounts' Miis are), it is said to be a 3DS's: Super Mario 3D Land's Mii
+    // library, of 2011, counts no such Mii in Mii Maker ("You don't have any Mii characters") and drops its face from a save file at the
+    // next start.
+    if ((m[0x03] >> 4 & 7) > 3) m[0x03] = (u8)((m[0x03] & 0x8F) | 0x30);
     m[0x5C] = m[0x5D] = 0;
     const u16 crc = mii_crc16(m.data(), 0x5E);
     m[0x5E] = (u8)(crc >> 8);
@@ -42,12 +53,47 @@ bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
     return true;
 }
 
-// The player's Mii: the current account's, or a plain male Mii named "Mario" (made-up console and Mii ids and a placeholder MAC;
-// games mostly check the flags and the checksum)
+// The console's Miis as 3DS games read them, the accounts' first and each one once (an account's Mii is in the console's Mii Maker too).
+// Made once, at the first call: the frontend has read the console's Miis before the services start.
+namespace {
+struct ConsoleMiis {
+    std::vector<std::array<u8, 0x60>> list;
+    int mine = -1;  // the current account's
+    ConsoleMiis() {
+        for (size_t i = 0; i < g_host_miis.size(); i++) {
+            std::array<u8, 0x60> m;
+            if (!mii_3ds(g_host_miis[i], m)) continue;
+            size_t at = 0;
+            while (at < list.size() && memcmp(&list[at][0x0C], &m[0x0C], 10)) at++;  // the same Mii: its id and the console that made it
+            if ((int)i == g_host_my_mii) mine = (int)at;
+            if (at == list.size()) list.push_back(m);
+        }
+    }
+};
+}  // namespace
+
+const std::vector<std::array<u8, 0x60>> &console_miis(int *mine) {
+    static const ConsoleMiis miis;
+    if (mine) *mine = miis.mine;
+    return miis.list;
+}
+
+// The player's Mii: the current account's (the console's first, if that account has none a game can take), naming the place it has in
+// Mii Maker's database (fs.cpp). With no Mii on the console at all, a plain male Mii named "Mario" (made-up console and Mii ids and a
+// placeholder MAC; games mostly check the flags and the checksum).
 std::array<u8, 0x60> player_mii() {
+    int mine;
+    const auto &miis = console_miis(&mine);
+    if (!miis.empty()) {
+        const u32 n = mine < 0 ? 0 : (u32)mine;
+        std::array<u8, 0x60> mii = miis[n];
+        if (const int place = mii_maker_place(n); place >= 0) mii[0x02] = (u8)(place / 10 | place % 10 << 4);
+        const u16 crc = mii_crc16(mii.data(), 0x5E);
+        mii[0x5E] = (u8)(crc >> 8);
+        mii[0x5F] = (u8)crc;
+        return mii;
+    }
     std::array<u8, 0x60> m{};
-    if (g_host_my_mii >= 0 && g_host_my_mii < (int)g_host_miis.size() && mii_3ds(g_host_miis[g_host_my_mii], m)) return m;
-    m.fill(0);
     auto be32 = [&](size_t o, u32 v) { m[o] = (u8)(v >> 24); m[o + 1] = (u8)(v >> 16); m[o + 2] = (u8)(v >> 8); m[o + 3] = (u8)v; };
     auto be16 = [&](size_t o, u16 v) { m[o] = (u8)(v >> 8); m[o + 1] = (u8)v; };
     m[0] = 0x03;

@@ -1,0 +1,22 @@
+[
+  {"q": "What do I need?",
+   "a": "Your own 3DS game dump (a .3ds, .cci, .cia, .cxi or .app file, encrypted or decrypted), your Wii U's otp.bin, your 3DS's system files, and for encrypted dumps the keys from your own 3DS (boot9.bin and seeddb.bin). On the console: a Wii U with Aroma and WUP Installer GX2, and its SD card."},
+  {"q": "Where do the 3DS keys come from?",
+   "a": "From GodMode9 on a 3DS with custom firmware. boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y, then open [0:] SDCARD, press Y again and choose Copy. seeddb.bin: press HOME, choose More..., then Build support files; it lands in gm9/out on the SD card. Put both in one folder, .3ds in your user folder by default, or choose their folder under Your Files. Decrypted dumps don't need them."},
+  {"q": "Where does otp.bin come from?",
+   "a": "From your own Wii U with Aroma: run Wii U NAND Dumper, choose Dump OTP, and otp.bin is written to the SD card. If you made a NAND backup when setting up Aroma, otp.bin is in that backup. The game is packed with a key from it so your console installs it. The builder never shows or stores that key. Keep it private: it is unique to your console."},
+  {"q": "What are the 3DS system files?",
+   "a": "A few small files every 3DS keeps in its own memory: the system font, the parts Miis are drawn from, and the list of bad words games check typed names against. Game dumps don't have them. Get them with Azahar (File > Set Up System Files, with the Artic Setup Tool running on your 3DS), or copy the 0004009b and 000400db folders with GodMode9 and choose the 0004009b folder under Your Files. The builder copies them once and keeps them for every game after."},
+  {"q": "Where does the build go?",
+   "a": "Onto your SD card, in its install folder, or into a folder you choose. From a folder, copy it to your SD card's install folder."},
+  {"q": "How do I install it on the Wii U?",
+   "a": "Put the SD card in the Wii U and install the game with WUP Installer GX2. If you installed an earlier build of the same game, delete it first (System Settings > Data Management), then install the new one. Deleting a game deletes its saves."},
+  {"q": "What do \"Complete\", \"Plays\" and \"Untested\" mean?",
+   "a": "Complete: the game is finished: confirmed on a real Wii U to run as it should, with no known problems left. Plays: the game was tested on a real Wii U and plays, though some things may still be rough. Either badge shows when your dump is the same edition that was tested. The games were tested without their updates: with its update a game should play the same, but nobody has checked yet. With a mod the badge stays, and its note says it is untested with a mod. Every other game shows \"Untested\": it may not start, or it may stop partway."},
+  {"q": "A game runs slowly or freezes on the Wii U. What can I do?",
+   "a": "Turn off the SDCafiine and FTP (FTPiiU) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch both off, then start the game again. The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders; the next time is smooth."},
+  {"q": "How does the Builder update itself?",
+   "a": "When it starts, the Builder asks GitHub for the list of its releases; it only downloads the one you choose. If a newer one is out, the Build page offers it. Press Update and the new version is downloaded into the Builder's data folder, %LOCALAPPDATA%\\3Dii U Builder\\app, and opens from then on. The folder you unzipped is never changed."},
+  {"q": "An update went wrong. What can I do?",
+   "a": "Hold Shift while starting the Builder to open the copy you unzipped. Or delete the folder %LOCALAPPDATA%\\3Dii U Builder\\app, and the copy you unzipped runs again. A version that fails to start is set aside by itself, and Check for updates on the Help page offers it again."}
+]

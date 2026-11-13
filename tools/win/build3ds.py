@@ -44,8 +44,10 @@ BIN = DKP + '/devkitPPC/bin/powerpc-eabi-'
 WUT = DKP + '/wut'
 LLVM = 'C:/Program Files/LLVM/bin/'
 MINGW = 'C:/msys64/mingw64'
-GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0, the compiler the console has run: tools/win/build_cafeglsl.ps1
-CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'  # the same compiler as a library for the console: port/wiiu/shader_compile.cpp. Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
+GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0: every shader a build ships comes from it, so its programs are the ones consoles have drawn with (tools/win/build_cafeglsl.ps1)
+# v1.0.0-rc1 as a library for the console (port/wiiu/shader_compile.cpp): a later version with another code generator, whose programs differ from
+# 0.2's (port/wiiu/latte_program.h puts right what a real GPU may not take). Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
+CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'
 HOST_CXX = [LLVM + 'clang++.exe', '--target=x86_64-w64-mingw32', '--sysroot=' + MINGW, '-fuse-ld=lld']
 CRO_BASE = '0x1C000000'  # the slots CRO modules' code gets (tools/recomp/cro.py), in the part of the address space the Wii U port leaves free
 FRAGMENT_VARIANTS = 2000  # how many lit-state combinations a game may get compiled ahead (prepare_logs): more and the build and the shader file grow too big
@@ -55,6 +57,11 @@ MIN_FREE_MB = 2500
 os.environ['DEVKITPRO'] = DKP
 os.environ['DEVKITPPC'] = DKP + '/devkitPPC'
 os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ['PATH']
+# The tools a build runs pick the fragment states to compile ahead in the order Python's sets hand them over (tools/tev_to_log.py), and a
+# new hash seed on every run made every build from the source pick others: 4511, 4517 and 4480 states for NSMB2 from the same logs. The
+# standalone app's Python has its seed fixed at 0, so with the same here a build from the source makes the list the app makes.
+# shortcut: the picks still ride on the seed; order them by content there once every game's list may change at the same time.
+os.environ['PYTHONHASHSEED'] = '0'
 # A game is built without what only measures it: the clock reads behind the log's five-second lines, those lines, and the network console
 # (rt.h's kMeasure). THREEDII_MEASURE in the environment builds with them, for the checks in Cemu (check_ports.py --measure): the runtime
 # and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
@@ -581,6 +588,14 @@ def check_registers(path):
     print(f'registers: vertex shaders use up to {vs} of 48, pixel shaders up to {ps} of 200')
     if not vs or vs > 48 or ps > 200:
         sys.exit('a shader needs more registers than the GPU gives it')
+    # and what else a real GPU holds a program to that Cemu doesn't
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gsh_rules', ROOT + '/tools/gsh_rules.py')
+    rules = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules)
+    _, broken = rules.check_file(path)
+    if broken:
+        sys.exit('shader programs a real GPU may not take (tools/gsh_rules.py):\n   ' + '\n   '.join(broken[:20]))
 
 
 def compile_shaders(out, jobs):
@@ -631,13 +646,15 @@ def prepare_logs(g):
     spec = importlib.util.spec_from_file_location('fs_variants', ROOT + '/tools/fs_variants.py')
     fsv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fsv)
-    own_logs = [f for f in glob.glob(logs + '/*.bin') if not os.path.basename(f).startswith('other_') and os.path.basename(f) not in ('dvlb.bin', 'variants.bin')]
+    # (a finished game's confirmed.bin holds an earlier build's guesses, not what runs met: builder/shaderlogs.py)
+    own_logs = [f for f in glob.glob(logs + '/*.bin') if not os.path.basename(f).startswith('other_')
+                and os.path.basename(f) not in ('dvlb.bin', 'variants.bin', 'confirmed.bin')]
     own = {k for f in own_logs for k in fsv.keys(f)}
     near = []  # the logs of games whose states this one shares: an engine's
     for other in sorted(glob.glob(ROOT + '/games/*/')):
         other = other.rstrip('/\\').replace('\\', '/')
         name = os.path.basename(other)
-        if other == g.dir:
+        if other == g.dir or name == getattr(g, 'twin', None):  # (a cold build's own folder: builder/pipeline.py --cold)
             continue
         # fs_log.bin and the *_fs.bin files hold fragment states alone; the other_ ones are that game's own copies (taking them nested the names without
         # end), and its models are its own
