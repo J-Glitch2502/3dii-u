@@ -102,8 +102,10 @@ int main(int argc, char **argv) {
             p += 4 + n;
         }
     const size_t shipped = fs_keys.size();
+    // a finished game's list first (builder/shaderlogs.py, confirm): its shaders keep their numbers, and what the logs add since comes after
+    if (fsys::exists(fsys::path(logs) / "confirmed.bin")) read_log((fsys::path(logs) / "confirmed.bin").string());
     for (const auto &e : fsys::directory_iterator(logs))
-        if (e.path().extension() == ".bin") read_log(e.path().string());
+        if (e.path().extension() == ".bin" && e.path().filename() != "confirmed.bin") read_log(e.path().string());
     printf("%zu fragment keys (%zu shipped), %zu vertex records\n", fs_keys.size(), shipped, vs_records.size());
 
     // fragment shaders: many states differ only in what the source doesn't depend on (blending, say)

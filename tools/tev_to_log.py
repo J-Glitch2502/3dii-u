@@ -448,11 +448,13 @@ def main():
     logs = game + '/shader_logs'
     # the game's own runs and console misses: settings around combiners, and what is already compiled
     # --holdout: leave the console's miss lists out and say how many of them this would have predicted; writes nothing
+    # A finished game's confirmed.bin (builder/shaderlogs.py) is left out: it holds an earlier build's guesses, and learning from them as if
+    # runs had met them would change which states this one makes.
     holdout, held = '--holdout' in sys.argv, set()
     keys = set()
     for f in glob.glob(logs + '/*.bin'):
         b = os.path.basename(f)
-        if b.startswith('other_') or b in (OUT, 'dvlb.bin', 'vs_log.bin', 'abi_vs_log.bin', 'variants.bin') or b.endswith('_vs.bin'):
+        if b.startswith('other_') or b in (OUT, 'dvlb.bin', 'vs_log.bin', 'abi_vs_log.bin', 'variants.bin', 'confirmed.bin') or b.endswith('_vs.bin'):
             continue
         (held if holdout and 'console' in b else keys).update(records(f))
     for k in keys:

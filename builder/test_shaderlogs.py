@@ -111,6 +111,37 @@ try:
     assert shaderlogs.write_recipes(game2, os.path.join(game2, 'shader_logs')) == (1, 0)
     assert shaderlogs.restore(os.path.join(game2, 'shader_logs')) == (1, 0)
     assert open(os.path.join(game2, 'shader_logs', 'recipes_vsr.bin'), 'rb').read()[16:16 + 224] == packed_prog + packed_swz
+
+    # a finished game's list (confirm): a build's fragment states once each, an earlier list's first, without a miss list's tags, the
+    # vertex records, a file with another extension, or the last record of a log cut short
+    def state(name):
+        return struct.pack('<I', len(name)) + name
+
+    built, kept = os.path.join(tmp, 'built'), os.path.join(tmp, 'kept')
+    os.makedirs(built)
+    os.makedirs(kept)
+    for name, data in (('a.bin', state(b'state one') + vs(0, *other, tail) + b'FS  ' + state(b'state two')),
+                       ('confirmed.bin', state(b'state old') + state(b'state two')), ('variants.bin', state(b'state guessed')),
+                       ('cut.bin', state(b'state three') + state(b'state cut short')[:-3]), ('notes.txt', state(b'state four'))):
+        with open(os.path.join(built, name), 'wb') as f:
+            f.write(data)
+    assert shaderlogs.confirm(built, kept) == 5
+    with open(os.path.join(kept, 'confirmed.bin'), 'rb') as f:
+        made = f.read()
+    first = state(b'state old') + state(b'state two')
+    assert made.startswith(first), 'the earlier list comes first, in its own order'
+    rest = {r[1] for r in shaderlogs.records(made[len(first):])}
+    assert rest == {state(b'state one'), state(b'state guessed'), state(b'state three')} and len(made) == len(first) + sum(map(len, rest)), rest
+    assert shaderlogs.confirm(built, built) == 5, 'in the build\'s own folder too'
+    with open(os.path.join(built, 'confirmed.bin'), 'rb') as f:
+        assert f.read() == made
+    open(os.path.join(game2, 'shader_logs', 'variants.bin'), 'wb').close()
+    for folder, why in ((kept, 'a folder no build left'), (os.path.join(game2, 'shader_logs'), 'logs with vertex records alone')):
+        try:
+            shaderlogs.confirm(folder, kept)
+        except SystemExit:
+            continue
+        raise AssertionError(why + ' was confirmed')
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
-print('shaderlogs ok: fingerprints and recipes')
+print('shaderlogs ok: fingerprints, recipes and a finished game\'s list')

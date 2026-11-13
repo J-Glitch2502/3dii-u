@@ -1,4 +1,5 @@
-"""Self-check for app.py's compiled-cache reset and its output's encoding, and for make_app.py's release tag: python builder/test_app.py"""
+"""Self-check for app.py's compiled-cache reset and its output's encoding, and for make_app.py's release tag and its check that a Complete game
+has its confirmed shader list: python builder/test_app.py"""
 import importlib.util
 import os
 import shutil
@@ -60,5 +61,21 @@ try:
             continue
         raise AssertionError(f'{bad} was taken as a release tag')
     print('release tag ok')
+    # a game called Complete must have its confirmed shader list before the app is made; the list's notes and other games don't count
+    games = os.path.join(base, 'games')
+    compat = {'_about': 'notes', '_cemu': [{'status': 'Cemu'}], '1': {'slug': 'done', 'status': 'Complete'}, '2': {'slug': 'plays', 'status': 'Plays'}}
+    assert make_app.unconfirmed(compat, games) == ['done']
+    listed = os.path.join(games, 'done', 'shader_logs', 'confirmed.bin')
+    os.makedirs(os.path.dirname(listed))
+    open(listed, 'wb').close()
+    assert make_app.unconfirmed(compat, games) == ['done'], 'an empty list is no list'
+    states = b'\x09\x00\x00\x00state one' + b'\x09\x00\x00\x00state two'
+    with open(listed, 'wb') as f:
+        f.write(states)
+    assert make_app.unconfirmed(compat, games) == []
+    make_app.bundle_logs(os.path.join(games, 'done'), os.path.join(base, 'shipped'))  # and the app ships it as it is
+    with open(os.path.join(base, 'shipped', 'shader_logs', 'confirmed.bin'), 'rb') as f:
+        assert f.read() == states
+    print('confirmed lists ok')
 finally:
     shutil.rmtree(base)

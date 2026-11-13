@@ -10,6 +10,7 @@ Run: python builder/make_app.py [--release <tag>] (needs the toolchain installed
 --release: the tag the build will be published under, like builder-1.0-beta-2026-11-13. The app carries it, which is how it knows a newer
 release from its own and hands over to one it downloaded (updater.py); a build without it never updates itself."""
 import glob
+import json
 import os
 import shutil
 import sys
@@ -151,6 +152,15 @@ def make_icon(path):
     os.remove(png)
 
 
+def unconfirmed(compat, games):
+    """the games compat.json calls Complete that have no confirmed shader list under games (shaderlogs.py --confirm): built without it, such a
+    game could lose shaders the build it was confirmed with had"""
+    def listed(slug):
+        path = os.path.join(games, slug, 'shader_logs', shaderlogs.CONFIRMED)
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    return sorted(g['slug'] for k, g in compat.items() if not k.startswith('_') and g['status'] == 'Complete' and not listed(g['slug']))
+
+
 def release_tag(argv, version):
     """the tag after --release, or '' without one; an exit if it isn't one of this version's"""
     if '--release' not in argv:
@@ -166,6 +176,10 @@ def main():
     import PyInstaller.__main__
     import gui
     release = release_tag(sys.argv, gui.VERSION)
+    with open(os.path.join(HERE, 'compat.json'), encoding='utf-8') as f:
+        loose = unconfirmed(json.load(f), os.path.join(ROOT, 'games'))
+    if loose:
+        sys.exit('Complete in compat.json, but with no confirmed shader list (shaderlogs.py --confirm): ' + ', '.join(loose))
     os.makedirs(WORK, exist_ok=True)
     ico = os.path.join(WORK, 'icon.ico')
     make_icon(ico)

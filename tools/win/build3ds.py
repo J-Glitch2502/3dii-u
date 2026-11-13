@@ -632,7 +632,9 @@ def prepare_logs(g):
     spec = importlib.util.spec_from_file_location('fs_variants', ROOT + '/tools/fs_variants.py')
     fsv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fsv)
-    own_logs = [f for f in glob.glob(logs + '/*.bin') if not os.path.basename(f).startswith('other_') and os.path.basename(f) not in ('dvlb.bin', 'variants.bin')]
+    # (a finished game's confirmed.bin holds an earlier build's guesses, not what runs met: builder/shaderlogs.py)
+    own_logs = [f for f in glob.glob(logs + '/*.bin') if not os.path.basename(f).startswith('other_')
+                and os.path.basename(f) not in ('dvlb.bin', 'variants.bin', 'confirmed.bin')]
     own = {k for f in own_logs for k in fsv.keys(f)}
     near = []  # the logs of games whose states this one shares: an engine's
     for other in sorted(glob.glob(ROOT + '/games/*/')):
