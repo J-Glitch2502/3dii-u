@@ -35,6 +35,10 @@ bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
     if (m[0] != 3 && m[3] == 3) std::reverse(m.begin(), m.begin() + 4);
     if (m[0] != 3 || !(m[0x0C] | m[0x0D] | m[0x0E] | m[0x0F])) return false;  // not version 3, or no Mii id (an empty slot)
     m[0x01] |= 1;
+    // Born on a console that came after the 3DS (4: a Wii U, as its accounts' Miis are), it is said to be a 3DS's: Super Mario 3D Land's Mii
+    // library, of 2011, counts no such Mii in Mii Maker ("You don't have any Mii characters") and drops its face from a save file at the
+    // next start.
+    if ((m[0x03] >> 4 & 7) > 3) m[0x03] = (u8)((m[0x03] & 0x8F) | 0x30);
     m[0x5C] = m[0x5D] = 0;
     const u16 crc = mii_crc16(m.data(), 0x5E);
     m[0x5E] = (u8)(crc >> 8);
