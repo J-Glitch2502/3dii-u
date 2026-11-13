@@ -11,8 +11,8 @@
    "a": "Onto your SD card, in its install folder, or into a folder you choose. From a folder, copy it to your SD card's install folder."},
   {"q": "How do I install it on the Wii U?",
    "a": "Put the SD card in the Wii U and install the game with WUP Installer GX2. If you installed an earlier build of the same game, delete it first (System Settings > Data Management), then install the new one. Deleting a game deletes its saves."},
-  {"q": "What does \"Plays\" mean?",
-   "a": "The game was tested on a real Wii U, without its update: its badge says \"Plays on Wii U\" when your dump is the same edition that was tested. With its update it should play the same, but nobody has checked yet. With a mod the badge stays, and its note says it is untested with a mod. Every other game shows \"Untested\": it may not start, or it may stop partway."},
+  {"q": "What do \"Complete\", \"Plays\" and \"Untested\" mean?",
+   "a": "Complete: the game is finished: confirmed on a real Wii U to run as it should, with no known problems left. Plays: the game was tested on a real Wii U and plays, though some things may still be rough. Either badge shows when your dump is the same edition that was tested. The games were tested without their updates: with its update a game should play the same, but nobody has checked yet. With a mod the badge stays, and its note says it is untested with a mod. Every other game shows \"Untested\": it may not start, or it may stop partway."},
   {"q": "A game runs slowly or freezes on the Wii U. What can I do?",
    "a": "Turn off the SDCafiine and FTP (FTPiiU) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch both off, then start the game again. The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders; the next time is smooth."}
 ]

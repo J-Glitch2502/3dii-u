@@ -7,7 +7,7 @@ No game data and no keys come with the builder. Everything it builds from is you
 ## Using it
 
 1. Open **`3Dii U Builder.exe`** in `dist/3Dii U Builder`. That folder is the whole app: copy it anywhere, as it needs no Python and no toolchain. To run the builder from the source instead, double-click `3Dii U Builder.pyw`.
-2. Click **Choose a game** (the empty game card, or Ctrl+O) and pick a dump. It can be a `.3ds`, `.cci`, `.cia`, `.cxi` or `.app` file, encrypted or already decrypted. The card fills in with the game's icon, name and maker, and a badge says how well it's known to run: **Plays on Wii U** for the tested games, **Untested** for the rest.
+2. Click **Choose a game** (the empty game card, or Ctrl+O) and pick a dump. It can be a `.3ds`, `.cci`, `.cia`, `.cxi` or `.app` file, encrypted or already decrypted. The card fills in with the game's icon, name and maker, and a badge says how well it's known to run: **Complete on Wii U** for a finished game, **Plays on Wii U** for the other tested games, **Untested** for the rest.
 3. The builder then asks about the **update** and the **DLC**, right in its window:
    - If they're in the same folder as the game, it names them and asks whether to use them.
    - If not, it asks whether you have them, and lets you pick the files.

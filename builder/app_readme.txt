@@ -41,10 +41,13 @@ GETTING STARTED
 
 WHICH GAMES WORK
 
-- "Plays on Wii U": the games tested on a real Wii U. The badge shows when your dump is the same edition that was tested:
-  Tomodachi Life, New Super Mario Bros. 2, Paper Mario: Sticker Star, Mario & Luigi: Dream Team, Mario & Luigi: Paper Jam,
+- "Complete on Wii U": finished. Confirmed on a real Wii U to run as the game should, with no known problems left:
+  New Super Mario Bros. 2.
+- "Plays on Wii U": tested on a real Wii U, and it plays; some things may still be rough:
+  Tomodachi Life, Paper Mario: Sticker Star, Mario & Luigi: Dream Team, Mario & Luigi: Paper Jam,
   Mario & Luigi: Superstar Saga + Bowser's Minions, Mario & Luigi: Bowser's Inside Story + Bowser Jr.'s Journey,
-  Professor Layton and the Azran Legacy, and Professor Layton and the Miracle Mask. They were tested without updates.
+  Professor Layton and the Azran Legacy, and Professor Layton and the Miracle Mask.
+  Either badge shows when your dump is the same edition that was tested. They were tested without updates.
 - "Runs in Cemu" (the Games page): built with this builder and played in the Cemu emulator, not yet on a real Wii U:
   Mario Kart 7, The Legend of Zelda: A Link Between Worlds, Metroid: Samus Returns, Kirby: Triple Deluxe, Rhythm Heaven Megamix,
   Phoenix Wright: Ace Attorney Trilogy, Animal Crossing: New Leaf, Kid Icarus: Uprising, Super Mario 3D Land and Miitopia.

@@ -370,8 +370,8 @@ class App(QObject):
             return
         self.game, self.update, self.dlc, self.mod = d, None, None, None
         info = pipeline.profile_for(d) or pipeline.derived(d)
-        known = info['status'] == 'Plays'
-        self.set(hasGame=True, gameName=info['name'], maker=d.publisher or '', known=known, badge='Plays on Wii U' if known else 'Untested',
+        known = info['status'] in ('Plays', 'Complete')  # compat.json: tested on a real Wii U, or finished there
+        self.set(hasGame=True, gameName=info['name'], maker=d.publisher or '', known=known, badge=f'{info["status"]} on Wii U' if known else 'Untested',
                  icon=icon_url(d.icon) if d.icon else '', meta=f'{d.product}  ·  {d.title_id:016X}  ·  {describe(d)}', view='form')
         self.set_extra('update', None)
         self.set_extra('dlc', None)
