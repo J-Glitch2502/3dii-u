@@ -64,6 +64,7 @@ def main():
         'system archives': [[py, ROOT + '/builder/test_system_archives.py']],
         'builder app': [[py, ROOT + '/builder/test_app.py']],
         'builder window': [[py, ROOT + '/builder/test_window.py']],
+        'builder updater': [[py, ROOT + '/builder/test_updater.py']],
         'learned shaders': [[py, ROOT + '/builder/test_learned.py']],
         'DLC reader': [[py, ROOT + '/builder/selftest.py']],
     }
