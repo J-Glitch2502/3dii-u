@@ -7,8 +7,9 @@ devkitPro, the shader compilers, and what the games' runs learned: where their c
 programs they ran named by fingerprints (shaderlogs.py), as those are the games' own code. None of the games' code or data goes in.
 The 3DS system archives aren't in it: they are each user's own files, imported from their emulator into the work folder.
 Run: python builder/make_app.py [--release <tag>] (needs the toolchain installed here, as the shader generator is built for the app).
---release: the tag the build will be published under, like builder-1.0-beta-2026-11-13. The app carries it, which is how it knows a newer
-release from its own and hands over to one it downloaded (updater.py); a build without it never updates itself."""
+--release: this build's tag, like builder-1.0-beta-2026-11-13. The app carries it and its zip is named after it, which is how an app out
+there knows a newer build from its own, whichever release the zip is put under, and hands over to one it downloaded (updater.py); a build
+without it never updates itself."""
 import glob
 import json
 import os
@@ -168,7 +169,7 @@ def release_tag(argv, version):
     import updater
     tag = (argv[argv.index('--release') + 1:] + [''])[0]
     if not updater.tag_key(tag) or not tag.startswith(f'builder-{version}-'):
-        sys.exit(f'--release takes the tag this build will be published under, like builder-{version}-beta-2026-11-13')
+        sys.exit(f'--release takes this build\'s tag, like builder-{version}-beta-2026-11-13')
     return tag
 
 
@@ -222,7 +223,7 @@ def main():
         f.write(str(files))
     for old in glob.glob(os.path.join(OUT, '*.zip')):  # one zip, this build's
         os.remove(old)
-    # a release's zip is named as the updater expects of a release's asset (updater.ASSET), with no spaces for GitHub to change
+    # a release's zip is named after its tag, which is how the updater knows the build (updater.NAMED), with no spaces for GitHub to change
     z = shutil.make_archive(os.path.join(OUT, release.replace('builder-', '3Dii-U-Builder-', 1) if release else f'{NAME} {gui.VERSION} beta'), 'zip', OUT, NAME)
     print(f'for testers: {z} ({os.path.getsize(z) >> 20} MB)')
 

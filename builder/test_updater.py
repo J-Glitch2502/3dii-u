@@ -57,12 +57,25 @@ LIST = [release('builder-1.0-beta-2026-11-22', prerelease=True), release('builde
         release('builder-1.0-beta-2026-11-12'), release('builder-1.0-beta-2026-11-14'), 'junk', {'tag_name': 'builder-1.0-2026-11-30'}]
 r = up.newest(LIST)
 assert r and r.tag == 'builder-1.0-beta-2026-11-14' and r.url.endswith('/3Dii U Builder.zip') and r.size == 10 and r.sha256 == 'a' * 64, r
-assert r.title == 'Title builder-1.0-beta-2026-11-14' and r.notes == 'notes'
+assert r.title == 'Title builder-1.0-beta-2026-11-14, 2026-11-14' and r.notes == 'notes'
 assert up.newest([]) is None and up.newest({'message': 'rate limited'}) is None and up.newest(LIST[:8]) is None
 for name in ('3Dii U Builder.zip', '3Dii-U-Builder-1.0-win.ZIP', '3dii.u.builder.zip'):
     assert up.ASSET.fullmatch(name), name
 for name in ('3Dii U Builder.zip.sig', 'other 3Dii U Builder.zip', '3DiiUBuilder.zip', '3Dii U Builder.7z'):
     assert not up.ASSET.fullmatch(name), name
+# a release whose zip is replaced as games are finished: the zip's name says which build it is, whatever the release's own tag
+KEPT = [release('v1.0.1', name='3Dii-U-Builder-1.0.1-2026-11-20.zip'), release('builder-1.0-beta-2026-11-12')]
+r = up.newest(KEPT)
+assert r.tag == 'builder-1.0.1-2026-11-20' and r.url.endswith('/v1.0.1/3Dii-U-Builder-1.0.1-2026-11-20.zip') and r.title == 'Title v1.0.1, 2026-11-20', r
+assert up.newest(KEPT, skip={'builder-1.0.1-2026-11-20'}).tag == 'builder-1.0-beta-2026-11-12'
+assert up.newest([release('v1.0.1')]) is None, 'neither the zip nor the release names a build'
+assert up.newest([release('builder-1.0-beta-2026-11-12', name='3Dii-U-Builder-1.0-beta-2026-11-13.zip')]).tag == 'builder-1.0-beta-2026-11-13'
+both = release('v1.0.1', name='3Dii-U-Builder-1.0.1-2026-11-20.zip')
+both['assets'].append(dict(both['assets'][1], name='3Dii-U-Builder-1.0.1-2026-11-27.zip'))
+assert up.newest([both]).tag == 'builder-1.0.1-2026-11-27', 'the newer of two zips in one release'
+both['assets'][2]['state'] = 'open'
+assert up.newest([both]).tag == 'builder-1.0.1-2026-11-20', 'a zip still being uploaded is not taken'
+assert up.build_tag('v1.0.1', '3Dii-U-Builder-../x.zip') is None and up.build_tag('deps-1', '3Dii U Builder.zip') is None
 print('newest ok')
 
 
@@ -84,12 +97,15 @@ def serve(data):
 api = serve(json.dumps(LIST).encode())
 assert up.check('builder-1.0-beta-2026-11-12', api).tag == 'builder-1.0-beta-2026-11-14'
 request, timeout = asked[0]
-assert request.full_url == up.API == 'https://api.github.com/repos/J-Glitch2502/3dii-u/releases?per_page=30' and timeout == 8
+assert request.full_url == up.API == 'https://api.github.com/repos/J-Glitch2502/3dii-u/releases?per_page=100' and timeout == 8
 assert request.get_header('User-agent') == '3DiiU-Builder' and request.get_header('Accept') == 'application/vnd.github+json'
 assert request.data is None
 assert up.check('builder-1.0-beta-2026-11-14', api) is None, 'up to date'
 assert up.check('builder-1.0-beta-2026-11-14.1', api) is None, 'newer than any release'
 assert up.check('', api).tag == 'builder-1.0-beta-2026-11-14', 'a development build takes any release'
+kept = serve(json.dumps(KEPT).encode())
+assert up.check('builder-1.0.1-2026-11-13', kept).tag == 'builder-1.0.1-2026-11-20', 'a replaced zip is an update'
+assert up.check('builder-1.0.1-2026-11-20', kept) is None, 'and the same zip is none'
 
 
 def offline(request, timeout):

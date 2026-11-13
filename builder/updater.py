@@ -4,9 +4,14 @@ there hands over to the newest unpacked version when its window starts (current(
 stop doing so when that version never came up. Asking GitHub sends nothing about the person or the PC. Everything here fails with UpdateError,
 a message a person can read; a check that can't reach GitHub just finds nothing.
 
-What a later release must keep, for apps already out there to find it, take it and hand over to it:
-- its tag: builder-<version>[-<label>]-<yyyy>-<mm>-<dd>[.<n>] (TAG); a published release, neither draft nor prerelease, whose .zip asset
-  is named like 3Dii U Builder*.zip (ASSET) and carries GitHub's sha256 digest
+What a later build must keep, for apps already out there to find it, take it and hand over to it:
+- its tag, which says which build it is: builder-<version>[-<label>]-<yyyy>-<mm>-<dd>[.<n>] (TAG). Builds are ordered by version, date
+  and counter, not by label: an app takes only a build that sorts after its own, so every zip put out needs a tag of its own (a later
+  date, or .<n> on the same day), a mended one too
+- its zip named after that tag, 3Dii-U-Builder-<the rest of the tag>.zip, as an asset with GitHub's sha256 digest in a published release,
+  neither draft nor prerelease, among the repository's 100 newest. The release's own tag is free: a release's zip is replaced as games
+  are finished, and an app takes the newest build it finds under any release. Its title and notes are what the app shows for the build,
+  so they are brought up to date with the zip. (A zip named otherwise, like 3Dii U Builder*.zip, is the build its release's tag names.)
 - the zip's one top folder "3Dii U Builder", holding "3Dii U Builder.exe"
 - _internal/files.txt (the number of files), _internal/stamp.txt equal to engine/stamp.txt, and _internal/release.txt holding the tag
 - launch.json format 1: tag, exe relative to home(), state, since, failed; and launch.lock as the lock around it"""
@@ -27,7 +32,7 @@ from dataclasses import dataclass
 import credits
 
 SOURCE = credits.SOURCE.rstrip('/')
-API = 'https://api.github.com/repos/' + SOURCE.split('github.com/', 1)[1] + '/releases?per_page=30'
+API = 'https://api.github.com/repos/' + SOURCE.split('github.com/', 1)[1] + '/releases?per_page=100'  # all GitHub gives in one answer
 DOWNLOADS = SOURCE + '/releases/download/'  # the only place a zip is fetched from
 HEADERS = {'User-Agent': '3DiiU-Builder', 'Accept': 'application/vnd.github+json'}
 TIMEOUT, MAX_LIST, PIECE = 8, 2 << 20, 1 << 20
@@ -36,6 +41,7 @@ EXE = TOP + '.exe'
 TAG = re.compile(r'builder-([0-9]+(?:\.[0-9]+)*)(?:-[a-z]+)?-([0-9]{4})-([0-9]{2})-([0-9]{2})(?:\.([0-9]+))?')
 DIGEST = re.compile(r'sha256:([0-9a-f]{64})')
 ASSET = re.compile(r'3Dii[-. ]U[-. ]Builder.*\.zip', re.IGNORECASE)
+NAMED = re.compile(r'3Dii-U-Builder-(.+)\.zip')  # a zip named after its build's tag, as make_app.py names a release's
 RECORD, RECORD_LOCK = 'launch.json', 'launch.lock'
 TRYING = 120  # seconds a handed-over version has to show its window: a fresh 620 MB app's first start under an antivirus is slow
 DIED = 4  # seconds after a hand-over in which the version exiting means it failed: a window that comes up stays up far longer
@@ -67,21 +73,32 @@ def tag_key(tag):
     return tuple(int(n) for n in m[1].split('.')), (int(m[2]), int(m[3]), int(m[4])), int(m[5] or 0)
 
 
+def build_tag(release_tag, asset):
+    """The build a release's zip is: the one its name gives (3Dii-U-Builder-1.0.1-2026-11-20.zip is builder-1.0.1-2026-11-20), else the
+    release's own tag. None if neither is a build's tag."""
+    named = NAMED.fullmatch(asset)
+    for tag in ('builder-' + named[1] if named else None, release_tag):
+        if tag_key(tag):
+            return tag
+    return None
+
+
 def newest(releases, skip=()):
-    """The newest published app release with a zip GitHub vouches for: a digest and a download from this repository. Anything else is
-    skipped, as a release can't be checked without its digest, and so is any tag in skip. None if there is none."""
+    """The newest build among the published releases' zips that GitHub vouches for: uploaded whole, with a digest and a download from this
+    repository. Anything else is skipped, as a zip can't be checked without its digest, and so is any build in skip. None if there is
+    none. Its title is the release's with the build's date, which tells one zip of a release from the next."""
     best = None
     for r in releases if isinstance(releases, list) else ():
-        if not isinstance(r, dict) or r.get('draft') or r.get('prerelease') or not tag_key(r.get('tag_name')) or r.get('tag_name') in skip:
+        if not isinstance(r, dict) or r.get('draft') or r.get('prerelease'):
             continue
         for a in r.get('assets') or ():
-            digest = DIGEST.fullmatch(str(a.get('digest') or '')) if isinstance(a, dict) else None
-            url, size = digest and a.get('browser_download_url'), digest and a.get('size')
-            if (digest and ASSET.fullmatch(str(a.get('name', ''))) and isinstance(url, str) and url.startswith(DOWNLOADS)
-                    and isinstance(size, int) and size > 0):
-                if not best or tag_key(r['tag_name']) > tag_key(best.tag):
-                    best = Release(r['tag_name'], str(r.get('name') or r['tag_name']), str(r.get('body') or ''), url, size, digest[1])
-                break
+            digest = DIGEST.fullmatch(str(a.get('digest') or '')) if isinstance(a, dict) and a.get('state', 'uploaded') == 'uploaded' else None
+            name, url, size = digest and str(a.get('name', '')), digest and a.get('browser_download_url'), digest and a.get('size')
+            tag = digest and ASSET.fullmatch(name) and build_tag(r.get('tag_name'), name)
+            if (tag and tag not in skip and isinstance(url, str) and url.startswith(DOWNLOADS) and isinstance(size, int) and size > 0
+                    and (not best or tag_key(tag) > tag_key(best.tag))):
+                title = '{}, {}-{:02}-{:02}'.format(r.get('name') or tag, *tag_key(tag)[1])
+                best = Release(tag, title, str(r.get('body') or ''), url, size, digest[1])
     return best
 
 
