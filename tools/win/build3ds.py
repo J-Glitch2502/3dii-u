@@ -57,6 +57,11 @@ MIN_FREE_MB = 2500
 os.environ['DEVKITPRO'] = DKP
 os.environ['DEVKITPPC'] = DKP + '/devkitPPC'
 os.environ['PATH'] = DKP + '/devkitPPC/bin;' + DKP + '/tools/bin;' + os.environ['PATH']
+# The tools a build runs pick the fragment states to compile ahead in the order Python's sets hand them over (tools/tev_to_log.py), and a
+# new hash seed on every run made every build from the source pick others: 4511, 4517 and 4480 states for NSMB2 from the same logs. The
+# standalone app's Python has its seed fixed at 0, so with the same here a build from the source makes the list the app makes.
+# shortcut: the picks still ride on the seed; order them by content there once every game's list may change at the same time.
+os.environ['PYTHONHASHSEED'] = '0'
 # A game is built without what only measures it: the clock reads behind the log's five-second lines, those lines, and the network console
 # (rt.h's kMeasure). THREEDII_MEASURE in the environment builds with them, for the checks in Cemu (check_ports.py --measure): the runtime
 # and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
