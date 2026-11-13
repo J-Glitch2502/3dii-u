@@ -12,8 +12,8 @@ import sys
 import tempfile
 import threading
 
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QFontDatabase, QIcon, QImage, QPixmap
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -34,8 +34,8 @@ DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
 NO_ART = "The game's own icon"
-LIBRARY_MAX = 40  # games the bottom screen remembers
-# What each of "Your files" is and how to get it from your own consoles: the "How do I get this?" buttons, and the message when one is missing.
+LIBRARY_MAX = 40  # games the Games page remembers
+# What each of "Your Files" is and how to get it from your own consoles: the Info buttons, and the message when one is missing.
 # Testers asked what the system files were and how to get seeddb.bin (Nov 9 and 10).
 HELP = {
     'keys': ('3DS keys',
@@ -44,13 +44,13 @@ HELP = {
              '•  boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y. Open [0:] SDCARD, press Y again and choose Copy.\n'
              '•  seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card. It holds the seeds of '
              'the games installed on that 3DS, which newer eShop games need.\n\n'
-             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder..." and choose where they are.'),
+             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder" and choose where they are.'),
     'otp': ('Wii U otp.bin',
             'A small file (exactly 1024 bytes) from your own Wii U. The game is packed with a key from it so your console installs it. The '
             'builder never shows or stores that key.\n\n'
             'It comes from a Wii U with Aroma: run Wii U NAND Dumper, choose Dump OTP, and otp.bin is written to the SD card. If you already '
             'made a NAND backup when setting up Aroma, otp.bin is in that backup.\n\n'
-            'On the PC, press "File..." and choose it. Keep it private: it is unique to your console.'),
+            'On the PC, press "File" and choose it. Keep it private: it is unique to your console.'),
     'system': ('3DS system files',
                'A few small files every 3DS keeps in its own memory: the system font many games write their text in, the parts (faces, '
                'eyes, hair) Miis are drawn from, and the list of bad words games check typed names against. Games load them from the console, '
@@ -60,7 +60,7 @@ HELP = {
                '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
                '•  GodMode9 on your 3DS: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and '
                '000400db (the word list). Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then '
-               'copy 000400db the same way, next to it. Back on the PC, press "Folder..." here and choose that 0004009b folder on the SD '
+               'copy 000400db the same way, next to it. Back on the PC, press "Folder" here and choose that 0004009b folder on the SD '
                'card. Copied this way they are encrypted, so the builder needs your 3DS keys to read them.\n\n'
                'The builder copies them once and keeps them for every game after.'),
 }
@@ -189,12 +189,26 @@ def theme():
     families = set(QFontDatabase.families())
     body = next((f for f in ('Segoe UI Variable Text', 'Segoe UI', 'Cantarell', 'Noto Sans') if f in families), '')
     display = next((f for f in ('Segoe UI Variable Display', 'Segoe UI', 'Cantarell') if f in families), body)
-    # the 3DS HOME Menu's palette: pale greys under white tiles, its blue for what you press, an aqua-blue console
-    return {'bg': '#dfe3e9', 'rail': '#f6f7f9', 'surface': '#ffffff', 'surface2': '#eef1f5', 'hover': '#e4f3fc', 'stripe': '#80ffffff',
-            'edge': '#c9ced6', 'shadow': '#5a6472', 'text': '#33363d', 'dim': '#626873', 'faint': '#9aa0ab', 'red': '#e60012', 'violet': '#7a5cf0',
-            'blue': '#1e9be0', 'sky': '#5cc4f5', 'blueDeep': '#127ab8', 'green': '#35b54a', 'amber': '#f39800', 'ink': '#ffffff', 'paper': '#ffffff',
-            'well': '#d3d9e1', 'font': body, 'display': display,
-            'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas'}
+    # the Wii U Menu's glass: grey cards with a curved gloss, grey text, cyan for chosen and red for missing; dark is the same glass inverted
+    light = {'pageTop': '#ffffff', 'pageBottom': '#eef1f0', 'card': '#cbd2d0', 'gloss': '#dde1e0', 'shadow': '#40000000',
+             'title': '#7e8b88', 'sub': '#a8b3b0', 'label': '#6c7976', 'subLabel': '#a3aeab',
+             'cyanBase': '#9fdde8', 'cyanText': '#35b5cb', 'redBase': '#eba3aa', 'redText': '#c93a4c', 'greyBase': '#bfc7c5', 'greyText': '#6c7976',
+             'lightRed': '#c9283c', 'lightCyan': '#2fb4cc', 'lightGrey': '#aab4b1', 'socket': '#98a3a0',
+             'tileGloss': '#ffffff', 'tileBase': '#cdd3d1', 'plus': '#8b9996', 'buildText': '#3c4846',
+             'rail': '#e6e9e8', 'railTop': '#dde1e0', 'railActive': '#f3f5f4', 'railLine': '#fbfcfc', 'railEdge': '#cfd5d3', 'railText': '#7b8885',
+             'help': '#5c6a67', 'helpActive': '#6e7d7a', 'helpText': '#ffffff', 'helpRing': '#3c4846', 'helpFace': '#ffffff',
+             'keycap': '#ffffff', 'keycapBase': '#c3cac8', 'keycapSide': '#a3aeab', 'keycapGlyph': '#a9b4b1', 'tileRim': '#e4e8e7', 'tileEdge': '#b9c3c0',
+             'red': '#d6394b', 'cyan': '#3dbdd6', 'builder': '#7b8885', 'ds': '#e5959f', 'screen': '#ffffff', 'dotFrom': '#e8a4ad', 'dotMid': '#c9c3d8',
+             'dotTo': '#a9dde7', 'pad': '#8fdbe7', 'dim': '#73000000', 'logBg': '#e9eceb', 'logText': '#4a5654'}
+    dark = dict(light, pageTop='#20272a', pageBottom='#1a2023', card='#313b3e', gloss='#3b4649', shadow='#80000000',
+                title='#d7dedc', sub='#8f9c99', label='#c5cecb', subLabel='#8b9895',
+                cyanBase='#1f6f80', cyanText='#9fe6f2', redBase='#7a2a34', redText='#ffb3bb', greyBase='#4a5558', greyText='#d0d7d5',
+                lightGrey='#5f6c6f', socket='#1d2427', tileGloss='#5f6c6f', tileBase='#2e383b', plus='#5a6769', buildText='#d7dedc',
+                rail='#2a3336', railTop='#252d30', railActive='#344043', railLine='#1d2427', railEdge='#1d2427', railText='#c5cecb',
+                help='#11181a', helpActive='#1f2a2d', helpRing='#000000', helpFace='#d7dedc',
+                keycap='#5a6669', keycapBase='#3a4548', keycapSide='#263033', keycapGlyph='#8f9c99', tileRim='#45524f', tileEdge='#252e31', builder='#c9d1cf', screen='#2a3336',
+                dim='#a6000000', logBg='#1d2427', logText='#c5cecb')
+    return {'font': body, 'display': display, 'mono': 'Cascadia Mono' if 'Cascadia Mono' in families else 'Consolas', 'light': light, 'dark': dark}
 
 
 # ---- what the window shows, and what its buttons do
@@ -215,11 +229,12 @@ class App(QObject):
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
     target, destText, cards = _p(str, 'target'), _p(str, 'destText'), _p('QVariantList', 'cards')
-    canBuild, building, view = _p(bool, 'canBuild'), _p(bool, 'building'), _p(str, 'view')
+    building, view = _p(bool, 'building'), _p(str, 'view')
     stages, stage, failed, progress, detail = _p('QVariantList', 'stages'), _p(int, 'stage'), _p(bool, 'failed'), _p(float, 'progress'), _p(str, 'detail')
     log = _p(str, 'log', logChanged)
     resultText, where, dialog = _p(str, 'resultText'), _p(str, 'where'), _p('QVariant', 'dialog')
     games, others, version, rootOk = _p('QVariantList', 'games'), _p('QVariantList', 'others'), _p(str, 'version'), _p(bool, 'rootOk')
+    faq, themeMode, dark = _p('QVariantList', 'faq'), _p(str, 'themeMode'), _p(bool, 'dark')
     del _p
 
     def __init__(self):
@@ -232,14 +247,24 @@ class App(QObject):
         self.proc, self.result, self.cancelled = None, None, False
         self.lines, self.log_lines, self.dialogs, self.flow = queue.Queue(), [], [], None
         compat = json.load(open(os.path.join(HERE, 'compat.json'), encoding='utf-8'))
+        try:  # the Help page's questions and answers: without them the app still runs
+            with open(os.path.join(HERE, 'faq.json'), encoding='utf-8') as f:
+                faq = json.load(f)
+        except (OSError, ValueError):
+            faq = []
+        faq = [e for e in faq if isinstance(e, dict) and isinstance(e.get('q'), str) and isinstance(e.get('a'), str) and e['q'] and e['a']]             if isinstance(faq, list) else []
+        theme_mode = self.st.get('theme')
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
                        updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
-                       otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], canBuild=False, building=False, view='form', stages=[],
+                       otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
                        games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')],
-                       others=compat.get('_cemu', []))  # shown only: they build as untested games, by their own code
+                       others=compat.get('_cemu', []),  # shown only: they build as untested games, by their own code
+                       faq=faq, themeMode=theme_mode if theme_mode in ('system', 'light', 'dark') else 'system', dark=False)
+        QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)  # "system" follows Windows switching while the window is open
+        self.apply_theme()
         self.coverReady.connect(self.cover_ready)
         self.refresh_library()
         self.timer = QTimer(self)
@@ -285,6 +310,25 @@ class App(QObject):
     @Slot()
     def about(self):
         self.tell(f'About {APP}', credits.about())
+
+    @Slot(str)
+    def setThemeMode(self, mode):
+        if mode not in ('system', 'light', 'dark'):
+            return
+        self.st['theme'] = mode
+        save_settings(self.st)
+        self.set(themeMode=mode)
+        self.apply_theme()
+
+    def apply_theme(self, *_):
+        """asks Qt for the chosen scheme, so the native title bar follows it too; Unknown hands "system" back to Windows"""
+        hints, mode = QGuiApplication.styleHints(), self._s['themeMode']
+        asked = {'dark': Qt.ColorScheme.Dark, 'light': Qt.ColorScheme.Light}.get(mode, Qt.ColorScheme.Unknown)
+        if getattr(self, 'asked', None) != asked:  # setColorScheme signals colorSchemeChanged, which calls this again
+            self.asked = asked
+            hints.setColorScheme(asked)
+        # the mode, not colorScheme() alone: a platform without schemes (offscreen) ignores the request
+        self.set(dark=mode == 'dark' or mode == 'system' and hints.colorScheme() == Qt.ColorScheme.Dark)
 
     # ---- choosing
     def open_dump(self, path):
@@ -341,7 +385,7 @@ class App(QObject):
         if ask:  # a game picked again from the library keeps quiet
             self.run_flow(self.extras())
 
-    # ---- the library: the games picked before, as the icons on the bottom screen
+    # ---- the library: the games picked before, as the tiles on the Games page
     def remember_game(self, d, name):
         games = [g for g in self.st.get('library', []) if g['path'] != d.path]
         games.append(dict(path=d.path, name=name, id=f'{d.title_id:016x}', product=d.product or '', icon=icon_url(d.icon) if d.icon else ''))
@@ -365,7 +409,7 @@ class App(QObject):
         if self._s['building'] or (self.game and self.game.path == path):
             return
         if not os.path.isfile(path):
-            self.tell('That game has moved', 'Its file is no longer where it was. Pick it again with the + tile.', 'warn')
+            self.tell('That game has moved', 'Its file is no longer where it was. Choose it again on the Build page (Ctrl+O).', 'warn')
             self.forgetGame(path)
             return
         self.open_game(path, ask=False)
@@ -491,7 +535,7 @@ class App(QObject):
             save_settings(self.st)
         cover = bool(path) and os.path.dirname(path) == os.path.join(os.path.dirname(settings_file()), 'covers')
         self.set(artText=('Its cover art, from GameTDB' if cover else os.path.basename(path)) if path else NO_ART, hasArt=bool(path),
-                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the top screen previews it
+                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the Build page's tile shows it
         if remember:
             self.refresh_library()
 
@@ -539,7 +583,7 @@ class App(QObject):
                               f'{self.st["keys"]}. They open with the keys of the same 3DS they were copied from.', 'warn')
                 else:
                     self.tell('Those files need your 3DS keys', 'That is the right folder. A 3DS keeps these files encrypted, and they open with '
-                              'boot9.bin from your own 3DS.\n\nPress "Folder..." next to 3DS keys and choose the folder with your boot9.bin: the '
+                              'boot9.bin from your own 3DS.\n\nPress "Folder" next to 3DS keys and choose the folder with your boot9.bin: the '
                               'builder then reads the system files from here by itself.', 'warn')
             self.refresh_files()
 
@@ -623,13 +667,11 @@ class App(QObject):
             dest = short(folder, 40) if folder else 'Choose a folder...'
         have = decrypt.have_keys(keys)
         system = dumps.have_system_archives(pipeline.ARCHIVES)
-        source = f', from {short(self.st["system"], 36)}' if self.st.get('system') else ''
-        self.set(sysOk=system, sysText=f'Ready: the shared font and Mii data{source}' if system else
-                 'Needed: the font and Mii parts games load from the 3DS itself')  # short: the window's first width cuts the line
+        source = short(self.st['system'], 26) if self.st.get('system') else ''
+        self.set(sysOk=system, sysText=(source or 'Found') if system else 'Not found yet')  # short: the row has its pills beside it
         self.set(keysOk=have, keysNeeded=needed and not have,
-                 keysText=f'Found in {short(keys, 44)}' if have else 'Needed for this encrypted game' if needed else 'Only needed for encrypted dumps',
-                 otpOk=otp_ok(otp), otpText=short(otp, 52) if otp_ok(otp) else 'Needed: it comes from your Wii U\'s NAND backup', destText=dest,
-                 canBuild=self.game is not None)
+                 keysText=short(keys, 26) if have else 'Not found yet' if needed else 'Only for encrypted dumps',
+                 otpOk=otp_ok(otp), otpText=short(otp, 26) if otp_ok(otp) else 'Not found yet', destText=dest)
 
     # ---- building
     @Slot()
@@ -715,7 +757,7 @@ class App(QObject):
             self.set(building=False, view='form')
         else:
             self.set(building=False, view='failed', failed=True,
-                     resultText=self.result[7:] if self.result else 'The build stopped. Show details says where.')
+                     resultText=self.result[7:] if self.result else 'The build stopped. Details says where.')
 
     @Slot()
     def cancel(self):
@@ -760,7 +802,7 @@ def create(argv=None):
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('app', state)
     engine.rootContext().setContextProperty('T', theme())
-    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(132)))
+    engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(512)))  # the rail shows it at 162: 512 stays sharp up to a 4K window
     engine.load(QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Main.qml')))
     return qt, engine, state
 
@@ -769,4 +811,12 @@ def run():
     qt, engine, state = create()
     if not engine.rootObjects():
         return 1
-    return qt.exec()
+    win = engine.rootObjects()[0]  # loaded hidden, so a check can load it without showing it
+    area = win.screen().availableGeometry()  # its own screen's free area, not the whole desktop: "Build It!" stays above the taskbar
+    w = int(min(1280, area.width() * 0.9, area.height() * 0.9 * 16 / 9))
+    win.setMinimumSize(QSize(min(960, area.width()), min(540, area.height())))
+    win.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - w * 9 // 16) // 2, w, w * 9 // 16)
+    win.show()
+    code = qt.exec()
+    del engine  # before the App it shows, or its bindings read a gone app on the way out
+    return code

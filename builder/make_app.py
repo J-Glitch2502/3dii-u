@@ -158,6 +158,7 @@ def main():
             '--workpath', WORK, '--specpath', WORK, '--icon', ico, '--paths', HERE,
             '--add-data', f'{os.path.join(HERE, "ui")}{os.pathsep}ui',
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
+            '--add-data', f'{os.path.join(HERE, "faq.json")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "icon.png")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "bin", "makerom.exe")}{os.pathsep}bin',
             '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'covers', '--hidden-import', 'cia_to_decrypted_3ds']

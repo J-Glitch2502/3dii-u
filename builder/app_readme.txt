@@ -11,7 +11,7 @@ WHAT YOU NEED
 - For encrypted dumps: boot9.bin and seeddb.bin from your own 3DS, from GodMode9. Put them in C:\Users\<you>\.3ds, or choose their folder in the builder.
   - boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y, then open [0:] SDCARD, press Y again and choose Copy.
   - seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card.
-  Each row under "Your files" in the builder has a "How do I get this?" button with these steps.
+  Each row under "Your Files" in the builder has an "Info" button with these steps, and the Help page's questions and answers have them too.
 - Your Wii U's otp.bin, from your own console's NAND backup. The game is packed with it. The builder never shows the key and never stores it.
 - A Wii U with Aroma and WUP Installer GX2, and its SD card.
 - Your 3DS's system files: a few small files every 3DS keeps in its own memory, the system font many games write their text in, the
@@ -20,7 +20,7 @@ WHAT YOU NEED
   - Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.
   - GodMode9: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and 000400db (the word list).
     Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then copy 000400db the same way, next to it.
-    In the builder, press "Folder..." next to "3DS system files" and choose that 0004009b folder. Copied this way the files are
+    In the builder, press "Folder" next to "3DS System Files" and choose that 0004009b folder. Copied this way the files are
     encrypted, so the builder needs your 3DS keys (boot9.bin) to read them.
   The builder also looks in Citra's user folder, and in Downloads, Desktop and Documents. It copies them once and keeps them for every game after.
 
@@ -30,9 +30,9 @@ GETTING STARTED
 1. Unzip the whole "3Dii U Builder" folder to a short path such as C:\Games. Keep the engine folder next to the exe, and don't run it from inside the zip.
    If Windows says a path is too long while unzipping, or the builder says files are missing, unzip it again into a shorter folder.
 2. Open "3Dii U Builder.exe". This beta isn't signed, so Windows may say it "protected your PC": click "More info", then "Run anyway".
-3. Click the empty game card (or press Ctrl+O) and choose your dump. The builder then asks about the game's update, DLC and mods.
-4. Under "Your files", each dot turns green once the builder has that file.
-5. Under "Put it on", choose your SD card or a folder, then press "Build it!".
+3. Click the big "+" tile (or press Ctrl+O) and choose your dump. The builder then asks about the game's update, DLC and mods.
+4. Under "Your Files", each light turns cyan once the builder has that file.
+5. Under "Put it on", choose your SD card or a folder, then press "Build It!".
    Big games take a while: the game's code is recompiled for the Wii U and its shaders are compiled ahead of time.
    The first build also compiles the builder's own runtime, so it takes a few minutes longer than the rest.
 6. Put the SD card in the Wii U and install the game with WUP Installer GX2.
@@ -64,7 +64,7 @@ IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
 
 REPORTING A PROBLEM
 
-- If a build fails, press "Show details" and copy what it says.
+- If a build fails, press "Details" and copy what it says.
 - Say which game it is (title and region), and whether you added an update, DLC or a mod.
 - For a game that goes wrong on the Wii U, say where in the game it happens and what you saw.
 
@@ -83,7 +83,7 @@ WHAT STAYS ON YOUR PC
 - The games you build are made from your dumps and your keys: don't share them.
 
 - When you pick a game, the builder downloads its cover art from GameTDB (art.gametdb.com) for the game's start-up screens and Wii U Menu icon.
-  It sends only the four letters of the game's product code. Under Extras, "Banner art" lets you choose your own picture, or remove it to use the game's icon.
+  It sends only the four letters of the game's product code. The "Art" pill on the game's tile lets you choose your own picture, or "Remove art" to use the game's icon.
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
 Third-party notices.txt lists the open-source software it carries.
