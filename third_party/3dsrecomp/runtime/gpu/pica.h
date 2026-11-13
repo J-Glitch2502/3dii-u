@@ -139,6 +139,9 @@ u32 shader_static_uniforms(const ShaderProgram *p, u32 *loops);
 void shader_entry_info(const ShaderProgram *p, u32 entry, u64 *id, u32 *bmask, u32 *lmask);
 // is this Level-5's outline geometry shader? If so, which uniforms hold its colour and thickness
 bool shader_outline_gs(const ShaderProgram *p, u32 *color_reg, u32 *thick_reg);
+#ifdef __WIIU__
+void gx2_note_gs(u32 entry, const ShaderSetup &s);  // a geometry shader the CPU runs, for the next build (gx2_backend.cpp)
+#endif
 int shader_outline_normal(const ShaderProgram *p, u32 entry);
 constexpr s8 kOutlineSlot = -128;  // in a vertex shader's output map: it draws such an outline (see gen_vs_glsl)
 bool shader_run4(const ShaderProgram *p, ShaderUnit4 &u, const V4 *uniforms, const bool *b,

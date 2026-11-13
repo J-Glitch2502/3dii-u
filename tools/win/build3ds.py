@@ -442,6 +442,21 @@ def build_game_code(g, args):
         c = c.replace('\\', '/')
         n = os.path.basename(c)[:-2]
         items.append((n, c, f'{obj_dir}/{n}.o', (flag_os if lo <= i < hi else flag_o2) if split else flags))
+    # The geometry shaders this game's runs met on the CPU (.gsl files in its shader logs) as C, which the runtime runs instead of its
+    # interpreter (vertex.cpp: gs_native_find): the game's own code, made here from the user's logs, never shared.
+    gsl = sorted(glob.glob(g.dir + '/shader_logs/*.gsl'))
+    if gsl:
+        made = f'{obj_dir}/gs_native.c'
+        tmp = made + '.new'
+        r = run([sys.executable, ROOT + '/tools/pica_to_c.py', tmp] + gsl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        print(r.stdout.strip(), flush=True)
+        if r.returncode:
+            sys.exit('pica_to_c failed')
+        if os.path.exists(made) and open(made, 'rb').read() == open(tmp, 'rb').read():
+            os.remove(tmp)
+        else:
+            os.replace(tmp, made)
+        items.append(('gs_native', made, f'{obj_dir}/gs_native.o', flags))
     # a new generation can come in fewer files: the old ones' objects would be linked too, defining their functions twice
     wanted = {n for n, *_ in items}
     for o in glob.glob(obj_dir + '/*.o*'):

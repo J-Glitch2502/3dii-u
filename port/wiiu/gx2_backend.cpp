@@ -2675,6 +2675,21 @@ struct MemoryWrite {
 };
 MemoryWrite lcd_writes[16];
 u32 lcd_write_seq;
+// A geometry shader the CPU runs, once per program and entry, for the next build (tools/pica_to_c.py makes C of it): a "GS  " record among the
+// misses, as a "VS  " one but with no tail. tools/misses_to_log.py puts these in a .gsl file of their own.
+void gx2_note_gs(u32 entry, const ShaderSetup &s) {
+    miss_put("GS  ", 4);
+    const u32 hdr[3] = {le32(entry), le32(s.code_size), le32(s.swizzle_size)};
+    miss_put(hdr, sizeof hdr);
+    for (u32 i = 0; i < s.code_size; i++) {
+        const u32 w = le32(s.code[i]);
+        miss_put(&w, 4);
+    }
+    for (u32 i = 0; i < s.swizzle_size; i++) {
+        const u32 w = le32(s.swizzle[i]);
+        miss_put(&w, 4);
+    }
+}
 void gx2_copied_to_memory(u32 paddr, u32 size) {
     if (size < 4096) return;
     lcd_write_seq++;

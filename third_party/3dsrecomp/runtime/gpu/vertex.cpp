@@ -238,10 +238,78 @@ void gs_reconfigure() {
     }
 }
 
+// ---- geometry shaders as native code
+// A geometry shader runs here in the interpreter, a couple of hundred cycles an instruction on a console: Luigi's Mansion: Dark Moon's rain
+// (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame (2026-11-13). The game's build can bring its programs as C
+// (tools/pica_to_c.py, from the programs its runs logged: its own code, so only in a build made from the user's logs), which this finds by
+// entry and a hash of the words each was made from, and runs instead; with none, the interpreter runs everything as before.
+extern "C" {
+typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
+typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx);
+struct gs_native {
+    unsigned long long code_hash, swizzle_hash;
+    unsigned entry, end, nswizzles;
+    const unsigned short *swizzles;
+    gs_native_fn fn;
+};
+extern const gs_native gs_native_table[] __attribute__((weak));
+extern const unsigned gs_native_count __attribute__((weak));
+}
+static_assert(sizeof(V4) == 16 && sizeof(bool) == 1, "the generated code takes the register file as floats, and bools as bytes");
+
+static u64 gs_fnv(u64 h, u32 w) {
+    for (int i = 0; i < 4; i++) h = (h ^ ((w >> (8 * i)) & 0xff)) * 0x100000001b3ull;
+    return h;
+}
+
+// the native program for this code at this entry, or none (remembered per decoded program and entry)
+gs_native_fn gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u32 entry) {
+    static std::vector<std::pair<std::pair<const ShaderProgram *, u32>, gs_native_fn>> known;
+    for (const auto &k : known)
+        if (k.first.first == p && k.first.second == entry) return k.second;
+    gs_native_fn fn = nullptr;
+    const u32 n = &gs_native_count ? gs_native_count : 0;
+    for (u32 i = 0; i < n && !fn; i++) {
+        const gs_native &t = gs_native_table[i];
+        if (t.entry != entry || t.end > s.code_size) continue;
+        u64 h = 0xcbf29ce484222325ull;
+        for (u32 a = t.entry; a < t.end; a++) h = gs_fnv(h, s.code[a]);
+        if (h != t.code_hash) continue;
+        h = 0xcbf29ce484222325ull;
+        for (u32 k = 0; k < t.nswizzles; k++) h = gs_fnv(h, t.swizzles[k] < 4096 ? s.swizzle[t.swizzles[k]] : 0);
+        if (h == t.swizzle_hash) fn = t.fn;
+    }
+    if (known.size() > 64) known.clear();
+    known.push_back({{p, entry}, fn});
+    if (fn) LOG("[vtx] geometry shader at %u runs as native code\n", entry);
+    return fn;
+}
+
+// EMIT, as the interpreter does it (shader.cpp), with SETEMIT's three values passed in
+void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
+    ShaderUnit &u = *(ShaderUnit *)ctx;
+    if (Emitter *e = u.emitter) {
+        e->vertex_id = vid;
+        e->prim_emit = prim;
+        e->winding = wind;
+        if (vid < 3) {
+            u32 oi = 0;
+            for (u32 reg = 0; reg < 16; reg++)
+                if (e->output_mask & (1u << reg)) e->buf[vid][oi++] = u.r[REG_OUT + u.out_bank + reg];
+            if (prim && e->emit_prim) e->emit_prim(e);
+        }
+    }
+    u.out_bank ^= 16;
+}
+
 void gs_run() {
     const ShaderProgram *p = shader_get_program(g.gs);
     shader_copy_uniforms(g.gs_unit, g.gs);
-    shader_run(p, g.gs_unit, g.gs, g.regs[R::GS + R::SH_ENTRY] & 0xffff);
+    const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
+    gs_native_fn fn = gs_native_find(p, g.gs, entry);
+    ShaderUnit &u = g.gs_unit;
+    if (!fn || !fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u))
+        shader_run(p, u, g.gs, entry);
     g.gs.b[15] = true;
 }
 
@@ -801,6 +869,7 @@ void vtx_draw(bool indexed) {
             const ShaderProgram *gp = shader_get_program(g.gs);
             if (std::find(logged.begin(), logged.end(), gp) == logged.end() && logged.size() < 64) {
                 logged.push_back(gp);
+                gx2_note_gs(g.regs[R::GS + R::SH_ENTRY] & 0xffff, g.gs);
                 LOG("[vtx] geometry shader %p (entry %u, mode %u) shaded on the CPU, %u vertices in its first draw\n", (const void *)gp,
                     g.regs[R::GS + R::SH_ENTRY] & 0xffff, gsp.mode, n);
                 if (kMeasure) {  // its code and swizzles, to see what it does (for running it some other way)

@@ -130,6 +130,7 @@ def console_learned(info, slug, card):
             else:
                 made = sum(int(n) for n in re.findall(r'\d+', r.stdout))
                 print(f'From your console, on the SD card: the {made} shaders it had to make while you played are ready-made in this build.', flush=True)
+    # (each with the geometry shaders that card's runs met beside it, a .gsl: build3ds.py makes native code of them)
     return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
 
 

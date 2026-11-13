@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Turns the console's shader_misses.bin into a log the shader generator reads: misses_to_log.py <shader_misses.bin> <out.bin> [fragment only.bin].
+Geometry shaders the console ran on its CPU go to <out>.gsl beside it, for tools/pica_to_c.py.
 Records are already little-endian: this drops the tags and repeats that the generator does not expect in fs_log.bin.
 Fragment shaders depend on render state, not on the game, so other games' builds take the fragment-only file too (build3ds.prepare_logs)."""
 import struct
@@ -10,7 +11,8 @@ known = set()
 out = bytearray()
 only_fs = bytearray()
 p = 0
-fs = vs = 0
+fs = vs = gs = 0
+gs_out = bytearray()
 while p + 8 <= len(d):
     tag = d[p:p + 4]
     if tag == b'FS  ':
@@ -33,9 +35,19 @@ while p + 8 <= len(d):
             out += rec
             vs += 1
         p += 16 + (nc + ns) * 4 + 56
+    elif tag == b'GS  ':  # a geometry shader the CPU ran: into <out>.gsl, for tools/pica_to_c.py
+        entry, nc, ns = struct.unpack_from('<III', d, p + 4)
+        rec = d[p:p + 16 + (nc + ns) * 4]
+        if rec not in known:
+            known.add(rec)
+            gs_out += rec
+            gs += 1
+        p += 16 + (nc + ns) * 4
     else:
         sys.exit(f'unknown record at {p}: {tag!r}')
 open(sys.argv[2], 'wb').write(out)
+if gs_out:
+    open(sys.argv[2][:-4] + '.gsl' if sys.argv[2].endswith('.bin') else sys.argv[2] + '.gsl', 'wb').write(gs_out)
 if len(sys.argv) > 3:
     open(sys.argv[3], 'wb').write(only_fs)
-print(f'{fs} fragment and {vs} vertex records')
+print(f'{fs} fragment and {vs} vertex records, {gs} geometry shaders')
