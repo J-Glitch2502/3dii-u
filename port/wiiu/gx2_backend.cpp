@@ -928,13 +928,13 @@ const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 k
         if (e.addr == addr && e.size == size && e.buf && (now - e.checked < kVtxRecheck || hash_bytes(src, bytes) == e.hash)) {
             if (now - e.checked >= kVtxRecheck) e.checked = now;
             e.used = now;
-            st_vtx_hits++;
+            if (kMeasure) st_vtx_hits++;
             return e.buf;
         }
         vtx_retire(e);
         vtx_cache.erase(it);
     }
-    st_vtx_misses++;
+    if (kMeasure) st_vtx_misses++;
     void *buf = memalign(64, size + 64);
     if (!buf) {  // no room: this draw's own copy, as before
         void *w = ring_alloc(size + 64, 64);
@@ -1285,7 +1285,7 @@ void relieve_memory(u32 wanted) {
         textures.erase(it);
         if (freed > 4ull * wanted && freed > (8u << 20)) break;
     }
-    LOG("[gx2] memory full (%u bytes wanted): textures %u KB -> %u KB, the vertex cache now %u KB\n", wanted, (u32)(tex_before >> 10), (u32)(tex_memory >> 10),
+    if (kMeasure) LOG("[gx2] memory full (%u bytes wanted): textures %u KB -> %u KB, the vertex cache now %u KB\n", wanted, (u32)(tex_before >> 10), (u32)(tex_memory >> 10),
         (u32)(vtx_cache_size >> 10));
 }
 
@@ -2449,9 +2449,11 @@ bool gx2_draw(const Gx2Draw &d) {
                 // In steps of a multiple of 4 bytes, which is all a real GPU takes (vertex_arrays.h). The copy is kept (vtx_cached) until the game says it
                 // wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices, and copying each draw's arrays again took 20 to 50 MB a frame.
                 const u32 count = maxv - minv + 1, bytes = gpu_array_bytes(x, count), step = gpu_stride(x.stride);
-                st_attr_verts += count;
-                st_attr_bytes += bytes;
-                st_attr_streams++;
+                if (kMeasure) {  // for the [prof] lines
+                    st_attr_verts += count;
+                    st_attr_bytes += bytes;
+                    st_attr_streams++;
+                }
                 const u8 *copy = (const u8 *)vtx_cached(d.base + x.lo + x.stride * minv, src + x.stride * minv, x.stride, count, 0x80, bytes,
                                                         [&](void *out, const u8 *from) { copy_vertex_array((u8 *)out, from, x, count); },
                                                         vertex_array_bytes(x, count));
@@ -2485,9 +2487,11 @@ bool gx2_draw(const Gx2Draw &d) {
             // rather than depending on how each GPU path fetches little-endian integers. Only floats are read in place.
             const u32 stride = at->elems * 4;
             const u32 count = maxv - minv + 1;
-            st_attr_verts += count;
-            st_attr_bytes += (u64)count * at->stride;
-            st_attr_streams++;
+            if (kMeasure) {  // for the [prof] lines
+                st_attr_verts += count;
+                st_attr_bytes += (u64)count * at->stride;
+                st_attr_streams++;
+            }
             const u32 src_stride = at->stride;
             const u32 elems = at->elems, fmt = at->fmt;
             const float *w = (const float *)vtx_cached(addr + src_stride * minv, p + src_stride * minv, src_stride, count, fmt | elems << 4, count * stride,
@@ -2531,9 +2535,11 @@ bool gx2_draw(const Gx2Draw &d) {
         {
             // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later (see gx2_finish_list).
             const u32 elems = at->elems, stride = (elems == 1 ? 2 : elems) * 4, count = maxv - minv + 1, src_stride = at->stride;
-            st_attr_verts += count;
-            st_attr_bytes += (u64)count * src_stride;
-            st_attr_streams++;
+            if (kMeasure) {  // for the [prof] lines
+                st_attr_verts += count;
+                st_attr_bytes += (u64)count * src_stride;
+                st_attr_streams++;
+            }
             const u32 *copy = (const u32 *)vtx_cached(addr + src_stride * minv, p + src_stride * minv, src_stride, count, 3 | elems << 4, count * stride,
                                                       [&](void *out, const u8 *src) {
                 u32 *dst = (u32 *)out;
@@ -2696,7 +2702,7 @@ void write_back(Surface &s) {
     st_readbacks++;
     static u32 notes;
     static u32 told;
-    if (gxt() || told++ < 8) LOG("[gxt] read back %08x %ux%u fmt %u%s, %ux%u at %.2fx%.2f\n", s.addr, s.w, s.h, s.fmt, s.linear ? " linear" : "", s.sw, s.sh, s.sx, s.sy);
+    if (gxt() || (kMeasure && told++ < 8)) LOG("[gxt] read back %08x %ux%u fmt %u%s, %ux%u at %.2fx%.2f\n", s.addr, s.w, s.h, s.fmt, s.linear ? " linear" : "", s.sw, s.sh, s.sx, s.sy);
     if (notes < 4) wiiu::note("reading back surface %08x, %ux%u", s.addr, s.w, s.h);
     flush_surface(s);
     GX2Surface st;
@@ -2990,7 +2996,7 @@ bool dyn_test;  // a file named "dynres" in the data folder: changes level every
 void dyn_res_update() {
     if (dyn_force >= 0 || (top_720 && !dyn_720)) {  // at 1080p ("top1080"), or when asked: 720p targets fit, and mostly draw at full size
         if (dyn_force >= 0 && (u32)dyn_force != dyn_level) {
-            LOG("[gx2] top screen held at %s size\n", dyn_force ? "the lower" : "full");
+            if (kMeasure) LOG("[gx2] top screen held at %s size\n", dyn_force ? "the lower" : "full");
             dyn_level = (u32)dyn_force;
         }
         dyn_waited = 0;
@@ -3321,7 +3327,7 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
     if (dst == src || first_col + cols > dst->w) return false;
     take_dyn_level(*dst);
     static u32 notes;
-    if (notes++ < 4) wiiu::note("copying rows on the GPU: %08x into %08x, %u columns from %u", in_paddr, base, cols, first_col);
+    if (kMeasure && notes++ < 4) wiiu::note("copying rows on the GPU: %08x into %08x, %u columns from %u", in_paddr, base, cols, first_col);
     st_gpu_copies++;
     gx2_flush_cpu_batch();
     if (dst->first_use) {
@@ -4090,7 +4096,7 @@ static void show_lcd_from_memory() {
         flush_surface(*lcd);
         const float h = (float)lcd->tex_h, first_row = (float)((pa - lcd->addr) / stride);
         static u32 told;
-        if (told++ % 300 == 0) LOG("[gx2] top screen from the LCD buffer put together on the GPU, %08x, from row %u of %08x\n", pa, (u32)first_row, lcd->addr);
+        if (kMeasure && told++ % 300 == 0) LOG("[gx2] top screen from the LCD buffer put together on the GPU, %08x, from row %u of %08x\n", pa, (u32)first_row, lcd->addr);
         show_screen(0, &lcd->tex, false, (h - first_row - 400) / h, (h - first_row) / h, 240.0f / lcd->w);
         top_shown = false;
         return;
@@ -4142,7 +4148,7 @@ static void show_lcd_from_memory() {
     DCFlushRange(out, t.surface.imageSize);
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, out, t.surface.imageSize);
     static u32 notes;
-    if (notes++ % 100 == 0) {
+    if (kMeasure && notes++ % 100 == 0) {
         u32 lit = 0;
         for (u32 i = 0; i < size; i += 4) lit += src[i] != 0;
         LOG("[gx2] top screen from its LCD buffer %08x, format %u, stride %u: %u of %u samples not black\n", pa, fmt, stride, lit, size / 4);

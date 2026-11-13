@@ -150,7 +150,7 @@ by a factor in Cemu falls about as much on a console.
   `portable/mlc01/usr/save/system/pdm`: a Cemu stopped while writing those crashes at the next start (`0xc0000409`).
   Cemu reads nothing the GPU drew back into memory, so anything that depends on read backs is black there.
 - **The game's own log, live**: the build listens on port 4405 (`port/wiiu/net_console.cpp`), in Cemu (`127.0.0.1`) and
-  on the console (`192.168.0.149` on Senne's network). `tools/console_watch.py <ip> [commands]` (local: `.gitignore`
+  on the console (its address on the local network). `tools/console_watch.py <ip> [commands]` (local: `.gitignore`
   keeps `tools/console_*` out) saves the log, and sends commands: `st`, `ps`, `misses` (saves `shader_misses.bin`),
   `shot`, `surf <hex address>` (a picture of a target), `set trace <n>` (the next n draws and copies in the log), and
   `in <buttons> <frames>` / `in WAIT <frames>` (input). Only one PC can be connected at a time.
