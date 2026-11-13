@@ -14,5 +14,9 @@
   {"q": "What do \"Complete\", \"Plays\" and \"Untested\" mean?",
    "a": "Complete: the game is finished: confirmed on a real Wii U to run as it should, with no known problems left. Plays: the game was tested on a real Wii U and plays, though some things may still be rough. Either badge shows when your dump is the same edition that was tested. The games were tested without their updates: with its update a game should play the same, but nobody has checked yet. With a mod the badge stays, and its note says it is untested with a mod. Every other game shows \"Untested\": it may not start, or it may stop partway."},
   {"q": "A game runs slowly or freezes on the Wii U. What can I do?",
-   "a": "Turn off the SDCafiine and FTP (FTPiiU) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch both off, then start the game again. The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders; the next time is smooth."}
+   "a": "Turn off the SDCafiine and FTP (FTPiiU) plugins while you play: open Aroma's plugin menu (L + D-pad Down + Minus), switch both off, then start the game again. The first time a game shows a new kind of scene it can stutter for a moment while the console makes that scene's shaders; the next time is smooth."},
+  {"q": "How does the Builder update itself?",
+   "a": "When it starts, the Builder asks GitHub for the list of its releases; it only downloads the one you choose. If a newer one is out, the Build page offers it. Press Update and the new version is downloaded into the Builder's data folder, %LOCALAPPDATA%\\3Dii U Builder\\app, and opens from then on. The folder you unzipped is never changed."},
+  {"q": "An update went wrong. What can I do?",
+   "a": "Hold Shift while starting the Builder to open the copy you unzipped. Or delete the folder %LOCALAPPDATA%\\3Dii U Builder\\app, and the copy you unzipped runs again. A version that fails to start is set aside by itself, and Check for updates on the Help page offers it again."}
 ]

@@ -139,6 +139,15 @@ with tempfile.TemporaryDirectory() as tmp:
         raises(up.download, up.Release(**{**good.__dict__, 'url': url}), dl, opener=serve(data), says='doesn\'t come from')
     raises(up.download, up.Release(**{**good.__dict__, 'tag': '../x'}), dl, opener=serve(data))
     assert asked == [] and os.listdir(dl) == []
+    # a whole zip already there (its unpacking was cut short) is used as it is; one of the right size but another hash is fetched again
+    path = up.download(good, dl, opener=serve(data))
+    asked.clear()
+    assert up.download(good, dl, opener=serve(data)) == path and asked == [], 'a whole zip was downloaded again'
+    with open(path, 'r+b') as f:
+        f.write(bytes(b ^ 1 for b in data[:16]))
+    assert up.download(good, dl, opener=serve(data)) == path and len(asked) == 1 and open(path, 'rb').read() == data
+    os.remove(path)
+    asked.clear()
     raises(up.need_room, tmp, 1 << 60, 'the update', says='free space')
     print('download ok')
 
@@ -238,6 +247,17 @@ with tempfile.TemporaryDirectory() as tmp:
     raises(up.activate, app, says='isn\'t a downloaded update')
     raises(up.activate, os.path.dirname(v), says='isn\'t a downloaded update')
     assert record() == r
+    # activated: the version the record points at, while it may still be run
+    assert up.activated() == NEW
+    for state in ('trying', 'ok'):
+        put(state=state)
+        assert up.activated() == NEW, state
+    put(state='failed')
+    assert up.activated() == '', 'a failed version is not the one to run'
+    put(exe=os.path.join('builder-1.0-beta-2026-11-16', TOP, up.EXE))
+    assert up.activated() == '', 'its exe is not there'
+    put()
+    assert up.activated() == NEW and record()['state'] == 'new', 'it only reads'
     print('activate ok')
 
     # current: the stub's state machine

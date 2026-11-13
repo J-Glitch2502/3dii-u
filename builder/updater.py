@@ -153,9 +153,15 @@ def need_room(folder, size, what):
 
 def download(release, folder, progress=None, cancelled=None, opener=None):
     """Downloads the release's zip into folder as <tag>.zip and returns its path, once its size and SHA-256 match what GitHub published.
-    None when cancelled before the last piece. A part file is never left behind, and two windows never write the same one."""
+    None when cancelled before the last piece. A part file is never left behind, and two windows never write the same one. A whole
+    <tag>.zip already there (an update whose unpacking was cut short) is used without downloading it again."""
     if not release.url.startswith(DOWNLOADS) or not tag_key(release.tag):
         raise UpdateError('That update doesn\'t come from the 3Dii U repository, so it wasn\'t downloaded.')
+    path = os.path.join(folder, release.tag + '.zip')
+    if whole(path, release):  # downloaded before, and its unpacking was cut short: used as it is
+        if progress:
+            progress(release.size, release.size)
+        return path
     try:
         os.makedirs(folder, exist_ok=True)
         need_room(folder, 4 * release.size, 'the update')  # the zip, and the app unpacked from it at about three times its size
@@ -187,7 +193,6 @@ def download(release, folder, progress=None, cancelled=None, opener=None):
         if done != release.size or sha.hexdigest() != release.sha256:
             raise UpdateError('The download doesn\'t match the release (it was cut short or changed on the way), so it was thrown away. '
                               'Try again.')
-        path = os.path.join(folder, release.tag + '.zip')
         os.replace(part, path)
         return path
     except UpdateError:
@@ -196,6 +201,20 @@ def download(release, folder, progress=None, cancelled=None, opener=None):
     except Exception as e:
         remove(part)
         raise UpdateError(f'The download stopped: {e}. Check the connection and try again.')
+
+
+def whole(path, release):
+    """whether path is already the release's zip: its size and SHA-256 are the ones GitHub published"""
+    try:
+        if os.path.getsize(path) != release.size:
+            return False
+        sha = hashlib.sha256()
+        with open(path, 'rb') as f:
+            for piece in iter(lambda: f.read(PIECE), b''):
+                sha.update(piece)
+        return sha.hexdigest() == release.sha256
+    except OSError:
+        return False
 
 
 def verify(app):
@@ -400,6 +419,17 @@ def activate(app):
         raise UpdateError('The update couldn\'t be made the version to run: its folder can\'t be written to, or another window of the app is '
                           'busy with it. Try again.')
     remove(os.path.join(home(), tag + '.zip'))
+
+
+def activated():
+    """The tag of the version the launch record points the app at (new, trying or ok, with its exe there), or ''. Reads only; never
+    fails."""
+    try:
+        record = read_record()
+        exe = record and record.get('state') in ('new', 'trying', 'ok') and tag_key(record.get('tag')) and record_exe(record)
+        return record['tag'] if exe and os.path.isfile(exe) else ''
+    except Exception:
+        return ''
 
 
 def current(own):

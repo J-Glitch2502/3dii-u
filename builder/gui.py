@@ -12,9 +12,11 @@ import sys
 import tempfile
 import threading
 
+import shiboken6
 from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 import covers
@@ -23,6 +25,7 @@ import decrypt
 import dumps
 import mods
 import pipeline
+import updater
 import user_files
 
 APP, VERSION = credits.APP, credits.VERSION
@@ -215,6 +218,7 @@ def theme():
 class App(QObject):
     changed = Signal()
     coverReady = Signal(str, str)  # title id, path: from fetch_cover's thread
+    updateEvent = Signal(str, object)  # what, value: from the updater's worker threads, the value passed as it is
     logChanged = Signal()
 
     def _p(kind, name, notify=changed):
@@ -235,6 +239,8 @@ class App(QObject):
     resultText, where, dialog = _p(str, 'resultText'), _p(str, 'where'), _p('QVariant', 'dialog')
     games, others, version, rootOk = _p('QVariantList', 'games'), _p('QVariantList', 'others'), _p(str, 'version'), _p(bool, 'rootOk')
     faq, themeMode, dark = _p('QVariantList', 'faq'), _p(str, 'themeMode'), _p(bool, 'dark')
+    updateState, updateTitle, updateNotes, updateProgress = _p(str, 'updateState'), _p(str, 'updateTitle'), _p(str, 'updateNotes'), _p(int, 'updateProgress')
+    updateMessage, releaseTag, updateSetAside = _p(str, 'updateMessage'), _p(str, 'releaseTag'), _p(bool, 'updateSetAside')
     del _p
 
     def __init__(self):
@@ -262,7 +268,17 @@ class App(QObject):
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
                        games=[dict(name=g['name'], status=g['status'], note=g['note']) for k, g in compat.items() if not k.startswith('_')],
                        others=compat.get('_cemu', []),  # shown only: they build as untested games, by their own code
-                       faq=faq, themeMode=theme_mode if theme_mode in ('system', 'light', 'dark') else 'system', dark=False)
+                       faq=faq, themeMode=theme_mode if theme_mode in ('system', 'light', 'dark') else 'system', dark=False,
+                       updateState='', updateTitle='', updateNotes='', updateProgress=0, updateMessage='', releaseTag=updater.own_tag(),
+                       updateSetAside=False)
+        self.release, self.update_job, self.check_job, self.update_stop, self.shown, self.ask_again = None, None, None, threading.Event(), False, False
+        self.set(updateSetAside=self.set_aside(updater.failed_tags()))
+        ready = updater.activated()  # a version downloaded before (Later, or a start with Shift held) is ready without a check
+        if updater.tag_key(self._s['releaseTag']) and updater.tag_key(ready) and updater.tag_key(ready) > updater.tag_key(self._s['releaseTag']):
+            self.set(updateState='ready', updateTitle=ready)
+        self.updateEvent.connect(self.update_event)
+        self.auto_check = QTimer(self, singleShot=True, interval=4000)  # a few seconds after the window shows: the start isn't slowed
+        self.auto_check.timeout.connect(lambda: self.check_update(False))
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)  # "system" follows Windows switching while the window is open
         self.apply_theme()
         self.coverReady.connect(self.cover_ready)
@@ -673,10 +689,147 @@ class App(QObject):
                  keysText=short(keys, 26) if have else 'Not found yet' if needed else 'Only for encrypted dumps',
                  otpOk=otp_ok(otp), otpText=short(otp, 26) if otp_ok(otp) else 'Not found yet', destText=dest)
 
+    # ---- updates (updater.py): every call that reaches the network or the disk runs on a worker, which reports through updateEvent
+    @Slot()
+    def windowShown(self):
+        """The window's first frame, or run()'s timer when no frame comes: tells updater a downloaded version came up (or every update would
+        be set aside after its first use), then, in a released app only, looks for a newer release a few seconds later"""
+        if self.shown:
+            return
+        self.shown = True
+        try:  # create()'s connection to every frame: the first was the one wanted
+            QObject.disconnect(self.frames)
+        except Exception:  # started() must run whatever happens to the connection
+            pass
+        threading.Thread(target=updater.started, daemon=True).start()  # it waits on the launch record's lock
+        if FROZEN and updater.tag_key(self._s['releaseTag']):  # a development build checks only when asked
+            self.auto_check.start()
+
+    def set_aside(self, failed):
+        """whether a release newer than this app failed to start here: older failures it has moved past aren't worth a note"""
+        mine = updater.tag_key(self._s['releaseTag'])
+        return any(mine is None or updater.tag_key(t) > mine for t in failed)
+
+    @Slot()
+    def checkUpdate(self):
+        self.check_update(True)
+
+    def check_update(self, asked):
+        """asked: the person pressed Check for updates, so a release that failed to start here before is offered again"""
+        if self._s['updateState'] in ('downloading', 'unpacking', 'ready', 'restarting'):
+            return  # the About line says what is under way
+        if self.check_job and self.check_job.is_alive():
+            if asked:  # the automatic check is under way: an asked one follows it, so its answer is shown
+                self.ask_again = True
+                self.set(updateState='checking', updateMessage='')
+            return
+        if asked:
+            self.set(updateState='checking', updateMessage='')
+        own = self._s['releaseTag']
+
+        def job():
+            release = updater.check(own, skip_failed=False) if asked else updater.check(own)
+            self.updateEvent.emit('checked', (release, asked, updater.failed_tags(), updater.activated()))
+        self.check_job = threading.Thread(target=job, daemon=True)
+        self.check_job.start()
+
+    @Slot()
+    def startUpdate(self):
+        """Update, or Try again: the whole update, which also clears a failed mark left on that release"""
+        if self._s['updateState'] not in ('available', 'failed') or (self.update_job and self.update_job.is_alive()):
+            return
+        if not self.release:  # a version made ready before this start, whose restart failed: find its release again
+            self.check_update(True)
+            return
+        release = self.release
+        self.update_stop.clear()
+        self.set(updateState='downloading', updateProgress=0, updateMessage='')
+
+        def job():
+            shown = [-1]
+
+            def progress(done, size):
+                percent = min(100, done * 100 // max(1, size))
+                if percent != shown[0]:  # a signal per percent, not per piece
+                    shown[0] = percent
+                    self.updateEvent.emit('progress', percent)
+            try:
+                zip_path = updater.download(release, updater.home(), progress, self.update_stop.is_set)
+                if zip_path is None:
+                    self.updateEvent.emit('cancelled', None)
+                    return
+                self.updateEvent.emit('unpacking', None)
+                updater.activate(updater.unpack(zip_path, updater.home()))
+                self.updateEvent.emit('ready', updater.failed_tags())
+            except updater.UpdateError as e:
+                self.updateEvent.emit('failed', str(e))
+            except Exception as e:  # anything else is said the same way, and the app carries on
+                self.updateEvent.emit('failed', f'The update stopped: {e}')
+        self.update_job = threading.Thread(target=job, daemon=True)
+        self.update_job.start()
+
+    @Slot()
+    def cancelUpdate(self):
+        self.update_stop.set()
+
+    @Slot()
+    def laterUpdate(self):
+        self.set(updateState='')
+
+    @Slot()
+    def restartForUpdate(self):
+        if self._s['updateState'] != 'ready':
+            return
+        if self._s['building']:
+            self.tell('A build is running', 'Restart once the build has finished, or cancel it first.', 'warn')
+            return
+        self.set(updateState='restarting', updateMessage='Starting the new version...')  # no build starts meanwhile
+
+        def job():
+            exe = updater.current(updater.own_tag())
+            self.updateEvent.emit('quit' if exe and updater.hand_over(exe, []) else 'restart failed', None)
+        self.update_job = threading.Thread(target=job, daemon=True)
+        self.update_job.start()
+
+    @Slot(str, object)
+    def update_event(self, what, value):
+        """a worker's result, on the window's thread"""
+        if what == 'checked':
+            self.check_job = None  # its last act was to send this: a check asked for meanwhile can start, though the thread may not have ended
+            release, asked, failed, ready = value
+            self.set(updateSetAside=self.set_aside(failed))
+            if self.ask_again and not asked:
+                self.ask_again = False
+                self.check_update(True)
+                return
+            if self._s['updateState'] in ('downloading', 'unpacking', 'ready', 'restarting'):
+                return
+            if release:
+                self.release = release
+                self.set(updateState='ready' if release.tag == ready else 'available', updateTitle=release.title,
+                         updateNotes=release.notes[:400], updateMessage='')  # ready: downloaded already, and Later was pressed
+            elif asked:
+                self.set(updateState='none')
+        elif what == 'progress':
+            self.set(updateProgress=value)
+        elif what == 'cancelled':
+            self.set(updateState='available', updateProgress=0)
+        elif what == 'unpacking':
+            self.set(updateState='unpacking', updateProgress=100)
+        elif what == 'ready':
+            self.set(updateState='ready', updateSetAside=self.set_aside(value), updateMessage='')
+        elif what == 'failed':
+            self.set(updateState='failed', updateMessage=value)
+        elif what == 'restart failed':
+            self.set(updateState='failed', updateMessage='The new version didn\'t start, so this one keeps running.')
+        elif what == 'quit':
+            self.stop_for_close()  # a build left running would go on behind the new window
+            QApplication.quit()
+
     # ---- building
     @Slot()
     def build(self):
-        if not self.game or self._s['building']:
+        if not self.game or self._s['building'] or self._s['updateState'] == 'restarting':
             return
         if not self._s['rootOk']:
             self.tell('The build engine is missing', 'The engine folder next to 3Dii U Builder.exe holds the recompiler and its toolchain. Copy the '
@@ -804,6 +957,10 @@ def create(argv=None):
     engine.rootContext().setContextProperty('T', theme())
     engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(512)))  # the rail shows it at 162: 512 stays sharp up to a 4K window
     engine.load(QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Main.qml')))
+    for win in engine.rootObjects():  # its first frame on screen is when it has really been shown (App.windowShown)
+        quick = shiboken6.wrapInstance(shiboken6.getCppPointer(win)[0], QQuickWindow)
+        # it comes at every frame, from the render thread: windowShown ends the connection at the first
+        state.frames = quick.frameSwapped.connect(state.windowShown, Qt.ConnectionType.QueuedConnection)
     return qt, engine, state
 
 
@@ -817,6 +974,9 @@ def run():
     win.setMinimumSize(QSize(min(960, area.width()), min(540, area.height())))
     win.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - w * 9 // 16) // 2, w, w * 9 // 16)
     win.show()
+    # The first frame is the sign the window came up. A window started minimised draws none, so a timer says it for one that isn't showing.
+    # One that is showing and has still drawn nothing is broken, and is left unconfirmed: updater sets that version aside.
+    QTimer.singleShot(10000, lambda: None if win.isExposed() else state.windowShown())
     code = qt.exec()
     del engine  # before the App it shows, or its bindings read a gone app on the way out
     return code

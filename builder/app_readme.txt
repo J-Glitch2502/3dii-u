@@ -65,6 +65,17 @@ IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
   so the next time is smooth.
 
 
+UPDATES
+
+- When it starts, the builder asks GitHub for the list of its releases; it only downloads the one you choose. If a newer one is out, the
+  Build page offers it; Help > Check for updates asks again at any time.
+- Press "Update" and the new version is downloaded into the builder's data folder, %LOCALAPPDATA%\3Dii U Builder\app. It opens from then
+  on: at once with "Restart now", or the next time you start the builder. The folder you unzipped is never changed.
+- If an update goes wrong: hold Shift while starting the builder to open the copy you unzipped, or delete the folder
+  %LOCALAPPDATA%\3Dii U Builder\app and the copy you unzipped runs again. A version that fails to start is set aside by itself, and
+  Help > Check for updates offers it again.
+
+
 REPORTING A PROBLEM
 
 - If a build fails, press "Details" and copy what it says.
@@ -87,6 +98,7 @@ WHAT STAYS ON YOUR PC
 
 - When you pick a game, the builder downloads its cover art from GameTDB (art.gametdb.com) for the game's start-up screens and Wii U Menu icon.
   It sends only the four letters of the game's product code. The "Art" pill on the game's tile lets you choose your own picture, or "Remove art" to use the game's icon.
+- The builder asks GitHub for the list of its releases, and downloads one from there only when you press "Update".
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
 Third-party notices.txt lists the open-source software it carries.

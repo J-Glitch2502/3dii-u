@@ -24,6 +24,8 @@ ApplicationWindow {
     readonly property real px: Math.min(2, Math.ceil(s * Screen.devicePixelRatio * 2) / 2)
     readonly property bool blocked: dialogLayer.visible || cardMenu.visible  // the shortcuts wait while a dialog or the card menu is open
     property string page: "build"
+    readonly property bool restarting: app.updateState === "restarting"
+    readonly property bool busy: app.building || restarting  // the game controls wait while a build runs or the new version starts
     property bool showLog: false
     property int openFaq: -1
     property Item lastFocus: null
@@ -257,6 +259,7 @@ ApplicationWindow {
             x: 25; y: 41
             width: card.width - 50
             text: card.subtitle
+            textFormat: Text.PlainText  // a release's title comes from GitHub: no markup, so nothing is fetched from elsewhere
             visible: text.length > 0
             color: pal.sub
             font.pixelSize: 17
@@ -537,7 +540,7 @@ ApplicationWindow {
                 rim: 12
                 feather: 3
                 shadowOffset: 4
-                Hit { enabled: !app.building; ringRadius: 75; name: app.hasGame ? "Change game: " + app.gameName : "Choose a game"; onActivated: app.chooseGame() }
+                Hit { enabled: !win.busy; ringRadius: 75; name: app.hasGame ? "Change game: " + app.gameName : "Choose a game"; onActivated: app.chooseGame() }
                 Item {
                     anchors.fill: parent
                     visible: !app.hasGame || buildPage.art === ""
@@ -563,6 +566,7 @@ ApplicationWindow {
                     anchors.bottom: parent.bottom; anchors.bottomMargin: 26
                     spacing: 8
                     visible: app.hasGame && !app.building
+                    enabled: !win.restarting
                     Pill { text: "Change game"; onClicked: app.chooseGame() }
                     Pill { text: "Art"; tip: app.artText; onClicked: app.chooseArt() }
                     Pill { text: "Remove art"; tone: "red"; visible: app.hasArt; onClicked: app.removeArt() }
@@ -626,7 +630,7 @@ ApplicationWindow {
                 fontSize: 44
                 letterSpacing: 1.5
                 ink: pal.buildText
-                enabled: app.view === "form"  // build() says what is missing; after a build its own card has the buttons
+                enabled: app.view === "form" && !win.restarting  // build() says what is missing; after a build its own card has the buttons
                 onClicked: app.hasGame ? app.build() : app.chooseGame()
             }
 
@@ -643,8 +647,50 @@ ApplicationWindow {
                     x: 20; y: 12
                     spacing: 34
 
+                    // a newer release, from its offer to its being ready (gui.py's updater part)
+                    Card {
+                        id: updateCard
+                        readonly property string st: app.updateState
+                        visible: ["available", "downloading", "unpacking", "ready", "restarting", "failed"].indexOf(st) >= 0
+                        title: st === "failed" ? "The update stopped" : "A newer Builder is out"
+                        titleColor: st === "failed" ? pal.redText : pal.title
+                        subtitle: app.updateTitle
+                        Column {
+                            x: 25; width: 510
+                            spacing: 8
+                            Label {
+                                width: parent.width
+                                visible: text.length > 0
+                                text: updateCard.st === "available" ? app.updateNotes
+                                    : updateCard.st === "downloading" ? "Downloading... " + app.updateProgress + "%"
+                                    : updateCard.st === "unpacking" ? "Unpacking..."
+                                    : updateCard.st === "ready" ? "Ready. It opens the next time you start the Builder."
+                                    : app.updateMessage
+                                textFormat: Text.PlainText  // release notes are Markdown from GitHub: shown as text, so no picture is fetched
+                                color: pal.label; font.pixelSize: 17; wrapMode: Text.WordWrap
+                                maximumLineCount: updateCard.st === "available" ? 3 : 8
+                                elide: Text.ElideRight
+                            }
+                            ProgressPill { width: parent.width; value: app.updateProgress / 100; visible: updateCard.st === "downloading" || updateCard.st === "unpacking" }
+                        }
+                        Item {
+                            width: 560; height: 62
+                            visible: updateCard.st !== "unpacking" && updateCard.st !== "restarting"
+                            Row {
+                                anchors.right: parent.right; anchors.rightMargin: 21; y: 10
+                                spacing: 8
+                                Pill { text: "Later"; accessibleName: "Update later"; visible: updateCard.st !== "downloading"; onClicked: app.laterUpdate() }
+                                Pill { text: "Cancel"; accessibleName: "Cancel the download"; tone: "red"; visible: updateCard.st === "downloading"; onClicked: app.cancelUpdate() }
+                                Pill { text: "Update"; accessibleName: "Download the update"; tone: "cyan"; visible: updateCard.st === "available"; onClicked: app.startUpdate() }
+                                Pill { text: "Restart now"; accessibleName: "Restart into the new version"; tone: "cyan"; visible: updateCard.st === "ready"; enabled: !app.building; onClicked: app.restartForUpdate() }
+                                Pill { text: "Try again"; accessibleName: "Try the update again"; tone: "cyan"; visible: updateCard.st === "failed"; onClicked: app.startUpdate() }
+                            }
+                        }
+                    }
+
                     Card {
                         visible: app.view === "form"
+                        enabled: !win.restarting
                         title: "Extras"
                         subtitle: "Allows you to build with an update, DLC or a Mod.\nYou'll be asked about each when a game is picked."
                         CardRow {
@@ -667,6 +713,7 @@ ApplicationWindow {
 
                     Card {
                         visible: app.view === "form"
+                        enabled: !win.restarting
                         title: "Your Files"
                         subtitle: "These will be staying in your PC.\nThe Builder won't ever show or keep keys."
                         CardRow {
@@ -688,6 +735,7 @@ ApplicationWindow {
 
                     Card {
                         visible: app.view === "form"
+                        enabled: !win.restarting
                         title: "Put it on"
                         subtitle: "Where the finished game goes: straight onto\nyour Wii U's SD card, or into a folder on this PC."
                         CardRow {
@@ -780,7 +828,7 @@ ApplicationWindow {
                                 width: 140; height: 184
                                 HoverHandler { id: libHover }
                                 // hover, focus or being the open game shows Remove, so touch screens and keyboards reach it too
-                                readonly property bool showRemove: (libHover.hovered || libTile.activeFocus || modelData.current) && !app.building
+                                readonly property bool showRemove: (libHover.hovered || libTile.activeFocus || modelData.current) && !win.busy
                                 KeyCap {
                                     x: 10; y: 4; width: 120; height: 130; inset: 8
                                     Image {
@@ -798,7 +846,7 @@ ApplicationWindow {
                                 }
                                 Hit {
                                     id: libHit
-                                    enabled: !app.building
+                                    enabled: !win.busy
                                     name: "Open " + modelData.name
                                     onActivated: { app.openRecent(modelData.path); win.page = "build" }
                                 }
@@ -883,6 +931,25 @@ ApplicationWindow {
                     CardRow {
                         label: "Version " + app.version; sub: "Free and open-source: the licences and the software it carries."
                         Pill { text: "About and licences"; onClicked: app.about() }
+                    }
+                    CardRow {
+                        id: updatesRow
+                        readonly property string st: app.updateState
+                        readonly property bool offered: ["available", "downloading", "unpacking", "ready", "restarting", "failed"].indexOf(st) >= 0
+                        label: app.releaseTag ? "Release " + app.releaseTag : "A test build"
+                        sub: st === "checking" ? "Checking..." : st === "none" ? "No newer version found."  // also what a check that couldn't reach GitHub ends in
+                            : st === "downloading" || st === "unpacking" ? "A newer version is being downloaded."
+                            : st === "ready" || st === "restarting" ? "A newer version is ready."
+                            : offered ? "A newer version is out." : ""
+                        Pill { text: "Show"; accessibleName: "Show the update on the Build page"; tone: "cyan"; visible: updatesRow.offered; onClicked: win.page = "build" }
+                        Pill { text: "Check for updates"; enabled: app.updateState !== "checking"; onClicked: app.checkUpdate() }
+                    }
+                    Label {
+                        x: 64; width: 1030 - 64 - 40
+                        visible: app.updateSetAside
+                        text: "An update didn't start on this PC before and was set aside. Check for updates to try it again."
+                        color: pal.subLabel; font.pixelSize: 17; wrapMode: Text.WordWrap
+                        bottomPadding: 10
                     }
                     CardRow {
                         label: "Look"; sub: "System follows Windows' light or dark setting."
@@ -995,5 +1062,6 @@ ApplicationWindow {
 
     onClosing: (close) => {
         if (app.busy()) app.cancel()
+        app.cancelUpdate()  // a download stops with the window
     }
 }
