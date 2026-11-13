@@ -1184,8 +1184,9 @@ struct SpecGen {
                 // A JMPU is settled by the variant's bools: one not taken does nothing, and one taken is a goto the code can follow, backwards too
                 // (Luigi's Mansion: Dark Moon's one vertex program jumps back on b14 at 0e5, 101, 141, 181... and all 108 of its variants that
                 // reach one ran on the console's CPU, at 1.6 fps). Only outside every call, if and loop, where no region ends between the two.
-                if (I.op == OP_JMPU && ((b >> I.bid) & 1) != !(num & 1)) break;
-                if (I.op == OP_JMPU && dst < i && dst < n && ends.empty() && !loops && !ifs && !calls) {
+                // An open bool (decided(), left to run time) isn't settled here: that one is written out below.
+                if (I.op == OP_JMPU && decided(I) && ((b >> I.bid) & 1) != !(num & 1)) break;
+                if (I.op == OP_JMPU && decided(I) && dst < i && dst < n && ends.empty() && !loops && !ifs && !calls) {
                     cont = dst;
                     break;
                 }
