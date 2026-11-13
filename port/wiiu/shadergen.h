@@ -8,7 +8,8 @@ namespace gpu {
 std::string gen_fs_glsl(const DrawState &ds);
 std::string gen_uber_fs(bool lit);
 constexpr char kUberKey[] = "uber", kUberLitKey[] = "uber lit";  // their entries in the fragment index, hashed like any key
-std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs);
+// open: the bools the shader reads as it runs, where it is to serve every set of them (vs_open_bools)
+std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs, u32 open = 0);
 std::string gen_passthrough_vs();
 std::string gen_blit_vs();
 std::string gen_blit_fs();
@@ -32,8 +33,15 @@ inline bool uses_proctex(const DrawState &ds) {
     }
     return false;
 }
-// the key of a vertex shader: the program, its entry point, the uniforms its flow control reads, and its output map
-u64 vs_variant_key(const ShaderProgram *p, u32 entry, const bool *b, const s8 *slot_src);
+// A build makes a vertex shader for every set of the bools an entry's flow control reads, while those are no more than this (1,024
+// shaders). An entry that reads more (NW4C's material shader reads 14: 16,384 sets) gets the sets a run of the game met, if any, and one
+// shader that reads its bools as it runs, each a bit of the uniform block's uInt[0].w. A draw whose own set no build made uses that one.
+constexpr u32 kVsBoolsMade = 10;
+// the bools such an entry's extra shader leaves open: all that its flow control reads. 0 for an entry whose every set is made.
+u32 vs_open_bools(const ShaderProgram *p, u32 entry);
+// the key of a vertex shader: the program, its entry point, the uniforms its flow control reads, and its output map. With `open`, of
+// the shader that leaves those bools open: they aren't in the key then.
+u64 vs_variant_key(const ShaderProgram *p, u32 entry, const bool *b, const s8 *slot_src, u32 open = 0);
 
 // the compiled shaders' index, shaders.idx: this header, then the fragment and vertex keys with their indices in shaders.gsh
 struct ShaderIndexHeader {

@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
         ps_index[fnv64(k.data(), k.size())] = add_ps(gen_untile_fs(fmt));
     }
 
-    // vertex shaders: every combination of the bool uniforms each program's flow control reads, if there aren't too many
+    // vertex shaders: every combination of the bool uniforms each program's flow control reads, if there aren't too many (kVsBoolsMade)
     std::map<std::string, u32> vs_sources;
     std::vector<std::string> vs_files;
     struct VsOut { u32 index, inputs; };
@@ -175,7 +175,7 @@ int main(int argc, char **argv) {
         std::vector<u32> bits;
         for (u32 i = 0; i < 16; i++)
             if ((mask >> i) & 1) bits.push_back(i);
-        const u32 combos = bits.size() <= 10 ? 1u << bits.size() : 1;
+        const u32 combos = bits.size() <= kVsBoolsMade ? 1u << bits.size() : 1;
         const u8 (*iu)[4] = (const u8 (*)[4])r.iu;
         for (u32 c = 0; c < combos; c++) {
             bool b[16];
@@ -193,6 +193,14 @@ int main(int argc, char **argv) {
             }
             const u64 key = vs_variant_key(p, r.entry, b, r.slots);
             vs_index[key] = {add_vs(src), inputs};
+        }
+        // more bools than every set is made of: besides the record's own set, the shader that reads them as it runs, for every other set
+        if (const u32 open = vs_open_bools(p, r.entry)) {
+            u32 inputs = 0;
+            const bool none[16] = {};  // open bools aren't in the key
+            const std::string src = gen_vs_glsl(p, r.entry, 0, iu, r.slots, &inputs, open);
+            if (src.empty()) failed++;
+            else vs_index[vs_variant_key(p, r.entry, none, r.slots, open)] = {add_vs(src), inputs};
         }
     }
     printf("%zu fragment and %zu vertex shaders to compile; %u variants could not be translated\n", ps_files.size(), vs_files.size(), failed);

@@ -1807,11 +1807,15 @@ void set_fragment(const DrawState &ds, bool uber) {
 }
 
 // The vertex uniform block: f[96], uDraw, uInt[4] (the integer uniforms: loop counts, starts and steps, read by the shader's loops since 11-06),
-// then the outline's two vectors when a draw has them (shadergen.cpp)
+// then the outline's two vectors when a draw has them (shadergen.cpp). An integer uniform has three parts, so uInt[0].w is free: it holds the
+// bool uniforms, a bit each, for the shaders that read them as they run (kVsBoolsMade).
 constexpr u32 VS_BLOCK_WORDS = (96 + 1 + 4) * 4;
 inline void put_vs_ints(u32 *u) {
     for (u32 n = 0; n < 4; n++)
         for (u32 c = 0; c < 4; c++) u[388 + n * 4 + c] = __builtin_bswap32((u32)g.vs.i[n][c]);
+    u32 bools = 0;
+    for (u32 i = 0; i < 16; i++) bools |= (u32)g.vs.b[i] << i;
+    u[388 + 3] = __builtin_bswap32(bools);
 }
 
 // the vertex program's uniforms; often the same as for the last draw
@@ -1819,10 +1823,12 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
     static V4 last_f[96];
     static float last_depth[2];
     static u8 last_i[4][4];
+    static bool last_b[16];
     static u32 *last;
     static u32 last_seg = ~0u;
     const float dp[2] = {ds.depth_scale, ds.depth_offset};
-    if (!(last && last_seg == ring_seg && !memcmp(last_f, f, sizeof last_f) && !memcmp(last_depth, dp, sizeof dp) && !memcmp(last_i, g.vs.i, sizeof last_i))) {
+    if (!(last && last_seg == ring_seg && !memcmp(last_f, f, sizeof last_f) && !memcmp(last_depth, dp, sizeof dp) && !memcmp(last_i, g.vs.i, sizeof last_i) &&
+          !memcmp(last_b, g.vs.b, sizeof last_b))) {
         constexpr u32 size = VS_BLOCK_WORDS * 4;
         u32 *u = (u32 *)ring_alloc((size + 255) & ~255u, 256);
         const u32 *src = (const u32 *)f;
@@ -1835,6 +1841,7 @@ void set_vertex_uniforms(const DrawState &ds, const V4 *f) {
         memcpy(last_f, f, sizeof last_f);
         memcpy(last_depth, dp, sizeof dp);
         memcpy(last_i, g.vs.i, sizeof last_i);
+        memcpy(last_b, g.vs.b, sizeof last_b);
         last = u;
         last_seg = ring_seg;
     }
@@ -1973,6 +1980,18 @@ bool gx2_draw(const Gx2Draw &d) {
     }
     const u64 key = vk.key;
     auto it = vs_table.find(key);
+    if (it == vs_table.end()) {
+        // No shader for this draw's own set of bools. Where its entry reads more of them than a build makes every set of, the pack has one
+        // that reads them as it runs (kVsBoolsMade), and this draw's key gets that shader.
+        if (const u32 open = vs_open_bools(d.prog, d.entry)) {
+            const auto any = vs_table.find(vs_variant_key(d.prog, d.entry, g.vs.b, d.slot_src, open));
+            if (any != vs_table.end() && any->second.index != MISSED) {
+                if (!any->second.shader) prepare_vs(any->second);
+                const VsEntry shared = any->second;
+                it = vs_table.emplace(key, shared).first;
+            }
+        }
+    }
     if (it == vs_table.end()) {
         vs_table[key];  // log it once
         vs_table.find(key)->second.index = ~0u;

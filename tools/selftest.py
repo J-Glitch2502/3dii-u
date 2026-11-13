@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Every check that needs no game and no Cemu, in a few seconds: selftest.py. Exit code 0 if all passed.
 The checks of whole games are tools/check_ports.py's."""
+import contextlib
+import io
 import os
 import subprocess
 import sys
+import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace('\\', '/')
 sys.path.insert(0, ROOT + '/tools/win')
@@ -39,6 +42,18 @@ def latte_program():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_latte_program.cpp', '-lpthread', '-o', exe], [exe]]
 
 
+def open_bools():
+    """tools/test_open_bools.cpp with the shader generator's own objects, which build3ds keeps built, for this PC"""
+    with contextlib.redirect_stdout(io.StringIO()):
+        build3ds.build_shadergen(types.SimpleNamespace(jobs=4, force=False, extra_flags=None, only=None, opt=None))
+    exe = build3ds.WORK + '/selftest/test_open_bools.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    objs = [f'{build3ds.WORK}/shadergen/{n}.o' for n in ('shadergen.cpp', 'shaderkeys.cpp', 'shader.cpp', 'shadergen_stubs.cpp')]
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', f'-I{build3ds.PORT}/pc/win', f'-I{build3ds.PORT}/pc', f'-I{build3ds.RT}',
+                                 f'-I{build3ds.RT}/gpu', '-include', f'{build3ds.PORT}/pc/shim.h', '-static', ROOT + '/tools/test_open_bools.cpp', *objs,
+                                 '-lpthread', '-o', exe], [exe]]
+
+
 def main():
     py = sys.executable
     checks = {
@@ -46,6 +61,7 @@ def main():
         'present rule': present_rule(),
         'frame cap': frame_cap(),
         'compiled programs': latte_program(),
+        'open bools': open_bools(),
         'program rules': [[py, ROOT + '/tools/gsh_rules.py', '--self-check']],
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
