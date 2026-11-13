@@ -278,14 +278,20 @@ void Source::generate() {
     st.filters.process(frame);
 }
 
-SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen) {
+SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish) {
     if (seen) parse_config(cfg, coeffs);
     if (st.enabled) generate();
 
     SourceStatus s;
     s.is_enabled = st.enabled;
-    s.current_buffer_id_dirty = st.buffer_update ? 1 : 0;
-    if (seen) st.buffer_update = false;
+    // A buffer change is reported in the next status the game is given, however many frames that takes. The game only acts on a
+    // status whose "current buffer changed" flag is set: a change lost in a frame it never saw left Luigi's Mansion: Dark Moon, on a
+    // stream that ran dry, with the voice off and its last buffers never finished, which it then queued again while they were still
+    // in its list (a loop it walked forever).
+    st.update_unpublished |= st.buffer_update;
+    st.buffer_update = false;
+    s.current_buffer_id_dirty = st.update_unpublished ? 1 : 0;
+    if (publish) st.update_unpublished = false;
     s.sync_count = st.sync_count;
     s.buffer_position.set(st.pos);
     s.current_buffer_id = st.current_buffer_id;

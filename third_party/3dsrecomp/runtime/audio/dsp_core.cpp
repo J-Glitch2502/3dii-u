@@ -24,6 +24,8 @@ struct Dsp {
     std::array<Source, kNumSources> backup_sources;
     Mixer backup_mixer;
     u64 frames = 0;
+    u16 last_counter = 0;  // the game's newest frame counter at the last frame
+    bool fresh = true;     // the last frame worked on a frame the game submitted since the one before
 };
 
 Dsp &dsp() {
@@ -113,18 +115,28 @@ StereoFrame generate_frame(Dsp &d, bool seen) {
     SharedMemory &rd = region(ri);
     SharedMemory &wr = region(ri ^ 1);
 
+    // Has the game submitted a frame since the last one (or none yet)? Only such a frame's status goes to the game, with an interrupt
+    // (services/dsp.cpp: dsp_tick), as on a 3DS, where every frame works on one the game submitted just before. A frame between two of
+    // its submissions only plays on: its status would go into the region the game may still be reading (it reads the one it doesn't
+    // submit next), and a status changing halfway through gave Luigi's Mansion: Dark Moon one channel of a stereo stream newer news
+    // than the other. The stream then queued a buffer again that was still in the second channel's list, and the game hung walking it.
+    // A frame the game doesn't take (seen) is never fresh, and leaves the game's submission to the frame it does take.
+    const u16 counter = frame_counter(ri);
+    d.fresh = seen && (counter != d.last_counter || (frame_counter(0) == 0 && frame_counter(1) == 0));
+    if (seen) d.last_counter = counter;
+
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
-        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen);
-        if (seen) memcpy(&wr.source_status[i], &s, sizeof(s));
+        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen, d.fresh);
+        if (d.fresh) memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
     }
 
     d.mixer.tick(rd.dsp_config, rd.intermediate, wr.intermediate, mixes);
     DspStatusBlock status{};
-    memcpy(&wr.dsp_status, &status, sizeof(status));
+    if (d.fresh) memcpy(&wr.dsp_status, &status, sizeof(status));
 
     StereoFrame out = d.mixer.output();
     for (int f = 0; f < kFrameSamples; f++) {
@@ -262,13 +274,14 @@ u16 recv_data(u32 /*reg*/) {
     return d.power == Power::On ? 0 : 1;
 }
 
-bool tick(bool seen) {
+bool tick(bool seen, bool *fresh) {
     Dsp &d = dsp();
     StereoFrame out;
     {
         std::lock_guard lk(d.lock);
         if (d.power != Power::On) return false;
         out = generate_frame(d, seen);
+        if (fresh) *fresh = d.fresh;
     }
     host_output(out.data(), out.size());
     return true;
