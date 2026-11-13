@@ -1,7 +1,8 @@
 // Shaders the shipped set lacks are compiled on the console itself, on a thread of their own, with CafeGLSL's library for the Wii U
-// (third_party/cafeglsl_ppc, the same compiler family the PC build runs). A miss draws with its fallback meanwhile and takes the real
-// shader once the GPU thread installs it (gfx_pump). The GLSL of every miss goes to the save folder, so the next start compiles it again
-// in the background before the game gets there. The first of the three things 3Dii U needs: no more builds for new areas (2026-11-06).
+// (third_party/cafeglsl_ppc: version 1.0, where the PC build runs 0.2, and its programs differ: latte_program.h). A miss draws with its
+// fallback meanwhile and takes the real shader once the GPU thread installs it (gfx_pump). The GLSL of every miss goes to the save folder,
+// so the next start compiles it again in the background before the game gets there. The first of the three things 3Dii U needs: no more
+// builds for new areas (2026-11-06).
 #include <cafeglsl/CafeGLSLCompiler.h>
 #include <coreinit/mutex.h>
 #include <coreinit/thread.h>
@@ -16,6 +17,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "latte_program.h"
 #include "shader_compile.h"
 #include "shadergen.h"
 #include "wiiu.h"
@@ -154,8 +156,9 @@ int compile_thread(int, void *) {
                                         : CompilePixelShader(j.glsl.c_str(), GLSL_COMPILE_BLOCK, &d.ps_shader, info, sizeof info, GLSL_COMPILER_FLAG_NONE);
         busy_since = 0;
         const u32 ms = (u32)(OSTicksToMilliseconds(OSGetSystemTime() - t0));
+        const auto failed = [&](const char *why) { LOG("[glsl] %s %016llx failed in %u ms: %.400s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, ms, why); };
         if (mode == GLSL_SHADER_MODE_ERROR || (!d.vs_shader && !d.ps_shader)) {
-            LOG("[glsl] %s %016llx failed in %u ms: %.400s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, ms, info);
+            failed(info);
             continue;
         }
         LOG("[glsl] %s %016llx compiled in %u ms%s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, ms, j.cached ? ", from the cache" : "");
@@ -175,6 +178,15 @@ int compile_thread(int, void *) {
             OSUnlockMutex(&mutex);
             continue;
         }
+        // what this compiler writes that a real GPU may not take, put right before anything draws with the program (latte_program.h)
+        u32 &resources = j.vs ? d.vs_shader->regs.sq_pgm_resources_vs : d.ps_shader->regs.sq_pgm_resources_ps;
+        u32 registers = resources & 0xFF;
+        if (!fit_program(j.vs ? d.vs_shader->program : d.ps_shader->program, j.vs ? d.vs_shader->size : d.ps_shader->size, registers, j.vs ? kVertexRegisters : kPixelRegisters)) {
+            failed("its program isn't laid out as this GPU's are, or has no register to spare");
+            shader_compile_discard(d);
+            continue;
+        }
+        resources = (resources & ~0xFFu) | registers;
         if (!j.cached) cache_append(j);
         OSLockMutex(&mutex);
         done.push_back(d);

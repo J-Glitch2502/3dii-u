@@ -32,12 +32,21 @@ def frame_cap():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_frame_cap.cpp', '-lpthread', '-o', exe], [exe]]
 
 
+def latte_program():
+    """port/wiiu/latte_program.h against small programs made up word by word, built for this PC"""
+    exe = build3ds.WORK + '/selftest/test_latte_program.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_latte_program.cpp', '-lpthread', '-o', exe], [exe]]
+
+
 def main():
     py = sys.executable
     checks = {
         'vertex arrays': vertex_arrays(),
         'present rule': present_rule(),
         'frame cap': frame_cap(),
+        'compiled programs': latte_program(),
+        'program rules': [[py, ROOT + '/tools/gsh_rules.py', '--self-check']],
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
         'WUP packer': [[py, ROOT + '/tools/test_pack_wup.py']],

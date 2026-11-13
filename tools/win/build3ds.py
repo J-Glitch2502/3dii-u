@@ -44,8 +44,10 @@ BIN = DKP + '/devkitPPC/bin/powerpc-eabi-'
 WUT = DKP + '/wut'
 LLVM = 'C:/Program Files/LLVM/bin/'
 MINGW = 'C:/msys64/mingw64'
-GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0, the compiler the console has run: tools/win/build_cafeglsl.ps1
-CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'  # the same compiler as a library for the console: port/wiiu/shader_compile.cpp. Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
+GLSLC = ROOT + '/third_party/cafeglsl/glslcompiler.exe'  # v0.2.0: every shader a build ships comes from it, so its programs are the ones consoles have drawn with (tools/win/build_cafeglsl.ps1)
+# v1.0.0-rc1 as a library for the console (port/wiiu/shader_compile.cpp): a later version with another code generator, whose programs differ from
+# 0.2's (port/wiiu/latte_program.h puts right what a real GPU may not take). Once installed, run tools/win/patch_cafeglsl_traps.py: Cemu stops at its traps
+CAFEGLSL_PPC = ROOT + '/third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc'
 HOST_CXX = [LLVM + 'clang++.exe', '--target=x86_64-w64-mingw32', '--sysroot=' + MINGW, '-fuse-ld=lld']
 CRO_BASE = '0x1C000000'  # the slots CRO modules' code gets (tools/recomp/cro.py), in the part of the address space the Wii U port leaves free
 FRAGMENT_VARIANTS = 2000  # how many lit-state combinations a game may get compiled ahead (prepare_logs): more and the build and the shader file grow too big
@@ -572,6 +574,14 @@ def check_registers(path):
     print(f'registers: vertex shaders use up to {vs} of 48, pixel shaders up to {ps} of 200')
     if not vs or vs > 48 or ps > 200:
         sys.exit('a shader needs more registers than the GPU gives it')
+    # and what else a real GPU holds a program to that Cemu doesn't
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('gsh_rules', ROOT + '/tools/gsh_rules.py')
+    rules = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules)
+    _, broken = rules.check_file(path)
+    if broken:
+        sys.exit('shader programs a real GPU may not take (tools/gsh_rules.py):\n   ' + '\n   '.join(broken[:20]))
 
 
 def compile_shaders(out, jobs):
