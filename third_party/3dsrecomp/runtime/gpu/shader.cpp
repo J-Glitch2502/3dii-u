@@ -1121,6 +1121,9 @@ struct SpecGen {
     const ShaderProgram *P;
     u32 n, b;
     const u8 (*iu)[4];
+    u32 open = 0;  // the bools left to run time (shader_glsl_spec): a test of one is written out, like a test of a per-vertex condition
+    bool decided(const DInst &I) const { return !((open >> I.bid) & 1); }
+    static std::string open_bool(const DInst &I) { return "((uInt[0].w >> " + std::to_string(I.bid) + ") & 1) != 0"; }
     int loops = 0, ifs = 0, calls = 0, counter = 0;
     bool fail = false;
     // end-check addresses of the active regions: shader_run tests every region type against the address
@@ -1180,11 +1183,12 @@ struct SpecGen {
                     fail = true;
                     return false;
                 }
-                if (I.op == OP_JMPU) {
+                if (I.op == OP_JMPU && decided(I)) {
                     if (((b >> I.bid) & 1) == !(num & 1)) cont = dst;
                     break;
                 }
-                w.o += "    if (" + w.cond(I) + ") {\n";
+                // JMPU jumps on its bool being set, or with the low bit of num on its being clear
+                w.o += "    if (" + (I.op == OP_JMPC ? w.cond(I) : (num & 1) ? "!(" + open_bool(I) + ")" : open_bool(I)) + ") {\n";
                 const bool r1 = block(dst, e, in_loop, inc);
                 w.o += "    } else {\n";
                 const bool r2 = block(i + 1, e, in_loop, inc);
@@ -1198,13 +1202,13 @@ struct SpecGen {
                     fail = true;
                     return false;
                 }
-                if (I.op == OP_CALLU && !((b >> I.bid) & 1)) break;
-                const bool dyn = I.op == OP_CALLC;
+                if (I.op == OP_CALLU && decided(I) && !((b >> I.bid) & 1)) break;
+                const bool dyn = I.op == OP_CALLC || (I.op == OP_CALLU && !decided(I));
                 if (!enter(dst + num)) {
                     fail = true;
                     return false;
                 }
-                if (dyn) w.o += "    if (" + w.cond(I) + ") {\n";
+                if (dyn) w.o += "    if (" + (I.op == OP_CALLC ? w.cond(I) : open_bool(I)) + ") {\n";
                 calls++;
                 block(dst, dst + num, false, 0);
                 calls--;
@@ -1223,17 +1227,18 @@ struct SpecGen {
                     return false;
                 }
                 cont = dst + num;
-                const bool taken = I.op == OP_IFC || ((b >> I.bid) & 1);
+                const bool known = I.op == OP_IFU && decided(I);
+                const bool taken = !known || ((b >> I.bid) & 1);
                 if (taken && !enter(dst)) {  // the true branch is a region ending at dst
                     fail = true;
                     return false;
                 }
                 ifs++;
-                if (I.op == OP_IFU) {
+                if (known) {
                     if (taken) block(i + 1, dst, false, 0);
                     else block(dst, dst + num, false, 0);
                 } else {
-                    w.o += "    if (" + w.cond(I) + ") {\n";
+                    w.o += "    if (" + (I.op == OP_IFC ? w.cond(I) : open_bool(I)) + ") {\n";
                     block(i + 1, dst, false, 0);
                     if (num) {
                         w.o += "    } else {\n";
@@ -1295,7 +1300,7 @@ struct SpecGen {
 }  // namespace
 
 // The body of main() for GLSL (port/wiiu/shadergen.cpp declares the registers and helpers).
-std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs) {
+std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open) {
     const u32 n = (u32)P->ins.size();
     if (entry >= n) return "";
     u32 in_used = 0;
@@ -1308,7 +1313,7 @@ std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 
     *inputs = in_used;
     MslWriter w{P};
     w.al = "aL";
-    SpecGen g{w, P, n, b, iu};
+    SpecGen g{w, P, n, b, iu, open};
     g.block(entry, n, false, 0);
     if (g.fail) return "";
     std::string s = w.o;
