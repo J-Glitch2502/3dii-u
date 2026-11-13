@@ -11,6 +11,8 @@ namespace kernel {
 extern std::vector<std::array<u8, 0x60>> g_host_miis;
 extern int g_host_my_mii;  // the current account's, or -1
 bool mii_3ds(const std::array<u8, 0x60> &host, std::array<u8, 0x60> &out);  // false: not a usable Mii
+const std::vector<std::array<u8, 0x60>> &console_miis(int *mine);  // the ones a game can take, each once; mine: the current account's number among them, or -1
+int mii_maker_place(u32 n);            // where the nth of console_miis() lies in the game's Mii Maker database (fs.cpp), or -1: no place was free
 std::array<u8, 0x60> player_mii();     // the current account's Mii, or a stand-in "Mario" when it has no usable one
 u16 mii_crc16(const u8 *p, size_t n);  // CRC-16/XMODEM, as Mii data and Mii Maker's database use
 void register_apt();

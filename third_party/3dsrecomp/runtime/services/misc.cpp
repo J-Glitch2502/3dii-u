@@ -53,12 +53,47 @@ bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
     return true;
 }
 
-// The player's Mii: the current account's, or a plain male Mii named "Mario" (made-up console and Mii ids and a placeholder MAC;
-// games mostly check the flags and the checksum)
+// The console's Miis as 3DS games read them, the accounts' first and each one once (an account's Mii is in the console's Mii Maker too).
+// Made once, at the first call: the frontend has read the console's Miis before the services start.
+namespace {
+struct ConsoleMiis {
+    std::vector<std::array<u8, 0x60>> list;
+    int mine = -1;  // the current account's
+    ConsoleMiis() {
+        for (size_t i = 0; i < g_host_miis.size(); i++) {
+            std::array<u8, 0x60> m;
+            if (!mii_3ds(g_host_miis[i], m)) continue;
+            size_t at = 0;
+            while (at < list.size() && memcmp(&list[at][0x0C], &m[0x0C], 10)) at++;  // the same Mii: its id and the console that made it
+            if ((int)i == g_host_my_mii) mine = (int)at;
+            if (at == list.size()) list.push_back(m);
+        }
+    }
+};
+}  // namespace
+
+const std::vector<std::array<u8, 0x60>> &console_miis(int *mine) {
+    static const ConsoleMiis miis;
+    if (mine) *mine = miis.mine;
+    return miis.list;
+}
+
+// The player's Mii: the current account's (the console's first, if that account has none a game can take), naming the place it has in
+// Mii Maker's database (fs.cpp). With no Mii on the console at all, a plain male Mii named "Mario" (made-up console and Mii ids and a
+// placeholder MAC; games mostly check the flags and the checksum).
 std::array<u8, 0x60> player_mii() {
+    int mine;
+    const auto &miis = console_miis(&mine);
+    if (!miis.empty()) {
+        const u32 n = mine < 0 ? 0 : (u32)mine;
+        std::array<u8, 0x60> mii = miis[n];
+        if (const int place = mii_maker_place(n); place >= 0) mii[0x02] = (u8)(place / 10 | place % 10 << 4);
+        const u16 crc = mii_crc16(mii.data(), 0x5E);
+        mii[0x5E] = (u8)(crc >> 8);
+        mii[0x5F] = (u8)crc;
+        return mii;
+    }
     std::array<u8, 0x60> m{};
-    if (g_host_my_mii >= 0 && g_host_my_mii < (int)g_host_miis.size() && mii_3ds(g_host_miis[g_host_my_mii], m)) return m;
-    m.fill(0);
     auto be32 = [&](size_t o, u32 v) { m[o] = (u8)(v >> 24); m[o + 1] = (u8)(v >> 16); m[o + 2] = (u8)(v >> 8); m[o + 3] = (u8)v; };
     auto be16 = [&](size_t o, u16 v) { m[o] = (u8)(v >> 8); m[o + 1] = (u8)v; };
     m[0] = 0x03;
