@@ -115,7 +115,7 @@ int compile_thread(int, void *) {
         // Cemu it only does with tools/win/patch_cafeglsl_traps.py applied to the library
         const std::string plain = gen_passthrough_vs();
         const std::string with_loop = "#version 450\nlayout(location = 0) in vec4 aPos;\nlayout(binding = 0, std140) uniform VS { vec4 f[96]; vec4 uDraw; ivec4 uInt[4]; };\n"
-                                      "void main() { vec4 p = aPos; for (int i = 0; i < uint(uInt[0].x) + 1; i++) p += f[i]; gl_Position = p; }\n";
+                                      "void main() { vec4 p = aPos; for (int i = 0; i <= uInt[0].x; i++) p += f[i]; gl_Position = p; }\n";
         const struct {
             const char *name;
             const std::string *glsl;

@@ -1262,8 +1262,10 @@ struct SpecGen {
                 }
                 // The count, start and step come from the uniform block (uInt, the integer uniforms the key already fixes), not the number itself:
                 // a bound the compiler can see gets the loop unrolled, and a 7-turn body of relative reads never came out of CafeGLSL on a console.
+                // Counted with signed numbers (the count is a byte): from an unsigned compare the console's compiler makes PRED_SETGE_UINT, which
+                // no program the PC's compiler makes holds and Cemu doesn't know, so there the draws of a shader compiled on the console vanished.
                 const int k = counter++;
-                w.f("    aL = uInt[%u].y;\n    for (uint it%d = 0u; it%d < uint(uInt[%u].x) + 1u; it%d++) {\n", I.iid, k, k, I.iid, k);
+                w.f("    aL = uInt[%u].y;\n    for (int it%d = 0; it%d <= uInt[%u].x; it%d++) {\n", I.iid, k, k, I.iid, k);
                 loops++;
                 const int saved_ifs = ifs, saved_calls = calls;
                 ifs = calls = 0;  // a BREAKC directly in this body ends this loop
