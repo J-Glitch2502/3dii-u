@@ -711,6 +711,14 @@ bool top_720 = true;
 
 // The screens' render targets are drawn larger: the top screen for the size above, the bottom one 1:1 on the GamePad. The game
 // renders some of them twice as wide and scales them down (cheap antialiasing), so the two axes scale differently.
+// targets their transfers scale down, drawn at the smaller size (note_downscaled, below)
+bool half_ss = true;
+struct HalfKey {
+    u32 addr, w, h;
+    float sx, sy;
+};
+std::vector<HalfKey> half_keys;
+
 void rt_scale(u32 w, u32 h, float &sx, float &sy) {
     sx = sy = 1;
     // 256 and 512 wide, and 416 tall: some games draw a little more than the screen and crop it in the display transfer
@@ -743,6 +751,9 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         s->sx = scale_as->base_sx;
         s->sy = scale_as->base_sy;
     } else rt_scale(w, h, s->sx, s->sy);
+    if (!depth && !scale_as && half_ss)  // one its transfer scales down (note_downscaled)
+        for (const HalfKey &k : half_keys)
+            if (k.addr == addr && k.w == w && k.h == h && k.sx <= s->sx && k.sy <= s->sy) s->sx = k.sx, s->sy = k.sy;
     s->base_sx = s->sx;
     s->base_sy = s->sy;
     // Textures have power-of-two sizes, so a 512x800 target the game draws from is read as 512x1024, sharing its memory. In memory the
@@ -819,10 +830,8 @@ int dyn_force = -1;
 inline float dyn_factor(u32 level) { return level ? dyn_low : 1.0f; }
 inline bool dyn_scaled(const Surface &s) { return s.base_sy > 2; }  // not the bottom screen, which is 2x on a screen a quarter of the size, nor a 1:1 target
 
-void set_surface_scale(Surface &s, u32 level) {
-    if (s.dyn_level == level && s.dyn_f == dyn_factor(level)) return;
-    s.dyn_level = level;
-    s.dyn_f = dyn_factor(level);
+// the surface at base_sx, base_sy times its dyn_f, in the memory it has (which holds its largest size)
+void apply_scale(Surface &s) {
     s.sx = s.base_sx * s.dyn_f;
     s.sy = s.base_sy * s.dyn_f;
     s.sw = (u32)(s.w * s.sx);
@@ -844,6 +853,39 @@ void set_surface_scale(Surface &s, u32 level) {
     }
     if (&s == cur_color) cur_color = nullptr;
     if (&s == cur_depth) cur_depth = nullptr;
+}
+void set_surface_scale(Surface &s, u32 level) {
+    if (s.dyn_level == level && s.dyn_f == dyn_factor(level)) return;
+    s.dyn_level = level;
+    s.dyn_f = dyn_factor(level);
+    apply_scale(s);
+}
+
+// A target the game draws at twice the size it uses, and scales down with a display transfer (its own antialiasing): Luigi's Mansion: Dark
+// Moon draws each half of its top screen 256 wide for 128 columns of the LCD, twice a frame. At the screens' scale that was 768x1248 for a
+// strip the TV shows as 369x1198, 2.2 times the pixels, and its draws took 54 ms of GPU a frame on the title screen and in the rain
+// (a console, 2026-11-13). Such a target is drawn at the scale its transfer's destination has for what it holds instead, so the transfer
+// copies one to one (gpu_copy_transfer finds them; smaller only, in the memory it has). The game's antialiasing in that direction goes;
+// the picture is still three times a 3DS's. Kept by address and size, for a target made again. "set halfss 0" draws them as before.
+void set_base_scale(Surface &s, float bsx, float bsy) {
+    if (s.base_sx == bsx && s.base_sy == bsy) return;
+    s.base_sx = bsx;
+    s.base_sy = bsy;
+    apply_scale(s);
+}
+void note_downscaled(Surface &src, const Surface &dst, u32 scaling) {
+    if (!half_ss || !scaling || src.depth) return;
+    const float nx = dst.base_sx / 2, ny = std::min(src.base_sy, scaling == 2 ? dst.base_sy / 2 : dst.base_sy);
+    if (nx < 1 || ny < 1 || src.base_sx < nx * 1.2f) return;
+    if (kMeasure) LOG("[gx2] target %08x %ux%u is scaled down by its transfer: drawn at %.2fx%.2f, not %.2fx%.2f\n", src.addr, src.w, src.h, nx, ny, src.base_sx, src.base_sy);
+    bool known = false;
+    for (HalfKey &k : half_keys)
+        if (k.addr == src.addr && k.w == src.w && k.h == src.h) {
+            k.sx = nx, k.sy = ny;
+            known = true;
+        }
+    if (!known && half_keys.size() < 16) half_keys.push_back({src.addr, src.w, src.h, nx, ny});
+    set_base_scale(src, nx, ny);
 }
 inline void take_dyn_level(Surface &s) {
     if ((s.dyn_level != dyn_level || s.dyn_f != dyn_factor(dyn_level)) && dyn_scaled(s)) set_surface_scale(s, dyn_level);
@@ -1690,6 +1732,9 @@ void bind_targets(const RTConfig &rt) {
     Surface *c = get_surface(rt.color_addr, rt.w, rt.h, rt.color_fmt, false);
     c->linear = false;  // what the GPU draws into is tiled
     Surface *d = rt.depth_addr && pptr(rt.depth_addr) ? get_surface(rt.depth_addr, rt.w, rt.h, rt.depth_fmt, true) : nullptr;
+    // a depth buffer is the size of the colour it's drawn with: smaller when that one is (note_downscaled), never larger than its memory
+    if (d && (d->base_sx != c->base_sx || d->base_sy != c->base_sy) && c->base_sx <= d->base_sx && c->base_sy <= d->base_sy && c->base_sy > 1)
+        set_base_scale(*d, c->base_sx, c->base_sy);
     take_dyn_level(*c);
     if (d) take_dyn_level(*d);
     // fills the game asked for while these surfaces did not exist yet
@@ -3286,6 +3331,7 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     dst->drawn = ++gpu_writes;
     dst->guest_newer = false;
     dst->written_since_flush = true;
+    note_downscaled(*src, *dst, scaling);  // from its next frame on
     return true;
 }
 
@@ -4315,6 +4361,7 @@ bool gfx_set(const char *name, u32 v) {
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
+    else if (!strcmp(name, "halfss")) half_ss = v;  // a target its transfer scales down is drawn at the smaller size (note_downscaled); from the next one made
     else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up

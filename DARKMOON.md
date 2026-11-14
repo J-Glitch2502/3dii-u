@@ -224,6 +224,26 @@ crash, the lab scene right (one top screen), 60 fps. Josiah's review of PR #6 as
 counters behind kMeasure; a cause for -Os instead of O2_GAMES; no packing of measuring builds for a console; this file out of main;
 and small pull requests one at a time (the DSP freeze fix first), each through `check_ports.py nsmb2_with_dlc` and `--cold`.
 
+## Nov 13-14: where the console's time goes, and three cuts (measuring builds)
+
+Measured on the console with the GPU's own clock per pass (`[prof] GPU per flip`) and the CPU profile:
+- **Rain outside the mansion, 15 fps**: the GPU 56-65 ms a flip, 48-56 of it the draws into `0x18000000`; and the rain's geometry shader
+  on the CPU, 28-30 ms a flip (1600 vertices, 90 instructions each in the interpreter; its vertex shader only 2.5 ms of that).
+- **Title screen, 16 fps**: no geometry shader; the GPU alone, 54 ms of draws into `0x18000000`, the CPU waiting 50 ms a flip.
+- **How a frame is made**: a 256x256 shadow map, then the top screen in two strips: each drawn 256x416 into `0x18000000`, scaled to
+  128x416 by a display transfer (the game's own antialiasing) and copied into the LCD buffer's columns; then the bottom screen.
+
+Cuts, all on `darkmoon`:
+1. The TV gets 1280x720 (tv_to_720): the present went from 6.5 to 3.3-4.4 ms of GPU a flip (measured).
+2. Geometry shaders as native code (tools/pica_to_c.py at build time, from `.gsl` logs; vertex.cpp gs_native_find): bit-identical to
+   the interpreter on the PC (tools/test_gs_native.py). **Not yet measured in the rain**: needs a build that has
+   `games/darkmoon/shader_logs/gs_log.gsl` (it's there on Senne's PC) and says "geometry shader at 505 runs as native code".
+3. A target its transfer scales down is drawn at the size used (note_downscaled, `set halfss 0|1`): the strips at 369x1198 instead
+   of 768x1248, 2.2 times fewer pixels. Right picture in Cemu. **Not yet measured on the console**: expect the 54 ms to about halve.
+
+Also seen in the target list: three 256x416 fmt 1 targets at `0x212b4440`, `0x21218420`, `0x21266430`, 768x1536 each in MEM1
+(13.8 MB of the 32) that nothing seems to draw into any more; what makes them, and whether they can go, is open.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),
