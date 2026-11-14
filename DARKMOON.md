@@ -244,6 +244,26 @@ Cuts, all on `darkmoon`:
 Also seen in the target list: three 256x416 fmt 1 targets at `0x212b4440`, `0x21218420`, `0x21266430`, 768x1536 each in MEM1
 (13.8 MB of the 32) that nothing seems to draw into any more; what makes them, and whether they can go, is open.
 
+## Nov 14: measured on the console; the game has no frame limit of its own here
+
+Console, measuring builds of Nov 14 (Senne): the title screen 16 -> 30 fps (GPU 64 -> 32.5 ms a flip, halfss); the rain past the
+mansion's gate 15 -> 30-31 fps (the geometry shader 28 -> 9.5 ms a flip as native code); the rain **before** the gate and the cutscene
+at the mansion still 22-23 fps: there the rain shader takes its loop way (bool 14 clear, 22 EMITs a turn), native too since b9e5a0f but
+16 ms a flip, most of it thought to be the EMITs (mapping and handing on the triangles). Sharing the runs with core 0 gained nothing
+(off: `set gsshared 1`).
+
+**The game runs as fast as it's let**: `[prof] the game's pictures a second` (new) showed 60 top and 66-109 bottom pictures a second in
+Cemu, and the intro on the console swung between 22 and 56 flips a second. The game waits one VBlank a frame; a 3DS's GPU makes that
+thirty. So its cutscenes ran fast in light scenes and slow in heavy ones, and the sound drifted (Senne: "a serious audio delay as the
+intro goes on", "not fluid"). Now the GPU thread holds Dark Moon to 30 frames a second at the bottom screen's picture (frame_cap_wait,
+by program ID; `set capfps N`, debug flag `nocap`): Cemu shows 30.0 and 30.0. **Not on a console yet.**
+
+Also in this build, unmeasured on a console: an emitted vertex is mapped once, and a triangle goes to the batch directly (gs_native_emit,
+pa_submit3); the `[vtx]` line splits the geometry shader's time (vertex shader, runs, EMITs, primitives).
+
+Still under 30 on the console, to look at next with those numbers: the rain before the gate; intro scenes where the GPU takes 40-46 ms a
+flip (frames 5400, 8400-8700, 10800, 14700-15600 of console_runs/intro1), though some of that was the game making more than 30 frames.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),

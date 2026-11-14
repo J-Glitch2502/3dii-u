@@ -203,6 +203,26 @@ struct GsPipe {
     OutMap map;
 } gsp;
 
+OutVertex gs_mapped[3];  // the emitter's vertices as the assembler takes them (gs_native_emit, below)
+u32 gs_mapped_ok;
+
+// Three vertices as one triangle, as three pa_submit calls would make of them where a triangle is all they can make
+inline void pa_submit3(const OutVertex &a, const OutVertex &b, const OutVertex &c) {
+    PrimAssembler &pa = g.pa;
+    if ((pa.topology == 0 || pa.topology == 3) && pa.index == 0) {
+        if (pa.topology == 3 && pa.winding) {
+            submit_triangle(b, a, c);
+            pa.winding = false;
+        } else {
+            submit_triangle(a, b, c);
+        }
+        return;
+    }
+    pa_submit(a);
+    pa_submit(b);
+    pa_submit(c);
+}
+
 void gs_emit_prim(Emitter *e) {
     if (e->winding) g.pa.winding = true;
     for (u32 i = 0; i < 3; i++) {
@@ -213,6 +233,7 @@ void gs_emit_prim(Emitter *e) {
 }
 
 void gs_reconfigure() {
+    gs_mapped_ok = 0;
     gsp.active = (g.regs[R::GS_MISC] & 3) == 2;
     if (!gsp.active) return;
     const u32 *regs = g.regs;
@@ -289,9 +310,17 @@ const gs_native *gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u3
     return fn;
 }
 
+// The emitter's three vertices as the assembler takes them, each mapped when it was emitted: a strip's vertex is in three triangles, and
+// gs_emit_prim maps all three again for each. Dark Moon's rain before the mansion's gate emits 22 vertices a loop turn, and its EMITs were
+// most of the 16 ms a flip its geometry shader still took as native code on a console (2026-11-14). A bit per slot that's current; none
+// after the interpreter has run (its EMIT fills the emitter's buffer alone) or the output map may have changed.
+
 // EMIT, as the interpreter does it (shader.cpp), with SETEMIT's three values passed in
 void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
     ShaderUnit &u = *(ShaderUnit *)ctx;
+    static u32 sampled;
+    const bool timed = kMeasure && (sampled++ & 15) == 0;
+    const double t0 = timed ? now_ms() : 0;
     if (Emitter *e = u.emitter) {
         e->vertex_id = vid;
         e->prim_emit = prim;
@@ -300,10 +329,26 @@ void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
             u32 oi = 0;
             for (u32 reg = 0; reg < 16; reg++)
                 if (e->output_mask & (1u << reg)) e->buf[vid][oi++] = u.r[REG_OUT + u.out_bank + reg];
-            if (prim && e->emit_prim) e->emit_prim(e);
+            if (e->emit_prim == gs_emit_prim) {  // the draw's own emitter: straight to the assembler
+                map_vertex(gsp.map, e->buf[vid], gs_mapped[vid]);
+                gs_mapped_ok |= 1u << vid;
+                if (prim) {
+                    for (u32 i = 0; i < 3; i++)
+                        if (!(gs_mapped_ok >> i & 1)) {
+                            map_vertex(gsp.map, e->buf[i], gs_mapped[i]);
+                            gs_mapped_ok |= 1u << i;
+                        }
+                    if (wind) g.pa.winding = true;
+                    pa_submit3(gs_mapped[0], gs_mapped[1], gs_mapped[2]);
+                    if (kMeasure) vtx_cpu.geometry_prims++;
+                }
+            } else if (prim && e->emit_prim) {
+                e->emit_prim(e);
+            }
         }
     }
     u.out_bank ^= 16;
+    if (timed) vtx_cpu.geometry_emit_ms += (now_ms() - t0) * 16;
 }
 
 void gs_run() {
@@ -312,8 +357,12 @@ void gs_run() {
     const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
     const gs_native *fn = gs_native_find(p, g.gs, entry);
     ShaderUnit &u = g.gs_unit;
-    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u))
+    const double t0 = kMeasure ? now_ms() : 0;
+    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u)) {
+        gs_mapped_ok = 0;
         shader_run(p, u, g.gs, entry);
+    }
+    if (kMeasure) vtx_cpu.geometry_gs_ms += now_ms() - t0;
     g.gs.b[15] = true;
 }
 
@@ -946,6 +995,7 @@ void vtx_draw(bool indexed) {
 #endif
         vtx_finish_jobs();
         VtxCpuTimer timed{VCPU_GEOMETRY};
+        gs_mapped_ok = 0;  // the output map may be another draw's
         vtx_cpu.draws[VCPU_GEOMETRY]++;
         vtx_cpu.verts[VCPU_GEOMETRY] += n;
 #ifdef __WIIU__

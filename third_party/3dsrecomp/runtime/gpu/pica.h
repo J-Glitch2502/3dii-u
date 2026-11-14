@@ -645,6 +645,9 @@ struct VtxCpuStats {
     u64 draws[VCPU_COUNT], verts[VCPU_COUNT];
     double ms[VCPU_COUNT];
     double geometry_vs_ms;  // of ms[VCPU_GEOMETRY], what the vertex shader took (the rest: the geometry shader and assembling)
+    double geometry_gs_ms;  // and the geometry shader's runs, its EMITs with them
+    double geometry_emit_ms;  // of those, the EMITs: mapping the vertices and handing the primitives on (timed one in sixteen, and scaled)
+    u64 geometry_prims;
 };
 extern VtxCpuStats vtx_cpu;
 extern bool g_gs_shared;  // a draw's geometry shader runs go to two threads where they can (vertex.cpp: gs_run_shared); a switch for a console

@@ -3164,8 +3164,31 @@ bool screen_fresh;
 bool top_shown;  // a display transfer brought the top screen since the last VBlank
 PresentRule present_rule;  // when a finished frame is shown (present_rule.h, gfx_pump)
 
+// A game's frames a second, held to what a 3DS gives it. Luigi's Mansion: Dark Moon waits for one VBlank a frame and no more: a 3DS's GPU takes
+// longer than that over each frame, so it runs at thirty there, and its cutscenes are timed for that. Here it ran as fast as the console
+// managed, 60 in light scenes and 22 in heavy ones (in Cemu 60 to 100): the picture ran ahead of the sound through the intro, by turns fast
+// and slow (Senne's console, 2026-11-14). The bottom screen's picture ends a frame, and the GPU thread waits there until the frame's time
+// is up, with what it has queued sent to the GPU first; the game waits for the GPU thread as it does for a 3DS's GPU.
+// Which games: by program ID, until there's a way to know a game's own rate. "set capfps N" (0: none) from the PC.
+u32 cap_fps;
+void frame_cap_wait() {
+    if (!cap_fps) return;
+    static OSTime next;
+    const OSTime period = (OSTime)OSSecondsToTicks(1) / cap_fps, now = OSGetSystemTime();
+    if (next > now && next - now <= period) {
+        GX2Flush();
+        OSSleepTicks(next - now);
+        next += period;
+    } else {
+        next = now + period;  // late, or the first: from here
+    }
+}
+
+u32 st_pictures[2];  // pictures the game has sent to each screen since the last report: its own frame rate, which flips aren't (a present can show one screen's)
 void show_screen(int which, GX2Texture *tex, bool flip, float v_lo = 0, float v_hi = 1, float u_hi = 1) {
     if (which == 0) top_shown = true;
+    else frame_cap_wait();
+    st_pictures[which]++;
     GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, tex->surface.image, tex->surface.imageSize);
     GX2ColorBuffer *cb = which == 0 ? tv_cb : drc_cb;
     GX2SetColorBuffer(cb, GX2_RENDER_TARGET_0);
@@ -3905,6 +3928,9 @@ void gfx_thread_init() {
     in_cemu = wiiu::debug_flag("cemu");
     if (in_cemu) gxt_cpu_attr |= 1;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
+    if (g_game.program_id == 0x0004000000055F00ull) cap_fps = 30;  // Luigi's Mansion: Dark Moon (frame_cap_wait)
+    if (wiiu::debug_flag("nocap")) cap_fps = 0;
+    if (cap_fps) LOG("[gx2] this game is held to %u frames a second\n", cap_fps);
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
     if (wiiu::debug_flag("noglslvs")) glsl_vs = false;
@@ -4362,6 +4388,7 @@ bool gfx_set(const char *name, u32 v) {
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
     else if (!strcmp(name, "halfss")) half_ss = v;  // a target its transfer scales down is drawn at the smaller size (note_downscaled); from the next one made
+    else if (!strcmp(name, "capfps")) cap_fps = v;  // the game's frames a second (frame_cap_wait); 0 for as fast as it goes
     else if (!strcmp(name, "gsshared")) g_gs_shared = v;  // geometry shader runs on two threads (vertex.cpp: gs_run_shared)
     else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
@@ -4412,6 +4439,8 @@ static void write_report() {
         us(P_KEY), us(P_BIND), us(P_PS), us(P_STATE), us(P_UNI), us(P_TEX), us(P_HASH), us(P_TEXUP), us(P_TEXFL), us(P_VSUNI), us(P_RANGE), us(P_ATTR), us(P_DRAW),
         (list_ns - last_list_ns) / 1e6 / flips, ms(P_PRESENT), ms(P_WAIT), ms(P_SYNC), st_syncs / flips, st_luts / flips, draws / flips, ds_built / flips, st_flushes / flips, st_rehashes / flips, (u32)textures.size());
     last_list_ns = list_ns;
+    LOG("[prof] the game's pictures a second: top screen %.1f, bottom screen %.1f\n", st_pictures[0] / secs, st_pictures[1] / secs);
+    st_pictures[0] = st_pictures[1] = 0;
     {
         u64 surf = 0;
         for (const auto &x : surfaces) surf += x->mem1 ? 0 : (x->depth ? x->db.surface.imageSize : x->cb.surface.imageSize);
@@ -4425,7 +4454,9 @@ static void write_report() {
             if (vtx_cpu.draws[k])
                 n += snprintf(line + n, sizeof line - n, " | %s: %.1f draws, %.0f vertices, %.2f ms", why[k], vtx_cpu.draws[k] / flips, vtx_cpu.verts[k] / flips,
                               vtx_cpu.ms[k] / flips);
-        if (vtx_cpu.draws[VCPU_GEOMETRY]) n += snprintf(line + n, sizeof line - n, " (of which the vertex shader %.2f ms)", vtx_cpu.geometry_vs_ms / flips);
+        if (vtx_cpu.draws[VCPU_GEOMETRY])
+            n += snprintf(line + n, sizeof line - n, " (of which the vertex shader %.2f ms, the geometry shader's runs %.2f ms, of those about %.2f ms its EMITs: %.0f primitives)",
+                          vtx_cpu.geometry_vs_ms / flips, vtx_cpu.geometry_gs_ms / flips, vtx_cpu.geometry_emit_ms / flips, vtx_cpu.geometry_prims / flips);
         if (n) LOG("[vtx] shaded on the CPU, per flip%s\n", line);
         vtx_cpu = {};
     }
