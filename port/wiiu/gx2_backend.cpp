@@ -3170,7 +3170,7 @@ PresentRule present_rule;  // when a finished frame is shown (present_rule.h, gf
 // and slow (Senne's console, 2026-11-14). The bottom screen's picture ends a frame, and the GPU thread waits there until the frame's time
 // is up, with what it has queued sent to the GPU first; the game waits for the GPU thread as it does for a 3DS's GPU.
 // Which games: by program ID, until there's a way to know a game's own rate. "set capfps N" (0: none) from the PC.
-u32 cap_fps;
+u32 cap_fps, cap_game;  // what it's held to now, and what this game is held to when it is (the options menu turns it off and on)
 void frame_cap_wait() {
     if (!cap_fps) return;
     static OSTime next;
@@ -3928,7 +3928,7 @@ void gfx_thread_init() {
     in_cemu = wiiu::debug_flag("cemu");
     if (in_cemu) gxt_cpu_attr |= 1;
     if (wiiu::debug_flag("dynres")) dyn_test = true;
-    if (g_game.program_id == 0x0004000000055F00ull) cap_fps = 30;  // Luigi's Mansion: Dark Moon (frame_cap_wait)
+    if (g_game.program_id == 0x0004000000055F00ull) cap_fps = cap_game = 30;  // Luigi's Mansion: Dark Moon (frame_cap_wait)
     if (wiiu::debug_flag("nocap")) cap_fps = 0;
     if (cap_fps) LOG("[gx2] this game is held to %u frames a second\n", cap_fps);
     if (wiiu::debug_flag("uberall")) uber_all = true;
@@ -3975,7 +3975,9 @@ void gfx_write_misses() {
 void gfx_vblank() { vblank_pending = true; }
 
 // ---- options menu state; the input thread changes it, the GPU thread draws it
-static constexpr int MENU_ITEMS = 4;
+// A game that's held to a frame rate (cap_game) has a line to let it run free, between the volume and quitting: its cutscenes are timed for
+// that rate, the rest of it may look better without (the user, 2026-11-14)
+static int menu_items() { return cap_game ? 5 : 4; }
 static volatile bool menu_is_open;
 static volatile int menu_item, menu_speed = 100, menu_volume = 100;
 static volatile bool menu_quit;
@@ -3994,8 +3996,9 @@ void menu_input(u32 pressed) {
         return;
     }
     if (pressed & (VPAD_BUTTON_STICK_L | VPAD_BUTTON_B)) menu_is_open = false;
-    if (pressed & VPAD_BUTTON_UP) menu_item = (menu_item + MENU_ITEMS - 1) % MENU_ITEMS;
-    if (pressed & VPAD_BUTTON_DOWN) menu_item = (menu_item + 1) % MENU_ITEMS;
+    const int count = menu_items();
+    if (pressed & VPAD_BUTTON_UP) menu_item = (menu_item + count - 1) % count;
+    if (pressed & VPAD_BUTTON_DOWN) menu_item = (menu_item + 1) % count;
     const int dir = (pressed & VPAD_BUTTON_RIGHT) ? 1 : (pressed & VPAD_BUTTON_LEFT) ? -1 : 0;
     if (menu_item == 1 && dir) {
         menu_speed = dir > 0 ? (menu_speed >= 400 ? 400 : menu_speed * 2) : (menu_speed <= 100 ? 100 : menu_speed / 2);
@@ -4005,9 +4008,10 @@ void menu_input(u32 pressed) {
         menu_volume = std::clamp(menu_volume + dir * 10, 0, 100);
         audio::set_volume(menu_volume / 100.0f);
     }
+    if (count == 5 && menu_item == 3 && (dir || (pressed & VPAD_BUTTON_A))) cap_fps = cap_fps ? 0 : cap_game;
     if (pressed & VPAD_BUTTON_A) {
         if (menu_item == 0) menu_is_open = false;
-        if (menu_item == 3) menu_quit = true;
+        if (menu_item == count - 1) menu_quit = true;
     }
 }
 
@@ -4021,7 +4025,9 @@ static void draw_menu() {
     GX2SetPixelTexture(&black_tex, 0);
     GX2SetPixelSampler(&blit_sampler, 0);
     set_blit_colors(0, 0, 0, 0.98f, 0.9f, 0.62f);
-    draw_rect(w, h, 127, 60, 727, 420, 0, 0, 1, 1);
+    const int count = menu_items();
+    const float low = count == 5 ? 30 : 0;  // a fifth line: the box and the hint under it go down
+    draw_rect(w, h, 127, 60, 727, 420 + low, 0, 0, 1, 1);
     set_blit_colors(0, 0, 0, 0.42f, 0.27f, 0.08f);
     draw_rect(w, h, 127, 60, 727, 104, 0, 0, 1, 1);
     const float rowh = 58, top = 130;
@@ -4034,17 +4040,17 @@ static void draw_menu() {
     set_blit_colors(1, 1, 1, 0, 0, 0);
     draw_text(w, h, "OPTIONS", 165, 68, 4);
     set_blit_colors(0.2f, 0.1f, 0.0f, 0, 0, 0);
-    char line[48];
-    const char *items[MENU_ITEMS] = {"BACK TO THE GAME", line, nullptr, "QUIT TO WII U MENU"};
-    char vol[32];
+    char line[48], vol[32], cap[40];
     snprintf(line, sizeof line, "GAME SPEED: %d%%", menu_speed);
     snprintf(vol, sizeof vol, "VOLUME: %d%%", menu_volume);
-    items[2] = vol;
-    for (int i = 0; i < MENU_ITEMS; i++) {
+    if (cap_fps) snprintf(cap, sizeof cap, "FRAME LIMIT: %u", (unsigned)cap_fps);
+    else snprintf(cap, sizeof cap, "FRAME LIMIT: OFF");
+    const char *items[5] = {"BACK TO THE GAME", line, vol, count == 5 ? cap : "QUIT TO WII U MENU", "QUIT TO WII U MENU"};
+    for (int i = 0; i < count; i++) {
         draw_text(w, h, items[i], 165, top + i * rowh + 4, 4);
     }
     set_blit_colors(0.45f, 0.3f, 0.15f, 0, 0, 0);
-    draw_text(w, h, "A: CHOOSE   LEFT/RIGHT: CHANGE   B: BACK", 165, 375, 2);
+    draw_text(w, h, "A: CHOOSE   LEFT/RIGHT: CHANGE   B: BACK", 165, 375 + low + (count == 5 ? 28 : 0), 2);
     GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, drc_cb->surface.image, drc_cb->surface.imageSize);
     state_lost = true;
 }
