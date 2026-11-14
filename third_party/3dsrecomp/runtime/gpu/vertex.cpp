@@ -11,7 +11,7 @@ u64 g_cpu_route[4];
 #endif
 
 VtxCpuStats vtx_cpu;
-bool g_gs_shared = true;
+bool g_gs_shared = false;  // measured on a console in Dark Moon's rain (2026-11-14): no faster than one thread, so off unless asked
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
@@ -247,7 +247,8 @@ void gs_reconfigure() {
 // entry and a hash of the words each was made from, and runs instead; with none, the interpreter runs everything as before.
 extern "C" {
 typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
-typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx);
+typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], gs_emit_fn emit,
+                            void *ctx);
 struct gs_native {
     unsigned long long code_hash, swizzle_hash;
     unsigned entry, end, nswizzles;
@@ -311,7 +312,7 @@ void gs_run() {
     const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
     const gs_native *fn = gs_native_find(p, g.gs, entry);
     ShaderUnit &u = g.gs_unit;
-    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u))
+    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u))
         shader_run(p, u, g.gs, entry);
     g.gs.b[15] = true;
 }
@@ -380,7 +381,7 @@ bool gs_run_shared(const V4 *vs_out, u32 n) {
         for (u32 r = c * kRuns, e = std::min(runs, r + kRuns); r < e; r++) {
             for (u32 v = 0; v < per; v++)
                 for (u32 k = 0; k < vs_out_num; k++) u.r[REG_UNI + begin + v * vs_out_num + k] = vs_out[(size_t)(r * per + v) * 16 + k];
-            if (!t->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u)) {
+            if (!t->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u)) {
                 declined = true;
                 return;
             }

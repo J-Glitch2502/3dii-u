@@ -5,10 +5,9 @@ A geometry shader has no GPU path on the Wii U: the runtime runs it in its PICA 
 instruction. Luigi's Mansion: Dark Moon's rain (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame that way on a
 console (2026-11-13). A program logged in a .gsl file ("GS  " records: entry, code and swizzle word counts, the GS unit's whole code and swizzle
 memory, as port/wiiu/gx2_backend.cpp writes them) whose stretch from its entry runs straight through is written here as plain C: the same
-arithmetic as the interpreter's (pmul1, a dot product summed in the same order), on the same register file. A JMPC to the END returns; a
-JMPU to the END ends what's generated, and the function then only runs when that bool says jump (otherwise it returns 0 before doing
-anything, and the interpreter runs the program). Anything else (loops, calls, ifs, relative addressing) leaves that program to the
-interpreter.
+arithmetic as the interpreter's (pmul1, a dot product summed in the same order), on the same register file. A JMPC or JMPU to an END
+returns; a LOOP (not nested) is a loop, and a uniform addressed by its counter is found as the interpreter finds it. Anything else (calls,
+ifs, jumps elsewhere, addressing by a0) leaves that program to the interpreter.
 
 The output is the game's own code translated, so it goes only into the build made from the user's own logs (build3ds.py), never into this
 repository. The runtime finds a function by its entry and a hash of the words it was made from (vertex.cpp: gs_native_find); check one
@@ -33,7 +32,12 @@ def records(d):
         p += 16 + (nc + ns) * 4
 
 
-def reg_src(r):
+def reg_src(r, idx=0):
+    """the register file's index for a source: with idx 3 a uniform's number has the loop counter added (rel, as shader.cpp's srcreg)"""
+    if idx and r >= 0x20:
+        if idx != 3:
+            raise Unsupported('addressing relative to a0')
+        return f'rel({r - 0x20}, aL)'
     return r + (REG_IN if r < 0x10 else REG_TMP - 0x10 if r < 0x20 else REG_UNI - 0x20)
 
 
@@ -53,7 +57,7 @@ class Unsupported(Exception):
 
 def translate(entry, code, swz, fname):
     """(C source, end, swizzle entries used) for the program from entry, or Unsupported"""
-    out, used, need, end = [], set(), None, None
+    out, used, end, loop_end = [], set(), None, None
     pc = entry
     while True:
         if pc >= len(code):
@@ -68,25 +72,26 @@ def translate(entry, code, swz, fname):
                 s3, s2, s1 = (w >> 5) & 0x7f, (w >> 12) & 0x1f, (w >> 17) & 0x1f
             else:
                 s3, s2, s1 = (w >> 5) & 0x1f, (w >> 10) & 0x7f, (w >> 17) & 0x1f
-            if (w >> 22) & 3:
-                raise Unsupported('relative addressing')
+            idx = (w >> 22) & 3
             d = swz[di] if di < len(swz) else 0
             used.add(di)
-            o.append(f'const float *A = r[{reg_src(s1)}], *B = r[{reg_src(s2)}], *C = r[{reg_src(s3)}]; float *D = {dst((w >> 24) & 0x1f)};')
+            o.append(f'const float *A = r[{reg_src(s1)}], *B = r[{reg_src(s2, 0 if imm else idx)}], *C = r[{reg_src(s3, idx if imm else 0)}]; '
+                     f'float *D = {dst((w >> 24) & 0x1f)};')
             lanes = [i for i in range(4) if d >> (3 - i) & 1]
             o += [f'const float t{i} = pmul1({operand("A", d, 0, i)}, {operand("B", d, 1, i)}) + {operand("C", d, 2, i)};' for i in lanes]
             o += [f'D[{i}] = t{i};' for i in lanes]
         elif op in ARITH or op in ARITHI:
             di = w & 0x7f
-            if (w >> 19) & 3:
-                raise Unsupported('relative addressing')
+            idx = (w >> 19) & 3
             d = swz[di] if di < len(swz) else 0
             used.add(di)
             if op in ARITHI:
                 s1, s2, name = (w >> 14) & 0x1f, (w >> 7) & 0x7f, ARITHI[op]
+                a_at, b_at = reg_src(s1), reg_src(s2, idx)
             else:
                 s1, s2, name = (w >> 12) & 0x7f, (w >> 7) & 0x1f, ARITH[op]
-            o.append(f'const float *A = r[{reg_src(s1)}], *B = r[{reg_src(s2)}]; float *D = {dst((w >> 21) & 0x1f)}; (void)B;')
+                a_at, b_at = reg_src(s1, idx), reg_src(s2)
+            o.append(f'const float *A = r[{a_at}], *B = r[{b_at}]; float *D = {dst((w >> 21) & 0x1f)}; (void)B;')
             lanes = [i for i in range(4) if d >> (3 - i) & 1]
             if name in ('dp3', 'dp4'):
                 o.append('float s = 0.0f;')
@@ -109,9 +114,7 @@ def translate(entry, code, swz, fname):
             di = w & 0x7f
             d = swz[di] if di < len(swz) else 0
             used.add(di)
-            if (w >> 19) & 3:
-                raise Unsupported('relative addressing')
-            o.append(f'const float *A = r[{reg_src((w >> 12) & 0x7f)}], *B = r[{reg_src((w >> 7) & 0x1f)}];')
+            o.append(f'const float *A = r[{reg_src((w >> 12) & 0x7f, (w >> 19) & 3)}], *B = r[{reg_src((w >> 7) & 0x1f)}];')
             for i, cop in ((0, (w >> 24) & 7), (1, (w >> 21) & 7)):
                 if cop < 6:
                     o.append(f'cond[{i}] = {operand("A", d, 0, i)} {["==", "!=", "<", "<=", ">", ">="][cop]} {operand("B", d, 1, i)};')
@@ -119,10 +122,8 @@ def translate(entry, code, swz, fname):
             dest = (w >> 10) & 0xfff
             if dest >= len(code) or code[dest] >> 26 != 0x22:
                 raise Unsupported('a jump elsewhere than an END')
-            if op == 0x2d:
-                need = (w >> 22) & 0xf, not (w & 1)
-                o.append('return 1;')
-                end = pc + 1
+            if op == 0x2d:  # jumps on its bool being set, or with the low bit of num on its being clear
+                o.append(f'if (b[{(w >> 22) & 0xf}] == {int(not (w & 1))}) return 1;')
             else:
                 fop, refy, refx = (w >> 22) & 3, w >> 24 & 1, w >> 25 & 1
                 x, y = f'cond[0] == {refx}', f'cond[1] == {refy}'
@@ -131,20 +132,34 @@ def translate(entry, code, swz, fname):
             o.append(f'vid = {(w >> 24) & 3}; prim = {w >> 23 & 1}; wind = {w >> 22 & 1};')
         elif op == 0x2a:  # EMIT: the runtime copies the outputs, assembles, and turns the bank over
             o.append('emit(ctx, vid, prim, wind);')
+        elif op == 0x29:  # LOOP: the body, to its last word, runs the int uniform's count + 1 times, the counter going up by its step
+            if loop_end is not None:
+                raise Unsupported('a loop in a loop')
+            loop_end = (w >> 10) & 0xfff
+            n = (w >> 22) & 3
+            if loop_end <= pc or loop_end >= len(code):
+                raise Unsupported('a loop that ends before it starts')
+            out.append(f'    aL = ui[{n}][1];\n    for (unsigned left = ui[{n}][0];; left--, aL += ui[{n}][2]) {{  /* {pc:03x} */')
         elif op == 0x22:  # END
+            if loop_end is not None:
+                raise Unsupported('an END inside a loop')
             end = pc + 1
         elif op != 0x21:  # NOP
             raise Unsupported(f'opcode {op:02x}')
         if o:
             out.append(f'    {{  /* {pc:03x} */\n        ' + '\n        '.join(o) + '\n    }')
+        if pc == loop_end:
+            out.append('    if (!left) break;\n    }')
+            loop_end = None
         pc += 1
         if end is not None:
             break
     src = [f'/* the program from {entry:#x} to {end - 1:#x} */',
-           f'static int {fname}(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx) {{',
+           f'static int {fname}(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], '
+           f'gs_emit_fn emit, void *ctx) {{',
            f'    unsigned vid = 0, prim = 0, wind = 0;',
-           f'    (void)vid; (void)prim; (void)wind; (void)cond;',
-           f'    if (b[{need[0]}] != {int(need[1])}) return 0;' if need else '    (void)b;']
+           f'    int aL = 0;',
+           f'    (void)vid; (void)prim; (void)wind; (void)cond; (void)b; (void)ui; (void)aL;']
     return '\n'.join(src + out + ['    return 1;', '}']), end, sorted(used)
 
 
@@ -201,6 +216,9 @@ def independence(entry, end, code, swz):
             mask &= sum(1 << r for r in range(16) if out[bank][r] == 0xf)
             bank ^= 1
             continue
+        elif op in (0x29, 0x2d):  # a loop, or a bool's jump past some of it: what a run wrote isn't the same on every path. Not shared.
+            ok = False
+            continue
         else:
             continue
         bits = sum(1 << i for i in lanes)
@@ -243,9 +261,12 @@ def main():
         f.write('/* Generated by tools/pica_to_c.py from this game\'s logged geometry shaders: the game\'s own code, never to be shared. */\n')
         f.write('#include <math.h>\n\n')
         f.write('typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);\n')
-        f.write('typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx);\n')
+        f.write('typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], gs_emit_fn emit, void *ctx);\n')
         f.write('struct gs_native { unsigned long long code_hash, swizzle_hash; unsigned entry, end, nswizzles; const unsigned short *swizzles; gs_native_fn fn; unsigned independent, outmask; };\n')
-        f.write('static inline float pmul1(float a, float b) { float r = a * b; if (r != r && a == a && b == b) r = 0; return r; }\n\n')
+        f.write('static inline float pmul1(float a, float b) { float r = a * b; if (r != r && a == a && b == b) r = 0; return r; }\n')
+        f.write('/* where a uniform is in the register file with the loop counter added: as the interpreter finds it (shader.cpp: srcreg) */\n')
+        f.write('static inline unsigned rel(unsigned uni, int off) { if (off < -128 || off > 127) off = 0; uni = (uni + (unsigned)off) & 0x7f; '
+                'return uni >= 96 ? 161 : 32 + uni; }\n\n')
         f.write('\n\n'.join(funcs) + '\n\n')
         f.write('extern const struct gs_native gs_native_table[];  /* external in C++ too */\nextern const unsigned gs_native_count;\n')
         f.write('const struct gs_native gs_native_table[] = {\n' + '\n'.join(table) + ('\n' if table else '    {0}\n') + '};\n')

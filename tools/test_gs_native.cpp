@@ -14,7 +14,8 @@ using namespace gpu;
 
 extern "C" {
 typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
-typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx);
+typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], gs_emit_fn emit,
+                            void *ctx);
 struct gs_native {
     unsigned long long code_hash, swizzle_hash;
     unsigned entry, end, nswizzles;
@@ -87,7 +88,13 @@ int main(int argc, char **argv) {
                         for (u32 k = 0; k < 4; k++) s.f[i].v[k] = (run & 1) ? big(rng) : small(rng);
                     s.f[95] = V4{{0.0f, 0.5f, 1.0f, (run % 7 == 0) ? s.f[13].v[0] : 0.0f}};  // the program's constants, and a skipped primitive now and then
                     for (u32 i = 0; i < 16; i++) s.b[i] = (rng() & 1) != 0;
-                    s.b[14] = run % 11 != 0;  // the bool its stretch needs, missing now and then: the native one must decline
+                    s.b[14] = run % 3 != 0;  // the bool that picks between its two ways (the plain quads, or the loop)
+                    for (u32 k = 0; k < 4; k++) {  // loops: a count of 1 to 6, from a small start, in steps of 1 to 3
+                        s.i[k][0] = (u8)(rng() % 6);
+                        s.i[k][1] = (u8)(rng() % 4);
+                        s.i[k][2] = (u8)(1 + rng() % 3);
+                        s.i[k][3] = 0;
+                    }
                     std::vector<Prim> want, got;
                     // the third way: native again, on a register file full of another run's leavings, which a program the generator
                     // calls independent must not notice (the runtime then runs it on two threads: vertex.cpp's gs_run_shared)
@@ -98,7 +105,6 @@ int main(int argc, char **argv) {
                         memset(&e, 0, sizeof e);
                         shader_unit_init(u, s);
                         if (way == 2) {
-                            if (!s.b[14]) break;
                             for (u32 i = REG_TMP; i < REG_UNI; i++)
                                 for (u32 k = 0; k < 4; k++) u.r[i].v[k] = (float)(rng() % 1000) - 500.0f;
                             for (u32 i = REG_OUT; i < REG_OUT + 32; i++)
@@ -113,15 +119,14 @@ int main(int argc, char **argv) {
                         if (way == 0) {
                             shader_run(prog, u, s, entry);
                         } else if (!gs_native_table[t].fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)s.b,
-                                                           native_emit, &u)) {
+                                                           (const unsigned char (*)[4])s.i, native_emit, &u)) {
                             got = want;  // declined: the interpreter would run it
-                            if (s.b[14]) {
-                                printf("entry %#x run %d: declined with its bool set\n", entry, run);
+                            {
+                                printf("entry %#x run %d: declined\n", entry, run);
                                 bad++;
                             }
                         }
                     }
-                    if (!s.b[14]) continue;
                     bool same = want.size() == got.size();
                     for (size_t i = 0; same && i < want.size(); i++)
                         same = !memcmp(want[i].v, got[i].v, sizeof want[i].v) && want[i].winding == got[i].winding;
