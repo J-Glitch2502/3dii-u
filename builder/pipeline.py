@@ -130,6 +130,7 @@ def console_learned(info, slug, card):
             else:
                 made = sum(int(n) for n in re.findall(r'\d+', r.stdout))
                 print(f'From your console, on the SD card: the {made} shaders it had to make while you played are ready-made in this build.', flush=True)
+    # (each with the geometry shaders that card's runs met beside it, a .gsl: build3ds.py makes native code of them)
     return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
 
 
@@ -210,7 +211,8 @@ def main():
         fail('Building on Linux isn\'t ready yet: this version builds on Windows.')
     if not (a.card or a.out):
         fail('Choose an SD card or a folder for the WUP.')
-    problem = user_files.check_otp(a.otp)
+    # a measuring build for Cemu is never packed (THREEDII_MEASURE, build3ds.py), so it needs no common key
+    problem = None if os.environ.get('THREEDII_MEASURE', '') not in ('', 'console') else user_files.check_otp(a.otp)
     if problem:
         fail(problem)
 
@@ -392,7 +394,7 @@ def main():
     PROGRESS.stage('Making the title')
     make_title(game_dir, out, info, a.art)
 
-    if b3.MEASURE:  # the checks' own kind of build, for Cemu (build3ds.py): never packed, so none can reach a console
+    if b3.MEASURE and not b3.MEASURE_CONSOLE:  # the checks' own kind of build, for Cemu (build3ds.py): packed only when asked by name
         print('a measuring build: not packed', flush=True)
         PROGRESS.done, PROGRESS.share = 100, 0
         PROGRESS.at(1)

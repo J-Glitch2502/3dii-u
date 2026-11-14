@@ -1,12 +1,17 @@
 // Vertex loading, vertex shader invocation (parallel for batched draws), geometry shader pipeline
 // and primitive assembly.
 #include <algorithm>
+#include <atomic>
 
 #include "gpu/pica.h"
 
 namespace gpu {
+#ifdef __WIIU__
+u64 g_cpu_route[4];
+#endif
 
 VtxCpuStats vtx_cpu;
+bool g_gs_shared = true;
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
@@ -235,11 +240,161 @@ void gs_reconfigure() {
     }
 }
 
+// ---- geometry shaders as native code
+// A geometry shader runs here in the interpreter, a couple of hundred cycles an instruction on a console: Luigi's Mansion: Dark Moon's rain
+// (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame (2026-11-13). The game's build can bring its programs as C
+// (tools/pica_to_c.py, from the programs its runs logged: its own code, so only in a build made from the user's logs), which this finds by
+// entry and a hash of the words each was made from, and runs instead; with none, the interpreter runs everything as before.
+extern "C" {
+typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
+typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, gs_emit_fn emit, void *ctx);
+struct gs_native {
+    unsigned long long code_hash, swizzle_hash;
+    unsigned entry, end, nswizzles;
+    const unsigned short *swizzles;
+    gs_native_fn fn;
+    unsigned independent, outmask;  // a run reads only what it wrote itself; and the outputs that are its own at every EMIT (pica_to_c.py)
+};
+extern const gs_native gs_native_table[] __attribute__((weak));
+extern const unsigned gs_native_count __attribute__((weak));
+}
+static_assert(sizeof(V4) == 16 && sizeof(bool) == 1, "the generated code takes the register file as floats, and bools as bytes");
+
+static u64 gs_fnv(u64 h, u32 w) {
+    for (int i = 0; i < 4; i++) h = (h ^ ((w >> (8 * i)) & 0xff)) * 0x100000001b3ull;
+    return h;
+}
+
+// the native program for this code at this entry, or none (remembered per decoded program and entry)
+const gs_native *gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u32 entry) {
+    static std::vector<std::pair<std::pair<const ShaderProgram *, u32>, const gs_native *>> known;
+    for (const auto &k : known)
+        if (k.first.first == p && k.first.second == entry) return k.second;
+    const gs_native *fn = nullptr;
+    const u32 n = &gs_native_count ? gs_native_count : 0;
+    for (u32 i = 0; i < n && !fn; i++) {
+        const gs_native &t = gs_native_table[i];
+        if (t.entry != entry || t.end > s.code_size) continue;
+        u64 h = 0xcbf29ce484222325ull;
+        for (u32 a = t.entry; a < t.end; a++) h = gs_fnv(h, s.code[a]);
+        if (h != t.code_hash) continue;
+        h = 0xcbf29ce484222325ull;
+        for (u32 k = 0; k < t.nswizzles; k++) h = gs_fnv(h, t.swizzles[k] < 4096 ? s.swizzle[t.swizzles[k]] : 0);
+        if (h == t.swizzle_hash) fn = &t;
+    }
+    if (known.size() > 64) known.clear();
+    known.push_back({{p, entry}, fn});
+    if (fn) LOG("[vtx] geometry shader at %u runs as native code\n", entry);
+    return fn;
+}
+
+// EMIT, as the interpreter does it (shader.cpp), with SETEMIT's three values passed in
+void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
+    ShaderUnit &u = *(ShaderUnit *)ctx;
+    if (Emitter *e = u.emitter) {
+        e->vertex_id = vid;
+        e->prim_emit = prim;
+        e->winding = wind;
+        if (vid < 3) {
+            u32 oi = 0;
+            for (u32 reg = 0; reg < 16; reg++)
+                if (e->output_mask & (1u << reg)) e->buf[vid][oi++] = u.r[REG_OUT + u.out_bank + reg];
+            if (prim && e->emit_prim) e->emit_prim(e);
+        }
+    }
+    u.out_bank ^= 16;
+}
+
 void gs_run() {
     const ShaderProgram *p = shader_get_program(g.gs);
     shader_copy_uniforms(g.gs_unit, g.gs);
-    shader_run(p, g.gs_unit, g.gs, g.regs[R::GS + R::SH_ENTRY] & 0xffff);
+    const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
+    const gs_native *fn = gs_native_find(p, g.gs, entry);
+    ShaderUnit &u = g.gs_unit;
+    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u))
+        shader_run(p, u, g.gs, entry);
     g.gs.b[15] = true;
+}
+
+// ---- a draw's geometry shader runs, shared between threads
+// Each run of a program that reads only what it wrote itself (gs_native::independent) can be made on any thread: the runs are dealt out in
+// chunks, each thread with a register file and an emitter of its own that keeps the primitives, and the primitives then go to the assembler
+// in the order one thread would have made them. Dark Moon's rain is 590 runs and 3500 triangles a frame, 13 ms of a console's GPU thread
+// even as native code (2026-11-14); core 0's worker takes half.
+struct GsPrim {
+    OutVertex v[3];
+    bool winding;
+};
+struct GsParEmitter {
+    Emitter e;  // first: emit_prim gets a pointer to it
+    std::vector<GsPrim> *sink;
+};
+void gs_par_emit_prim(Emitter *e) {
+    auto *pe = (GsParEmitter *)e;
+    pe->sink->emplace_back();
+    GsPrim &p = pe->sink->back();
+    for (u32 i = 0; i < 3; i++) map_vertex(gsp.map, e->buf[i], p.v[i]);
+    p.winding = e->winding;
+}
+
+void gs_submit_vertex(const V4 *in);
+// vs_out: n vertices' shaded outputs, 16 registers apiece. True if it took them all (false: nothing done, the usual way runs them)
+bool gs_run_shared(const V4 *vs_out, u32 n) {
+    if (!g_gs_shared || gsp.mode != 2 || !gsp.vs_out_num || gsp.cur != gsp.begin || gsp.end > 96 || gsp.end <= gsp.begin) return false;
+    const u32 slots = gsp.end - gsp.begin, per = slots / gsp.vs_out_num;
+    if (!per || per * gsp.vs_out_num != slots || n < per) return false;
+    const ShaderProgram *p = shader_get_program(g.gs);
+    const gs_native *t = gs_native_find(p, g.gs, g.regs[R::GS + R::SH_ENTRY] & 0xffff);
+    if (!t || !t->independent || (g.gs_emitter.output_mask & ~t->outmask)) return false;
+    const u32 runs = n / per;
+    constexpr u32 kRuns = 16;
+    const u32 chunks = (runs + kRuns - 1) / kRuns;
+    static std::vector<std::vector<GsPrim>> made;
+    static std::vector<ShaderUnit> punits;
+    static std::vector<GsParEmitter> pemit;
+    if (made.size() < chunks) made.resize(chunks);
+    if (punits.size() < pool_threads()) {
+        punits.resize(pool_threads());
+        pemit.resize(pool_threads());
+    }
+    static std::vector<u8> fresh;  // per thread: its register file has this draw's uniforms
+    fresh.assign(pool_threads(), 0);
+    std::atomic<bool> declined{false};
+    const u32 vs_out_num = gsp.vs_out_num, begin = gsp.begin;
+    parallel_for(chunks, [&](u32 c, u32 tid) {
+        ShaderUnit &u = punits[tid];
+        GsParEmitter &pe = pemit[tid];
+        if (!fresh[tid]) {
+            fresh[tid] = 1;
+            memset(&u, 0, sizeof u);
+            shader_copy_uniforms(u, g.gs);
+            u.r[REG_ONE] = V4{{1, 1, 1, 1}};
+            memset(&pe.e, 0, sizeof pe.e);
+            pe.e.output_mask = g.gs_emitter.output_mask;
+            pe.e.emit_prim = gs_par_emit_prim;
+            u.emitter = &pe.e;
+        }
+        std::vector<GsPrim> &out = made[c];
+        out.clear();
+        pe.sink = &out;
+        for (u32 r = c * kRuns, e = std::min(runs, r + kRuns); r < e; r++) {
+            for (u32 v = 0; v < per; v++)
+                for (u32 k = 0; k < vs_out_num; k++) u.r[REG_UNI + begin + v * vs_out_num + k] = vs_out[(size_t)(r * per + v) * 16 + k];
+            if (!t->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u)) {
+                declined = true;
+                return;
+            }
+        }
+    });
+    if (declined) return false;  // its bools say another path: nothing has reached the assembler yet
+    for (u32 c = 0; c < chunks; c++)
+        for (const GsPrim &pr : made[c]) {
+            if (pr.winding) g.pa.winding = true;
+            for (u32 i = 0; i < 3; i++) pa_submit(pr.v[i]);
+        }
+    g.gs.b[15] = true;
+    for (u32 i = runs * per; i < n; i++) gs_submit_vertex(vs_out + (size_t)i * 16);  // the start of a primitive the next draw goes on with
+    return true;
 }
 
 void gs_submit_index(u32 val) {
@@ -784,6 +939,10 @@ void vtx_draw(bool indexed) {
         }
 #endif
         // geometry shader path: sequential (GS state persists between invocations)
+#ifdef __WIIU__
+        g_cpu_route[0]++;
+        g_cpu_route[1] += n;
+#endif
         vtx_finish_jobs();
         VtxCpuTimer timed{VCPU_GEOMETRY};
         vtx_cpu.draws[VCPU_GEOMETRY]++;
@@ -794,11 +953,52 @@ void vtx_draw(bool indexed) {
             const ShaderProgram *gp = shader_get_program(g.gs);
             if (std::find(logged.begin(), logged.end(), gp) == logged.end() && logged.size() < 64) {
                 logged.push_back(gp);
+                gx2_note_gs(g.regs[R::GS + R::SH_ENTRY] & 0xffff, g.gs);
                 LOG("[vtx] geometry shader %p (entry %u, mode %u) shaded on the CPU, %u vertices in its first draw\n", (const void *)gp,
                     g.regs[R::GS + R::SH_ENTRY] & 0xffff, gsp.mode, n);
+                if (kMeasure) {  // its code and swizzles, to see what it does (for running it some other way)
+                    char line[8 * 9 + 32];
+                    for (u32 w = 0; w < g.gs.code_size; w += 8) {
+                        int k = snprintf(line, sizeof line, "[gscode] %03x", w);
+                        for (u32 j = w; j < w + 8 && j < g.gs.code_size; j++) k += snprintf(line + k, sizeof line - k, " %08x", g.gs.code[j]);
+                        LOG("%s\n", line);
+                    }
+                    for (u32 w = 0; w < g.gs.swizzle_size; w += 8) {
+                        int k = snprintf(line, sizeof line, "[gsswz] %03x", w);
+                        for (u32 j = w; j < w + 8 && j < g.gs.swizzle_size; j++) k += snprintf(line + k, sizeof line - k, " %08x", g.gs.swizzle[j]);
+                        LOG("%s\n", line);
+                    }
+                    u32 bools = 0;
+                    for (u32 j = 0; j < 16; j++) bools |= (u32)g.gs.b[j] << j;
+                    LOG("[gsconf] mode %u vs_out_num %u begin %u end %u outmask %04x bools %04x\n", gsp.mode, gsp.vs_out_num, gsp.begin, gsp.end,
+                        g.gs_emitter.output_mask, bools);
+                }
             }
         }
 #endif
+        if (gsp.mode != 1) {
+            // The vertex shader's work is each vertex's own: shaded first, in parallel where there are threads to share it (on a Wii U, one on
+            // core 0, which the profile finds idle most of the time), then the geometry shader takes them in order. Luigi's Mansion: Dark Moon's
+            // rain is drawn this way, 1600 vertices a frame, and took 30 ms of each frame on the GPU thread alone (2026-11-13).
+            static std::vector<V4> vs_out;
+            if (vs_out.size() < (size_t)n * 16) vs_out.resize((size_t)n * 16);
+            const double t0 = kMeasure ? now_ms() : 0;
+            constexpr u32 kChunk = 64;
+            parallel_for((n + kChunk - 1) / kChunk, [&](u32 c, u32 tid) {
+                ShaderUnit &u = unit_for(tid);
+                V4 in[16];
+                for (u32 i = c * kChunk, e = std::min(n, i + kChunk); i < e; i++) {
+                    load_vertex(L, idx_list[i], in);
+                    load_inputs(u, R::VS, in);
+                    shader_run(prog, u, g.vs, entry);
+                    gather_outputs(u, outmask, &vs_out[(size_t)i * 16]);
+                }
+            });
+            if (kMeasure) vtx_cpu.geometry_vs_ms += now_ms() - t0;
+            if (!gs_run_shared(vs_out.data(), n))
+                for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
+            return;
+        }
         ShaderUnit &u = unit_for(0);
         V4 in[16], buf[16];
         for (u32 i = 0; i < n; i++) {
@@ -825,6 +1025,10 @@ void vtx_draw(bool indexed) {
     PrimAssembler &pa = g.pa;
     if (pa.index != 0 || pa.strip_ready) {
         // primitive continues from a previous draw: shade now and use the generic assembler
+#ifdef __WIIU__
+        g_cpu_route[2]++;
+        g_cpu_route[3] += n;
+#endif
         vtx_finish_jobs();
         VtxCpuTimer timed{VCPU_CONTINUED};
         vtx_cpu.draws[VCPU_CONTINUED]++;

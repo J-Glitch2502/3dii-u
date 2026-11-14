@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "../audio_iface.h"
 #include "dsp_hle.h"
@@ -24,6 +26,8 @@ struct Dsp {
     std::array<Source, kNumSources> backup_sources;
     Mixer backup_mixer;
     u64 frames = 0;
+    u16 last_counter = 0;  // the game's newest frame counter at the last frame
+    bool fresh = true;     // the last frame worked on a frame the game submitted since the one before
 };
 
 Dsp &dsp() {
@@ -110,21 +114,66 @@ void wakeup(Dsp &d) {
 // queued and the game hangs walking the voice's list). The next frame it takes reports what happened meanwhile.
 StereoFrame generate_frame(Dsp &d, bool seen) {
     const int ri = read_region_index();
+    if (g_verbose >= 3) {  // which region the game submitted, and both frame counters, when that changes
+        static u32 last = ~0u;
+        const u32 now = (u32)ri << 31 | (u32)frame_counter(0) << 16 | frame_counter(1);
+        if (now != last) rt_log("[dsp] frame %u: reading region %d, counters %u %u\n", (unsigned)d.frames, ri, frame_counter(0), frame_counter(1));
+        last = now;
+    }
     SharedMemory &rd = region(ri);
     SharedMemory &wr = region(ri ^ 1);
+
+    // Has the game submitted a frame since the last one (or none yet)? Only such a frame's status goes to the game, with an interrupt
+    // (services/dsp.cpp: dsp_tick), as on a 3DS, where every frame works on one the game submitted just before. A frame between two of
+    // its submissions only plays on: its status would go into the region the game may still be reading (it reads the one it doesn't
+    // submit next), and a status changing halfway through gave Luigi's Mansion: Dark Moon one channel of a stereo stream newer news
+    // than the other. The stream then queued a buffer again that was still in the second channel's list, and the game hung walking it.
+    // A frame the game doesn't take (seen) is never fresh, and leaves the game's submission to the frame it does take.
+    const u16 counter = frame_counter(ri);
+    d.fresh = seen && (counter != d.last_counter || (frame_counter(0) == 0 && frame_counter(1) == 0));
+    if (seen) d.last_counter = counter;
 
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
         s16 coeffs[16];
         for (int c = 0; c < 16; c++) coeffs[c] = rd.adpcm_coeffs[i][c];
-        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen);
-        if (seen) memcpy(&wr.source_status[i], &s, sizeof(s));
+        SourceStatus s = d.sources[i].tick(rd.source_config[i], coeffs, seen, d.fresh);
+        if (d.fresh) memcpy(&wr.source_status[i], &s, sizeof(s));
         for (int m = 0; m < 3; m++) d.sources[i].mix_into(mixes[m], m);
+    }
+
+    // Debugging: RECOMP_VOICEWATCH="addr,addr,...": a game's voice objects (Dark Moon, nn::snd: +0 the source, +4 its sync count,
+    // +0xc on, +0x30 its wave buffer list, +0x34 how many of them the DSP was given; a buffer: +0x11 status, +0x12 id, +0x14 next).
+    // Each time one changes, or the status of its source does, the log gets both, so a run shows what the game made of each status.
+    static const char *watch = getenv("RECOMP_VOICEWATCH");
+    if (watch) {
+        static std::vector<u32> voices;
+        static std::vector<std::string> last;
+        if (voices.empty())
+            for (const char *p = watch; *p;) {
+                voices.push_back((u32)strtoul(p, (char **)&p, 16));
+                if (*p == ',') p++;
+            }
+        last.resize(voices.size());
+        for (size_t v = 0; v < voices.size(); v++) {
+            const u32 o = voices[v], src = r32(o);
+            if (src >= kNumSources) continue;
+            const SourceStatus &st = wr.source_status[src];
+            char line[512];
+            int n = snprintf(line, sizeof line, "game sync %d on %u given %u list", (s16)r16(o + 4), r8(o + 0xc), r16(o + 0x34));
+            u32 b = r32(o + 0x30);
+            for (int k = 0; k < 6 && b && n < 400; k++, b = r32(b + 0x14))
+                n += snprintf(line + n, sizeof line - n, " %u:%u", r16(b + 0x12), r8(b + 0x11));
+            n += snprintf(line + n, sizeof line - n, " | dsp src %u on %u dirty %u sync %u cur %u last %u", src, st.is_enabled,
+                          st.current_buffer_id_dirty, (unsigned)(u16)st.sync_count, (unsigned)(u16)st.current_buffer_id, (unsigned)(u16)st.last_buffer_id);
+            if (last[v] != line) rt_log("[voice %08x] frame %llu counter %u: %s\n", o, (unsigned long long)d.frames, frame_counter(ri), line);
+            last[v] = line;
+        }
     }
 
     d.mixer.tick(rd.dsp_config, rd.intermediate, wr.intermediate, mixes);
     DspStatusBlock status{};
-    memcpy(&wr.dsp_status, &status, sizeof(status));
+    if (d.fresh) memcpy(&wr.dsp_status, &status, sizeof(status));
 
     StereoFrame out = d.mixer.output();
     for (int f = 0; f < kFrameSamples; f++) {
@@ -262,13 +311,14 @@ u16 recv_data(u32 /*reg*/) {
     return d.power == Power::On ? 0 : 1;
 }
 
-bool tick(bool seen) {
+bool tick(bool seen, bool *fresh) {
     Dsp &d = dsp();
     StereoFrame out;
     {
         std::lock_guard lk(d.lock);
         if (d.power != Power::On) return false;
         out = generate_frame(d, seen);
+        if (fresh) *fresh = d.fresh;
     }
     host_output(out.data(), out.size());
     return true;

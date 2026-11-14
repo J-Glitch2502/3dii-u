@@ -128,8 +128,11 @@ def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCH
         open(os.path.join(title, 'code', xml), 'w', encoding='utf-8', newline='').write(s)
     shutil.copyfile(rpx, os.path.join(title, 'code', rpx_name))
 
-    # art for the Wii U Menu, from the game's own icon
-    icon = icon_pixels(os.path.join(game, 'exefs', 'icon.bin'))
+    # art for the Wii U Menu, from the game's own icon. tools/extract_game.py puts it beside code.bin, the Builder in exefs/
+    icon_bin = os.path.join(game, 'exefs', 'icon.bin')
+    if not os.path.isfile(icon_bin):
+        icon_bin = os.path.join(game, 'icon.bin')
+    icon = icon_pixels(icon_bin)
     meta_dir = os.path.join(title, 'meta')
     write_tga(os.path.join(meta_dir, 'iconTex.tga'), icon, 128, 128, 32, 2, BACKGROUND)
     write_tga(os.path.join(meta_dir, 'bootLogoTex.tga'), icon, 170, 42, 32, 0, (0, 0, 0))
@@ -163,7 +166,7 @@ def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCH
     content = os.path.join(title, 'content')
     for f in ('exheader.bin', 'code.bin', 'romfs.bin'):
         link(os.path.join(game, f), os.path.join(content, f))
-    link(os.path.join(game, 'exefs', 'icon.bin'), os.path.join(content, 'exefs_icon.bin'))
+    link(icon_bin, os.path.join(content, 'exefs_icon.bin'))
     for f in os.listdir(archives):
         link(os.path.join(archives, f), os.path.join(content, f))
     font = unpacked_shared_font(os.path.join(archives, SHARED_FONT + '.romfs'))

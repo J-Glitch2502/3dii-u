@@ -67,6 +67,9 @@ os.environ['PYTHONHASHSEED'] = '0'
 # and the game then have folders of their own (rt_measure, build_measure/), so the two kinds never mix, and nothing built that way is
 # packed for a console.
 MEASURE = bool(os.environ.get('THREEDII_MEASURE'))
+# THREEDII_MEASURE=console: packed all the same, for profiling a game on a console over the network (tools/console_watch.py, "test profile");
+# asked for by name only (tools/win/builder_measuring.bat). Slower than a normal build: not for playing.
+MEASURE_CONSOLE = os.environ.get('THREEDII_MEASURE') == 'console'
 
 
 class MemoryStatus(ctypes.Structure):
@@ -289,14 +292,15 @@ class Game:
         self.extra_functions = f'{self.dir}/functions.txt'  # what runs of the game found that static analysis missed
         # what the 3dsrecomp project's own runs of this game learned: its functions and the render states it uses
         with open(f'{self.dir}/info.json', encoding='utf-8') as f:
-            upstream = f'{ROOT}/third_party/3dsrecomp/games/{json.load(f)["program_id"].lower()}'
+            program = json.load(f)["program_id"].lower()
+        upstream = f'{ROOT}/third_party/3dsrecomp/games/{program}'
         self.upstream_functions = f'{upstream}/functions.txt' if os.path.isfile(f'{upstream}/functions.txt') else None
         self.pipelines = f'{upstream}/pipelines.bin' if os.path.isfile(f'{upstream}/pipelines.bin') else None
         # Hand-written code that keeps values in any register across its own calls (Mobiclip's video decoder) runs right only when every register
         # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
         decoder = mobiclip_sites(self.dir)
         safe = len(decoder) >= 8 or coroutine_switches(self.dir) > 0
-        self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
+        self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', GAME_OPT_O2 if program in O2_GAMES else [])
         self.gen_dir = f'{self.dir}/{self.gen}'
         self.safe_ranges = []  # with mode 'abi': address ranges generated the safe way (mixed)
         # the decoder's sites span 65 KB of each game that has it; the margin takes in the rest of its library
@@ -412,6 +416,11 @@ def build_runtime(g, args):
 # A game's translated code is 15 to 25 times the size of its ARM code, and a console's core has 32 KB of instruction cache: for size, then
 # (NSMB2's code is 25.3 MB at -O2 and 21.5 MB at -Os). No frame pointer and no position-independent code, which are this compiler's defaults, said so.
 GAME_OPT = ['-Os', '-fomit-frame-pointer', '-fno-pic']
+# Games whose code goes wrong at -Os, by program ID: built at -O2 as before. Luigi's Mansion: Dark Moon at -Os stops at its start (Cemu,
+# 2026-11-13): an array copy (f_003fd8a0) asks its allocator for a garbage count and hits the game's own bkpt (f_003b4cc8). At -O2 it plays.
+# Why -Os goes wrong there isn't known yet.
+GAME_OPT_O2 = ['-O2', '-fomit-frame-pointer', '-fno-pic']
+O2_GAMES = {'0004000000055f00'}
 
 
 def game_flags(g, opt=None):
@@ -423,11 +432,31 @@ def build_game_code(g, args):
     obj_dir = f'{WORK}/ppc_{g.name}'
     os.makedirs(obj_dir, exist_ok=True)
     flags = game_flags(g, args.opt)
+    # Debugging: THREEDII_OS_ONLY=lo-hi builds the files lo to hi-1 (in name order) at -Os and the rest at -O2, to find which a game's -Os trouble is in
+    split = os.environ.get('THREEDII_OS_ONLY')
+    if split:
+        lo, hi = map(int, split.split('-'))
+        flag_os, flag_o2 = game_flags(g, ' '.join(GAME_OPT)), game_flags(g, ' '.join(GAME_OPT_O2))
     items = []
-    for c in sorted(glob.glob(g.gen_dir + '/*.c')):
+    for i, c in enumerate(sorted(glob.glob(g.gen_dir + '/*.c'))):
         c = c.replace('\\', '/')
         n = os.path.basename(c)[:-2]
-        items.append((n, c, f'{obj_dir}/{n}.o', flags))
+        items.append((n, c, f'{obj_dir}/{n}.o', (flag_os if lo <= i < hi else flag_o2) if split else flags))
+    # The geometry shaders this game's runs met on the CPU (.gsl files in its shader logs) as C, which the runtime runs instead of its
+    # interpreter (vertex.cpp: gs_native_find): the game's own code, made here from the user's logs, never shared.
+    gsl = sorted(glob.glob(g.dir + '/shader_logs/*.gsl'))
+    if gsl:
+        made = f'{obj_dir}/gs_native.c'
+        tmp = made + '.new'
+        r = run([sys.executable, ROOT + '/tools/pica_to_c.py', tmp] + gsl, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        print(r.stdout.strip(), flush=True)
+        if r.returncode:
+            sys.exit('pica_to_c failed')
+        if os.path.exists(made) and open(made, 'rb').read() == open(tmp, 'rb').read():
+            os.remove(tmp)
+        else:
+            os.replace(tmp, made)
+        items.append(('gs_native', made, f'{obj_dir}/gs_native.o', flags))
     # a new generation can come in fewer files: the old ones' objects would be linked too, defining their functions twice
     wanted = {n for n, *_ in items}
     for o in glob.glob(obj_dir + '/*.o*'):
@@ -731,7 +760,7 @@ def host_build(g, args):
         if len(funcs) > 60000:  # over a program's 65535 exports (Animal Crossing's 98577): code compiled on the spot then can't call the game's
             funcs = []
         open(f'{obj_dir}/exports.def', 'w', newline='\n').write('EXPORTS\n' + '\n'.join(sorted(set(funcs) | set(helpers) | (defined & {'guest_entries', 'guest_entry_count'}))) + '\n')
-        r = run(HOST_CXX + ['-static', f'@{rsp}', f'{obj_dir}/exports.def', '-lpthread', '-lwinmm', f'-Wl,--out-implib,{obj_dir}/game.dll.a', '-o', exe],
+        r = run(HOST_CXX + ['-static', f'@{rsp}', f'{obj_dir}/exports.def', '-lpthread', '-lwinmm', '-lgdi32', f'-Wl,--out-implib,{obj_dir}/game.dll.a', '-o', exe],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
         if r.returncode:
             found = sorted({x for x in r.stdout.splitlines() if 'undefined symbol' in x or 'error' in x})
@@ -760,7 +789,7 @@ def trial(g, args):
         return
     run_dir = f'{WORK}/run_{g.name}' + (f'_{args.run}' if args.run else '')
     os.makedirs(run_dir, exist_ok=True)
-    for d in ('save', 'shots'):
+    for d in ('shots',) if args.keep_save else ('save', 'shots'):
         shutil.rmtree(f'{run_dir}/{d}', ignore_errors=True)
     if args.save_from:
         shutil.copytree(args.save_from, f'{run_dir}/save')
@@ -829,7 +858,7 @@ def build_title(g, args):
 
 
 def pack(g, otp):
-    if MEASURE:
+    if MEASURE and not MEASURE_CONSOLE:
         sys.exit('THREEDII_MEASURE is set: that build measures itself and is for Cemu only. Build the game again without it, then pack.')
     title = g.out + '/title'
     target = f'{ROOT}/dist/{known_game(g.name)["folder"]}'  # as tools/ship_card.py names them
@@ -852,6 +881,7 @@ def main():
     ap.add_argument('--gpu-threads', type=int, default=4, help='trial: threads for the software renderer')
     ap.add_argument('--run', help='trial: a name of its own, so copies can run side by side')
     ap.add_argument('--save-from', help='trial: start from a copy of this save folder')
+    ap.add_argument('--keep-save', action='store_true', help='trial: go on from the save the last run of this name left (tools/win/play_pc.py)')
     ap.add_argument('--env', action='append', help='trial: more settings, as NAME=value')
     ap.add_argument('--shot-every', type=int)
     ap.add_argument('--seconds', type=int, help='trial: stop after this long anyway')

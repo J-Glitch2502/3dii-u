@@ -20,6 +20,12 @@ DspState dsp;
 static void dsp_interrupt() {  // (kernel lock held) the frame is there for the game
     static int n;
     if (n++ == 100) VLOG("[dsp] tick: pipe event %s\n", dsp.pipe_irq[2] ? dsp.pipe_irq[2]->name.c_str() : "none");
+    // The interrupt only after a frame that worked on one the game submitted since the last interrupt, as on a 3DS, where the game submits
+    // right after each interrupt, well before the next frame. Here a frame can come while the game is still at work on the last one: an
+    // interrupt then stays pending, the game reads the status as soon as it has submitted, before any frame has worked on that submission,
+    // and gets a status two frames old from the region it reads next. Luigi's Mansion: Dark Moon's stream took that old "stopped, no
+    // buffer" for news, marked buffers still playing done and queued them again, and its voice lists became loops (the game then hung).
+    // Sound goes on all the same: only the interrupt waits for the game, and its next submission comes within a frame.
     if (dsp.pipe_irq[2]) dsp.pipe_irq[2]->signal();
     schedule_async();
 }
@@ -42,7 +48,8 @@ void dsp_tick() {
         if (ev && !ev->waiters.empty()) dsp.game_waits = true;
         lk.unlock();
     }
-    if (!audio::tick(seen) || !seen) return;
+    bool fresh = true;
+    if (!audio::tick(seen, &fresh) || !fresh) return;  // fresh: taken (seen), and on a submission of the game's since the last interrupt
     if (lock_soon(lk)) dsp_interrupt();
     else dsp.owed = true;
 }

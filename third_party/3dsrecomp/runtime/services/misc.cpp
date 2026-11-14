@@ -574,6 +574,23 @@ struct Generic : Service {
     void handle(IPC &ipc) override { unimplemented(ipc); }
 };
 
+// dlp:SRVR: Download Play's server side. A game asks it whether it was itself started as a Download Play child; the answer word left out
+// (as an unimplemented command returns) read as "yes" from what the last request left there: Luigi's Mansion: Dark Moon then started in
+// its Thrill Tower multiplayer, as a child looking for its host ("Connection error", "Waiting for player"), not at its title screen.
+struct DlpSrvr : Service {
+    using Service::Service;
+    void handle(IPC &ipc) override {
+        switch (ipc.cmd()) {
+        case 0x000E:  // IsChild(process id)
+            ipc.ok(2);
+            ipc.set(2, 0);
+            break;
+        default:
+            unimplemented(ipc);
+        }
+    }
+};
+
 // am:app: the add-on content and update the builder put beside the game (builder/dumps.py), as Azahar's AM hands them out: dlc_contents.bin
 // holds the DLC title's content infos (index, type, id, size, ownership; 0x18 bytes each), dlc_title.bin and update_title.bin a title info
 // each (title id, size, version, type), dlc_ticket.bin a ticket info. With none of them nothing is installed.
@@ -708,9 +725,10 @@ void register_misc() {
     register_service(std::make_shared<Ir>("ir:u"));
     register_service(std::make_shared<Uds>("nwm::UDS"));
     register_service(std::make_shared<Am>("am:app"));  // was Generic: NSMB2's Coin Rush read its own request back as thousands of DLC tickets (2026-11-07)
+    register_service(std::make_shared<DlpSrvr>("dlp:SRVR"));
     register_y2r();
     register_cam();
-    for (const char *n : {"news:u", "soc:U", "ssl:C", "http:C", "dlp:FKCL", "dlp:SRVR",
+    for (const char *n : {"news:u", "soc:U", "ssl:C", "http:C", "dlp:FKCL",
                           "pxi:dev", "act:u", "nim:aoc", "qtm:u", "csnd:SND", "nfc:u"})
         register_service(std::make_shared<Generic>(n));
 }

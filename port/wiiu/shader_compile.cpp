@@ -10,6 +10,7 @@
 #include <malloc.h>
 
 #include <cctype>
+#include <dirent.h>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -58,9 +59,34 @@ u32 inputs_read(const std::string &glsl) {
     return n;
 }
 
+// One cache per shipped set: what an older build missed and compiled here is mostly in a newer one's set, and compiling it all again at every
+// start kept this thread (and the heap lock it takes all the time) busy for minutes, through Luigi's Mansion: Dark Moon's intro, whose sound
+// and pictures stuttered meanwhile (1129 shaders, at ~300 ms each, 2026-11-11). A new build starts its cache empty; the old file goes.
 const std::string &cache_path() {
-    static const std::string p = wiiu::data_dir() + "/shader_cache.bin";
+    static std::string p;
+    if (p.empty()) {
+        char name[48];
+        snprintf(name, sizeof name, "/shader_cache_%016llx.bin", (unsigned long long)gpu::shipped_set_id);
+        p = wiiu::data_dir() + name;
+    }
     return p;
+}
+
+static void cache_drop_old() {
+    const std::string dir = wiiu::data_dir();
+    remove((dir + "/shader_cache.bin").c_str());
+    if (DIR *d = opendir(dir.c_str())) {
+        std::vector<std::string> old;
+        while (dirent *e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.rfind("shader_cache_", 0) == 0 && dir + "/" + n != cache_path()) old.push_back(dir + "/" + n);
+        }
+        closedir(d);
+        for (const std::string &o : old) {
+            remove(o.c_str());
+            LOG("[glsl] an older build's cache gone: %s\n", o.c_str());
+        }
+    }
 }
 
 // The file starts with these two words. Its GLSL is what the shader generator of the build that wrote it made of each state, so a build whose
@@ -86,6 +112,7 @@ void cache_append(const Job &j) {
 }
 
 void cache_load() {
+    cache_drop_old();
     FILE *f = fopen(cache_path().c_str(), "rb");
     if (!f) return;
     u32 n = 0, head[5];

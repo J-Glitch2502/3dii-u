@@ -4,6 +4,11 @@
 #include <mutex>
 #include <thread>
 
+#ifdef __WIIU__
+#include <coreinit/thread.h>
+#include <malloc.h>
+#endif
+
 #include "gpu/pica.h"
 
 namespace gpu {
@@ -176,10 +181,30 @@ void worker_main(u32 tid) {
 }
 }  // namespace
 
+#ifdef __WIIU__
+// One worker on core 0, beside the sound (15) and the HID thread (16), ahead of the shader compiler (21): the core is idle most of the time
+// (the console's profiles, 2026-11-11), and the draws whose vertices the CPU shades share them with it (vertex.cpp).
+static int pool_worker_entry(int, void *) {
+    worker_main(1);
+    return 0;
+}
+static bool pool_worker_started;
+static void pool_start_wiiu_worker() {
+    constexpr u32 kStack = 256 << 10;
+    auto *t = (OSThread *)memalign(16, sizeof(OSThread));
+    void *stack = memalign(16, kStack);
+    if (!t || !stack || !OSCreateThread(t, pool_worker_entry, 0, nullptr, (u8 *)stack + kStack, kStack, 18, OS_THREAD_ATTRIB_AFFINITY_CPU0)) return;
+    OSSetThreadName(t, "vertex worker");
+    OSResumeThread(t);
+    pool_worker_started = true;
+}
+#endif
+
 void pool_init() {
     if (!workers.empty()) return;
 #ifdef __WIIU__
-    u32 n = 0;  // the three cores are spoken for
+    if (!pool_worker_started) pool_start_wiiu_worker();
+    u32 n = 0;  // the three cores are spoken for: core 0's worker above is the one exception
 #else
     u32 hw = std::thread::hardware_concurrency();
     u32 n = hw > 2 ? hw - 2 : 0;
@@ -192,11 +217,15 @@ void pool_init() {
     }
 }
 
+#ifdef __WIIU__
+u32 pool_threads() { return pool_worker_started ? 2 : 1; }
+#else
 u32 pool_threads() { return (u32)workers.size() + 1; }
+#endif
 
 void parallel_for(u32 n, const std::function<void(u32, u32)> &fn) {
     if (n == 0) return;
-    if (n == 1 || workers.empty()) {
+    if (n == 1 || pool_threads() == 1) {
         for (u32 i = 0; i < n; i++) fn(i, 0);
         return;
     }

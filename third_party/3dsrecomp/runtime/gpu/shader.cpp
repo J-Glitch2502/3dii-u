@@ -1126,6 +1126,8 @@ struct SpecGen {
     static std::string open_bool(const DInst &I) { return "((uInt[0].w >> " + std::to_string(I.bid) + ") & 1) != 0"; }
     int loops = 0, ifs = 0, calls = 0, counter = 0;
     bool fail = false;
+    int why = 0;  // the source line that gave up, and the instruction (shader_glsl_fail)
+    u32 at = 0;
     // end-check addresses of the active regions: shader_run tests every region type against the address
     // after the last executed instruction, so two active regions must never share one
     std::vector<u32> ends;
@@ -1146,7 +1148,7 @@ struct SpecGen {
         u32 i = s;
         while (i < e && !fail) {
             if (w.o.size() > 400000) {
-                fail = true;
+                fail = true; why = __LINE__; at = i;
                 break;
             }
             if (i >= n) {  // past the program: shader_run stops
@@ -1168,7 +1170,7 @@ struct SpecGen {
             case OP_BREAKC:
                 if (!loops) break;  // outside loops: no effect
                 if (!in_loop || ifs || calls) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 if (I.op == OP_BREAK) {
@@ -1179,8 +1181,17 @@ struct SpecGen {
                 break;
             case OP_JMPU:
             case OP_JMPC: {
+                // A JMPU is settled by the variant's bools: one not taken does nothing, and one taken is a goto the code can follow, backwards too
+                // (Luigi's Mansion: Dark Moon's one vertex program jumps back on b14 at 0e5, 101, 141, 181... and all 108 of its variants that
+                // reach one ran on the console's CPU, at 1.6 fps). Only outside every call, if and loop, where no region ends between the two.
+                // An open bool (decided(), left to run time) isn't settled here: that one is written out below.
+                if (I.op == OP_JMPU && decided(I) && ((b >> I.bid) & 1) != !(num & 1)) break;
+                if (I.op == OP_JMPU && decided(I) && dst < i && dst < n && ends.empty() && !loops && !ifs && !calls) {
+                    cont = dst;
+                    break;
+                }
                 if (dst <= i || dst >= e) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 if (I.op == OP_JMPU && decided(I)) {
@@ -1199,13 +1210,13 @@ struct SpecGen {
             case OP_CALLC:
             case OP_CALLU: {
                 if (num == 0 || dst + num == i + 1 || dst + num > n || calls >= 3 || !ends_plain(dst, dst + num)) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 if (I.op == OP_CALLU && decided(I) && !((b >> I.bid) & 1)) break;
                 const bool dyn = I.op == OP_CALLC || (I.op == OP_CALLU && !decided(I));
                 if (!enter(dst + num)) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 if (dyn) w.o += "    if (" + (I.op == OP_CALLC ? w.cond(I) : open_bool(I)) + ") {\n";
@@ -1215,7 +1226,7 @@ struct SpecGen {
                 ends.pop_back();
                 if (dyn) w.o += "    }\n";
                 if (cont == e) {  // shader_run would not pop the enclosing region on the return
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 break;
@@ -1223,14 +1234,14 @@ struct SpecGen {
             case OP_IFU:
             case OP_IFC: {
                 if (dst < i + 1 || dst + num > e || ifs >= 7 || !ends_plain(i + 1, dst) || !ends_plain(dst, dst + num)) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 cont = dst + num;
                 const bool known = I.op == OP_IFU && decided(I);
                 const bool taken = !known || ((b >> I.bid) & 1);
                 if (taken && !enter(dst)) {  // the true branch is a region ending at dst
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 ifs++;
@@ -1251,18 +1262,18 @@ struct SpecGen {
                 if (taken) ends.pop_back();
                 ifs--;
                 if (cont == e && cont != i + 1) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 break;
             }
             case OP_LOOP: {
                 if (dst < i + 1 || dst + 1 > e || loops >= 3 || !(plain(P->ins[dst]) || P->ins[dst].op == OP_BREAKC)) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 if (!enter(dst + 1)) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 // The count, start and step come from the uniform block (uInt, the integer uniforms the key already fixes), not the number itself:
@@ -1283,13 +1294,13 @@ struct SpecGen {
                 if (loops) w.f("    aL = uInt[%u].y;\n", I.iid);  // shader_run restores the counter it saved: this loop's start
                 cont = dst + 1;
                 if (cont == e) {
-                    fail = true;
+                    fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 break;
             }
             default:  // EMIT/SETEMIT
-                fail = true;
+                fail = true; why = __LINE__; at = i;
                 return false;
             }
             i = cont;
@@ -1300,6 +1311,9 @@ struct SpecGen {
 }  // namespace
 
 // The body of main() for GLSL (port/wiiu/shadergen.cpp declares the registers and helpers).
+int shader_glsl_fail_line;  // why the last shader_glsl_spec gave up: the line in this file, and the instruction
+u32 shader_glsl_fail_at;
+
 std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open) {
     const u32 n = (u32)P->ins.size();
     if (entry >= n) return "";
@@ -1315,7 +1329,11 @@ std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 
     w.al = "aL";
     SpecGen g{w, P, n, b, iu, open};
     g.block(entry, n, false, 0);
-    if (g.fail) return "";
+    if (g.fail) {
+        shader_glsl_fail_line = g.why;
+        shader_glsl_fail_at = g.at;
+        return "";
+    }
     std::string s = w.o;
     auto replace_all = [&](const char *from, const char *to) {
         const std::string f = from, t = to;
