@@ -4362,6 +4362,7 @@ bool gfx_set(const char *name, u32 v) {
     } else if (!strcmp(name, "fillinside")) fill_inside = v;  // a fill fills the targets wholly inside it (gx2_memory_fill)
     else if (!strcmp(name, "lineargpu")) linear_on_gpu = v;  // texture copies out of linear surfaces on the GPU (linear_copy_on_gpu)
     else if (!strcmp(name, "halfss")) half_ss = v;  // a target its transfer scales down is drawn at the smaller size (note_downscaled); from the next one made
+    else if (!strcmp(name, "gsshared")) g_gs_shared = v;  // geometry shader runs on two threads (vertex.cpp: gs_run_shared)
     else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up

@@ -20,6 +20,7 @@ struct gs_native {
     unsigned entry, end, nswizzles;
     const unsigned short *swizzles;
     gs_native_fn fn;
+    unsigned independent, outmask;
 };
 extern const gs_native gs_native_table[];
 extern const unsigned gs_native_count;
@@ -88,13 +89,24 @@ int main(int argc, char **argv) {
                     for (u32 i = 0; i < 16; i++) s.b[i] = (rng() & 1) != 0;
                     s.b[14] = run % 11 != 0;  // the bool its stretch needs, missing now and then: the native one must decline
                     std::vector<Prim> want, got;
-                    for (int way = 0; way < 2; way++) {
+                    // the third way: native again, on a register file full of another run's leavings, which a program the generator
+                    // calls independent must not notice (the runtime then runs it on two threads: vertex.cpp's gs_run_shared)
+                    for (int way = 0; way < (gs_native_table[t].independent ? 3 : 2); way++) {
                         static ShaderUnit u;
                         static Emitter e;
                         memset(&u, 0, sizeof u);
                         memset(&e, 0, sizeof e);
                         shader_unit_init(u, s);
-                        e.output_mask = 0x3f;
+                        if (way == 2) {
+                            if (!s.b[14]) break;
+                            for (u32 i = REG_TMP; i < REG_UNI; i++)
+                                for (u32 k = 0; k < 4; k++) u.r[i].v[k] = (float)(rng() % 1000) - 500.0f;
+                            for (u32 i = REG_OUT; i < REG_OUT + 32; i++)
+                                for (u32 k = 0; k < 4; k++) u.r[i].v[k] = (float)(rng() % 1000) - 500.0f;
+                            u.out_bank = (rng() & 1) * 16;
+                            got.clear();
+                        }
+                        e.output_mask = 0x3f & gs_native_table[t].outmask;
                         e.emit_prim = capture;
                         u.emitter = &e;
                         sink = way ? &got : &want;

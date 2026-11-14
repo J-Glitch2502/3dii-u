@@ -1,6 +1,7 @@
 // Vertex loading, vertex shader invocation (parallel for batched draws), geometry shader pipeline
 // and primitive assembly.
 #include <algorithm>
+#include <atomic>
 
 #include "gpu/pica.h"
 
@@ -10,6 +11,7 @@ u64 g_cpu_route[4];
 #endif
 
 VtxCpuStats vtx_cpu;
+bool g_gs_shared = true;
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
@@ -251,6 +253,7 @@ struct gs_native {
     unsigned entry, end, nswizzles;
     const unsigned short *swizzles;
     gs_native_fn fn;
+    unsigned independent, outmask;  // a run reads only what it wrote itself; and the outputs that are its own at every EMIT (pica_to_c.py)
 };
 extern const gs_native gs_native_table[] __attribute__((weak));
 extern const unsigned gs_native_count __attribute__((weak));
@@ -263,11 +266,11 @@ static u64 gs_fnv(u64 h, u32 w) {
 }
 
 // the native program for this code at this entry, or none (remembered per decoded program and entry)
-gs_native_fn gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u32 entry) {
-    static std::vector<std::pair<std::pair<const ShaderProgram *, u32>, gs_native_fn>> known;
+const gs_native *gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u32 entry) {
+    static std::vector<std::pair<std::pair<const ShaderProgram *, u32>, const gs_native *>> known;
     for (const auto &k : known)
         if (k.first.first == p && k.first.second == entry) return k.second;
-    gs_native_fn fn = nullptr;
+    const gs_native *fn = nullptr;
     const u32 n = &gs_native_count ? gs_native_count : 0;
     for (u32 i = 0; i < n && !fn; i++) {
         const gs_native &t = gs_native_table[i];
@@ -277,7 +280,7 @@ gs_native_fn gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u32 en
         if (h != t.code_hash) continue;
         h = 0xcbf29ce484222325ull;
         for (u32 k = 0; k < t.nswizzles; k++) h = gs_fnv(h, t.swizzles[k] < 4096 ? s.swizzle[t.swizzles[k]] : 0);
-        if (h == t.swizzle_hash) fn = t.fn;
+        if (h == t.swizzle_hash) fn = &t;
     }
     if (known.size() > 64) known.clear();
     known.push_back({{p, entry}, fn});
@@ -306,11 +309,92 @@ void gs_run() {
     const ShaderProgram *p = shader_get_program(g.gs);
     shader_copy_uniforms(g.gs_unit, g.gs);
     const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
-    gs_native_fn fn = gs_native_find(p, g.gs, entry);
+    const gs_native *fn = gs_native_find(p, g.gs, entry);
     ShaderUnit &u = g.gs_unit;
-    if (!fn || !fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u))
+    if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u))
         shader_run(p, u, g.gs, entry);
     g.gs.b[15] = true;
+}
+
+// ---- a draw's geometry shader runs, shared between threads
+// Each run of a program that reads only what it wrote itself (gs_native::independent) can be made on any thread: the runs are dealt out in
+// chunks, each thread with a register file and an emitter of its own that keeps the primitives, and the primitives then go to the assembler
+// in the order one thread would have made them. Dark Moon's rain is 590 runs and 3500 triangles a frame, 13 ms of a console's GPU thread
+// even as native code (2026-11-14); core 0's worker takes half.
+struct GsPrim {
+    OutVertex v[3];
+    bool winding;
+};
+struct GsParEmitter {
+    Emitter e;  // first: emit_prim gets a pointer to it
+    std::vector<GsPrim> *sink;
+};
+void gs_par_emit_prim(Emitter *e) {
+    auto *pe = (GsParEmitter *)e;
+    pe->sink->emplace_back();
+    GsPrim &p = pe->sink->back();
+    for (u32 i = 0; i < 3; i++) map_vertex(gsp.map, e->buf[i], p.v[i]);
+    p.winding = e->winding;
+}
+
+void gs_submit_vertex(const V4 *in);
+// vs_out: n vertices' shaded outputs, 16 registers apiece. True if it took them all (false: nothing done, the usual way runs them)
+bool gs_run_shared(const V4 *vs_out, u32 n) {
+    if (!g_gs_shared || gsp.mode != 2 || !gsp.vs_out_num || gsp.cur != gsp.begin || gsp.end > 96 || gsp.end <= gsp.begin) return false;
+    const u32 slots = gsp.end - gsp.begin, per = slots / gsp.vs_out_num;
+    if (!per || per * gsp.vs_out_num != slots || n < per) return false;
+    const ShaderProgram *p = shader_get_program(g.gs);
+    const gs_native *t = gs_native_find(p, g.gs, g.regs[R::GS + R::SH_ENTRY] & 0xffff);
+    if (!t || !t->independent || (g.gs_emitter.output_mask & ~t->outmask)) return false;
+    const u32 runs = n / per;
+    constexpr u32 kRuns = 16;
+    const u32 chunks = (runs + kRuns - 1) / kRuns;
+    static std::vector<std::vector<GsPrim>> made;
+    static std::vector<ShaderUnit> punits;
+    static std::vector<GsParEmitter> pemit;
+    if (made.size() < chunks) made.resize(chunks);
+    if (punits.size() < pool_threads()) {
+        punits.resize(pool_threads());
+        pemit.resize(pool_threads());
+    }
+    static std::vector<u8> fresh;  // per thread: its register file has this draw's uniforms
+    fresh.assign(pool_threads(), 0);
+    std::atomic<bool> declined{false};
+    const u32 vs_out_num = gsp.vs_out_num, begin = gsp.begin;
+    parallel_for(chunks, [&](u32 c, u32 tid) {
+        ShaderUnit &u = punits[tid];
+        GsParEmitter &pe = pemit[tid];
+        if (!fresh[tid]) {
+            fresh[tid] = 1;
+            memset(&u, 0, sizeof u);
+            shader_copy_uniforms(u, g.gs);
+            u.r[REG_ONE] = V4{{1, 1, 1, 1}};
+            memset(&pe.e, 0, sizeof pe.e);
+            pe.e.output_mask = g.gs_emitter.output_mask;
+            pe.e.emit_prim = gs_par_emit_prim;
+            u.emitter = &pe.e;
+        }
+        std::vector<GsPrim> &out = made[c];
+        out.clear();
+        pe.sink = &out;
+        for (u32 r = c * kRuns, e = std::min(runs, r + kRuns); r < e; r++) {
+            for (u32 v = 0; v < per; v++)
+                for (u32 k = 0; k < vs_out_num; k++) u.r[REG_UNI + begin + v * vs_out_num + k] = vs_out[(size_t)(r * per + v) * 16 + k];
+            if (!t->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, gs_native_emit, &u)) {
+                declined = true;
+                return;
+            }
+        }
+    });
+    if (declined) return false;  // its bools say another path: nothing has reached the assembler yet
+    for (u32 c = 0; c < chunks; c++)
+        for (const GsPrim &pr : made[c]) {
+            if (pr.winding) g.pa.winding = true;
+            for (u32 i = 0; i < 3; i++) pa_submit(pr.v[i]);
+        }
+    g.gs.b[15] = true;
+    for (u32 i = runs * per; i < n; i++) gs_submit_vertex(vs_out + (size_t)i * 16);  // the start of a primitive the next draw goes on with
+    return true;
 }
 
 void gs_submit_index(u32 val) {
@@ -911,7 +995,8 @@ void vtx_draw(bool indexed) {
                 }
             });
             if (kMeasure) vtx_cpu.geometry_vs_ms += now_ms() - t0;
-            for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
+            if (!gs_run_shared(vs_out.data(), n))
+                for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
             return;
         }
         ShaderUnit &u = unit_for(0);

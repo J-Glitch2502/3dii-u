@@ -647,6 +647,7 @@ struct VtxCpuStats {
     double geometry_vs_ms;  // of ms[VCPU_GEOMETRY], what the vertex shader took (the rest: the geometry shader and assembling)
 };
 extern VtxCpuStats vtx_cpu;
+extern bool g_gs_shared;  // a draw's geometry shader runs go to two threads where they can (vertex.cpp: gs_run_shared); a switch for a console
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)
 extern double g_tex_decode_ms;
 extern u32 g_tex_decodes;
