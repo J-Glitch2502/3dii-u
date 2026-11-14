@@ -264,6 +264,10 @@ pa_submit3); the `[vtx]` line splits the geometry shader's time (vertex shader, 
 Still under 30 on the console, to look at next with those numbers: the rain before the gate; intro scenes where the GPU takes 40-46 ms a
 flip (frames 5400, 8400-8700, 10800, 14700-15600 of console_runs/intro1), though some of that was the game making more than 30 frames.
 
+**Other games built from `darkmoon` (Nov 14)**: New Super Mario Bros. 2 and Tomodachi Life flickered on the TV, the whole picture:
+show_lcd_from_memory showed their black LCD memory at every VBlank between the pictures their transfers bring (a7c25ad: only if written
+after the last transfer's picture). Confirmed gone on Senne's console. A reminder that the renderer changes here touch every game.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),
