@@ -4220,10 +4220,17 @@ static void show_lcd_from_memory() {
     recent_top_stride = stride;
     recent_top_bpp = bpp;
     recent_top_fmt = cbuf_to_pixfmt(fmt);  // the display format as a colour buffer's (the table is its own inverse)
+    // What the LCD buffer holds counts only if it was written after the last picture a display transfer brought: a game whose top screen comes
+    // by transfers at thirty a second (New Super Mario Bros. 2, Tomodachi Life) once wrote into its LCD buffer, and at every VBlank without a
+    // transfer the TV then showed that memory, black, between the game's pictures: the whole TV flickered (Senne's console, 2026-11-14).
+    static u32 transfer_seq;
+    static u64 transfer_drawn;
     const bool by_transfer = top_shown;
     top_shown = false;
     if (by_transfer) {
         shown_pa = 0;
+        transfer_seq = lcd_write_seq;
+        transfer_drawn = gpu_writes;
         return;
     }
     const u8 *src = pa ? pptr(pa) : nullptr;
@@ -4233,6 +4240,7 @@ static void show_lcd_from_memory() {
     for (auto &s : surfaces)
         if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride && (!lcd || s->drawn > lcd->drawn)) lcd = s.get();
     if (lcd) {
+        if (lcd->drawn <= transfer_drawn) return;
         if (pa == shown_pa && lcd->drawn == shown_drawn) return;
         shown_pa = pa;
         shown_drawn = lcd->drawn;
@@ -4247,7 +4255,7 @@ static void show_lcd_from_memory() {
     u32 latest = 0;
     for (const MemoryWrite &w : lcd_writes)
         if (w.seq && w.pa < pa + size && pa < w.pa + w.size) latest = std::max(latest, w.seq);
-    if (!latest || (pa == shown_pa && latest == shown_seq)) return;
+    if (!latest || latest <= transfer_seq || (pa == shown_pa && latest == shown_seq)) return;
     shown_pa = pa;
     shown_seq = latest;
     static GX2Texture tex[2];
