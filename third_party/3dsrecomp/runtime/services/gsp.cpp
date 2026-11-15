@@ -66,13 +66,23 @@ static void signal_irq_now(Irq id) {
     }
 }
 
-// GSP shows a framebuffer by writing the LCD's registers for one of its two buffers and selecting it; games can write those registers
-// themselves too (Mario Kart 7 flips its screens only that way), so all three ways meet here. (fb_mutex held)
+// GSP shows a framebuffer by writing the LCD's registers for one of its two buffers and selecting it (SetBufferSwap, and the shared-memory
+// block at a VBlank). A change of what a screen shows is the game's swap, which a 3DS's screens take at the next VBlank (gsp_swaps); games
+// that write those registers themselves swap in write_hw_regs, counted the same way. (fb_mutex held)
+static u32 swap_count[2];
+static unsigned swapped;  // the screens swapped since the last VBlank
 static void lcd_record(int screen, u32 select, u32 left, u32 right) {
     auto &l = gsp.lcd[screen];
+    const u32 paddr = mem::vaddr_to_paddr(left);
+    if (l.select != (select & 1) || l.left[select & 1] != paddr) swapped |= 1u << screen;
     l.select = select & 1;
-    l.left[l.select] = mem::vaddr_to_paddr(left);
+    l.left[l.select] = paddr;
     l.right[l.select] = mem::vaddr_to_paddr(right);
+}
+
+u32 gsp_swaps(int screen) {
+    std::lock_guard<std::mutex> lk(fb_mutex);
+    return swap_count[screen & 1];
 }
 
 // framebuffer update from the shared memory (at VBlank), like the GSP module does
@@ -151,6 +161,11 @@ void gsp_vblank() {
     no_gpu_timeout();
     update_framebuffer(0);
     update_framebuffer(1);
+    {
+        std::lock_guard<std::mutex> fl(fb_mutex);
+        for (int s = 0; s < 2; s++) swap_count[s] += swapped >> s & 1;
+        swapped = 0;
+    }
     signal_irq(PDC0);
     signal_irq(PDC1);
     schedule_async();
@@ -320,6 +335,7 @@ struct GspGpu : Service {
             for (int s = 0; s < 2; s++) {
                 auto &l = gsp.lcd[s];
                 FramebufferInfo &f = gsp.fb[s];
+                const u32 select = l.select, shown = l.left[l.select];
                 switch (reg + i - (0x400400 + s * 0x100)) {
                 case 0x68: l.left[0] = v; break;
                 case 0x6C: l.left[1] = v; break;
@@ -330,6 +346,7 @@ struct GspGpu : Service {
                 case 0x90: f.stride = v; continue;
                 default: continue;
                 }
+                if (l.select != select || l.left[l.select] != shown) swapped |= 1u << s;  // as lcd_record counts it
                 f.addr_left = mem::paddr_to_vaddr(l.left[l.select]);
                 f.addr_right = mem::paddr_to_vaddr(l.right[l.select]);
                 f.valid = f.addr_left != 0;

@@ -121,6 +121,73 @@ int main() {
     outside[2 * 4] = 40;  // a clause past the end of the program
     check("a clause outside the program", outside, 7, kVertexRegisters, false, 7, outside);
 
+    // Two of a group storing to the same component of the throwaway register: the z unit's, and the scalar unit's as the group's fifth
+    // instruction. The next group reads the two through PV and PS, and the second store gets a register of its own.
+    const auto pair = [](u32 first, u32 second) {
+        std::vector<u32> w;
+        cf_alu(w, 2, 6);                                          // 0
+        cf_export(w, POS, 1, 0, true);                            // 1
+        op3(w, MULADD, first, 2, {1, 0}, {1, 1}, {1, 2}, false);  // 2
+        op2(w, MOV, 1, 0, true, {2, 0}, {0, 0}, false);
+        op2(w, MOV, 1, 1, true, {2, 1}, {0, 0}, false);
+        op2(w, MOV, 1, 3, true, {2, 3}, {0, 0}, false);
+        op3(w, MULADD, second, 2, {1, 0}, {1, 1}, {1, 2}, true);  // 6
+        op2(w, ADD, 1, 2, true, {PV, 2}, {255, 0}, true);         // 7: the z unit's result and the scalar unit's
+        return w;
+    };
+    check("two of a group storing to the throwaway register's same component", pair(123, 123), 3, kVertexRegisters, true, 5, pair(3, 4));
+    check("no register left for the second of the two", pair(123, 123), kVertexRegisters - 1, kVertexRegisters, false, kVertexRegisters - 1, pair(123, 123));
+    check("the two already apart", pair(3, 4), 5, kVertexRegisters, true, 5, pair(3, 4));
+
+    // unburst: a list with jumps to before, into and past its exports, a burst of three places from registers 2 to 4 and a burst of two that
+    // ends the program. The list gains three instructions, and the clauses move on by four, to stay at even places.
+    const auto bursts = [](bool single) {
+        const u32 on = single ? 4 : 0;
+        enum { JUMP = 10, EXPORT = 39, EXPORT_DONE = 40 };
+        const auto exp = [](std::vector<u32> &w, u32 kind, u32 place, u32 reg, u32 burst, bool end) {
+            w.push_back(place | PARAM << 13 | reg << 15 | 3u << 30);
+            w.push_back(0x688 | burst << 17 | (u32)end << 21 | kind << 23 | 1u << 31);
+        };
+        std::vector<u32> w;
+        cf(w, CALL_FS, 0);                 // 0
+        cf_alu(w, 8 + on, 10);             // 1: ten instructions, a count whose bits include the one that ends a program elsewhere
+        w[w.size() - 2] |= 0xC0000000;     //    and constants locked, in the bits above its address
+        cf(w, JUMP, 1);                    // 2: to before the exports
+        cf(w, JUMP, single ? 9 : 7);       // 3: to the second burst, which the first one's two more exports push on
+        cf(w, JUMP, single ? 11 : 8);      // 4: to the list's end
+        cf(w, TEX, 18 + on);               // 5
+        if (single) {
+            exp(w, EXPORT, 1, 2, 0, false);
+            exp(w, EXPORT, 2, 3, 0, false);
+            exp(w, EXPORT, 3, 4, 0, false);
+            exp(w, EXPORT, 5, 6, 0, false);
+            exp(w, EXPORT_DONE, 6, 7, 0, true);
+            w.push_back(0);                // the empty place
+            w.push_back(0);
+        } else {
+            exp(w, EXPORT, 1, 2, 2, false);      // 6
+            exp(w, EXPORT_DONE, 5, 6, 1, true);  // 7
+        }
+        for (u32 i = 0; i < 10; i++) op2(w, MOV, 2 + i, 0, true, {1, 0}, {0, 0}, true);  // 8 to 17
+        fetch(w, 0x80, 5, 6, false);                                                    // 18, 19
+        return w;
+    };
+    {
+        const std::vector<uint8_t> in = bytes_of(bursts(false)), want = bytes_of(bursts(true));
+        std::vector<uint8_t> out(want.size() + 64, 0xEE);
+        const u32 words = unburst(in.data(), (u32)in.size() / 4, nullptr);
+        if (words != want.size() / 4 || unburst(in.data(), (u32)in.size() / 4, out.data()) != words || memcmp(out.data(), want.data(), want.size()) || out[want.size()] != 0xEE) {
+            failures++;
+            printf("FAILED: bursts written out as single exports (%u words, wanted %u)\n", words, (u32)want.size() / 4);
+            for (u32 i = 0; i < want.size() / 4 && i < words; i++)
+                if (latte::word(out.data(), i) != latte::word(want.data(), i)) printf("   word %u is %08x, wanted %08x\n", i, latte::word(out.data(), i), latte::word(want.data(), i));
+        }
+        if (unburst(want.data(), (u32)want.size() / 4, nullptr) || unburst(bytes_of(from_new_compiler(true, 7)).data(), 2 * 16, nullptr)) {
+            failures++;
+            printf("FAILED: a program without bursts was taken to have some\n");
+        }
+    }
+
     printf(failures ? "compiled programs: %d failed\n" : "compiled programs: ok\n", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

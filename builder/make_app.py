@@ -33,6 +33,7 @@ WORK = os.path.join(HERE, 'build_app')  # PyInstaller's own work folder, gone af
 NAME = '3Dii U Builder'
 # what the build's scripts import that the window's code doesn't (they're run from the repository by path, so PyInstaller can't see them)
 SCRIPT_MODULES = ('urllib.request', 'ssl',  # covers.py, when the window is the frozen app
+                  'wave',  # tools/make_boot_sound.py, for the window's start-up sound
                   'argparse', 'bisect', 'builtins', 'concurrent.futures', 'filecmp', 'glob', 'hashlib', 'mmap', 'runpy', 'shlex', 'zlib',
                   'cryptography.hazmat.primitives.ciphers')  # the last for phase0/tools/pack_wup.py, which packs the WUP
 EXCLUDE = ('numpy', 'PIL', 'tkinter', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick', 'PySide6.QtPdf',

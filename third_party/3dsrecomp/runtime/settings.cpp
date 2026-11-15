@@ -60,6 +60,10 @@ void settings_load() {
     num("hud", s.hud);
     num("tex_filter", s.tex_filter);
     num("stack_items", s.stack_items);
+    num("language", s.language);
+    num("tv_layout", s.tv_layout);
+    num("pad_layout", s.pad_layout);
+    num("resolution", s.resolution);
     s.scale = std::clamp(s.scale, 0, 4);
     s.layout = std::max(s.layout, 0);  // (the frontend clamps it to its layouts)
     s.speed = std::clamp(s.speed, 25, 400);
@@ -68,6 +72,10 @@ void settings_load() {
     s.pip_corner = std::clamp(s.pip_corner, 0, 3);
     s.pip_size = std::clamp(s.pip_size, 15, 80);
     s.hud = std::clamp(s.hud, 0, 2);
+    s.language = std::clamp(s.language, -1, 11);
+    s.tv_layout = std::clamp(s.tv_layout, 0, 5);
+    s.pad_layout = std::clamp(s.pad_layout, 0, 2);
+    s.resolution = s.resolution == 480 ? 480 : 720;
     // the GPU backend reads these once at startup; an environment variable given at launch wins
     setenv("GPU_MSAA", std::to_string(s.msaa).c_str(), 0);
     setenv("GPU_ANISO", std::to_string(s.aniso).c_str(), 0);
@@ -85,8 +93,8 @@ void settings_save() {
       << "\nforgive_unsaved=" << s.forgive_unsaved
       << "\npip=" << s.pip << "\npip_corner=" << s.pip_corner << "\npip_x=" << s.pip_x << "\npip_y=" << s.pip_y
       << "\npip_size=" << s.pip_size << "\nauto_focus=" << s.auto_focus << "\nhud=" << s.hud
-      << "\ntex_filter=" << s.tex_filter << "\nstack_items=" << s.stack_items
-      << "\n";
+      << "\ntex_filter=" << s.tex_filter << "\nstack_items=" << s.stack_items << "\nlanguage=" << s.language
+      << "\ntv_layout=" << s.tv_layout << "\npad_layout=" << s.pad_layout << "\nresolution=" << s.resolution << "\n";
 }
 
 // ---- saves

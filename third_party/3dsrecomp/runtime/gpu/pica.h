@@ -134,6 +134,19 @@ std::string shader_msl_spec(const ShaderProgram *p, u32 entry, const char *name,
 std::string shader_glsl_spec(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open = 0);
 extern int shader_glsl_fail_line;  // why the last one came out empty: the line in shader.cpp that gave up, and the instruction
 extern u32 shader_glsl_fail_at;
+// A geometry shader's body for the GLSL vertex shader that draws what it emits, one corner of one triangle a vertex: its registers are named
+// with a "g" before them, its uniforms gf and gInt, and each EMIT keeps the registers of out_comps (the output components the output map
+// reads, register * 4 + component) for the corner wantJ of the triangle wantT (port/wiiu/shadergen.cpp, gen_gsx_glsl). in_regs: the input
+// registers a run is given. turns: the draw's topology turns a triangle round on the winding flag. *tris: the most triangles a run emits.
+// prim_lo to prim_hi: the float uniforms a fixed-primitive run's vertices fill (none where equal). A loop's read relative to aL that can't
+// reach them is written gs_ru, which reads the uniform block alone; gs_rel is the one that can.
+// "" where the result could depend on what an earlier run left (anything read before this run set it), or where it emits in a loop other
+// than a plain one whose turns carry over only what each sets from its own reads (SpecGen::emitting_loop). Such a loop's count is written
+// into the shader, and its first aL and step pick the gs_ru reads: shader_emit_loops names those loops, for the key.
+std::string shader_glsl_gs(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], u64 out_comps, u32 in_regs, bool turns, u32 *tris,
+                           u32 prim_lo = 0, u32 prim_hi = 0);
+// the int uniforms (bit mask) of the loops whose bodies EMIT, in the code entry reaches whatever the bools
+u32 shader_emit_loops(const ShaderProgram *p, u32 entry);
 // the bool uniforms (bit mask) and int uniforms (*loops, bit mask) the program's flow control reads
 u32 shader_static_uniforms(const ShaderProgram *p, u32 *loops);
 void shader_entry_info(const ShaderProgram *p, u32 entry, u64 *id, u32 *bmask, u32 *lmask);
@@ -536,6 +549,7 @@ void metal_display_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_di
 // (call after metal_guest_read); metal_note_gpu_output: a transfer or copy of GPU output wrote it.
 bool metal_gpu_made(u32 paddr, u32 size);
 void metal_note_gpu_output(u32 paddr, u32 size);
+constexpr u32 kGsxPrim = 0x80000000u;  // in Gx2Draw::gs_in (and the shader generator's records): the draw's geometry shader is a fixed-primitive one
 #ifdef __WIIU__
 // one draw for port/wiiu/gx2_backend.cpp, which runs the vertex program as a compiled GX2 shader reading guest memory directly
 struct Gx2Attr {
@@ -555,8 +569,17 @@ struct Gx2Draw {
     const DrawState *ds;
     const float *outline_color = nullptr, *outline_thick = nullptr;  // set when this is that outline shader's mesh
     bool outline_scale_w = false;
+    // A geometry shader that makes each vertex a few triangles (gen_gsx_glsl): the vertex shader and it run on the GPU, a corner a vertex.
+    // slot_src then maps its outputs, and points holds the vertices' inputs, count of them for each of the in_maxi + 1 attributes.
+    // gs_in: the input registers a run is given, or for one that takes each primitive's vertices in its float uniforms (fixed-primitive
+    // mode), kGsxPrim | vertices a run | first uniform << 8 | vertex shader outputs a vertex << 16.
+    const ShaderProgram *gs = nullptr;
+    u32 gs_entry = 0, vs_outmask = 0, gs_in = 0;
+    u64 gs_perm = 0;
+    const V4 *points = nullptr;
 };
 bool gx2_draw(const Gx2Draw &d);  // false: no compiled shader, shade it on the CPU
+bool gx2_gsx_ready(const Gx2Draw &d);  // a geometry shader's draw (d.points not needed yet): whether the build made its shader, the miss logged if not
 bool gxt();                       // a debug trace is on: a file named "gxtrace" in the data folder holds a frame number and a count of lines
 void *gx2_light_lut();            // the tables as they are now, as a texture
 void *gx2_fog_lut();

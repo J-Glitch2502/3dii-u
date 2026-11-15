@@ -40,6 +40,36 @@ try:
 finally:
     shutil.rmtree(base)
 
+
+def gsx(vprog, gprog, tail):  # a vertex shader and the geometry shader after it (tools/shadergen_main.cpp)
+    words = vprog[0] + vprog[1] + gprog[0] + gprog[1]
+    body = (struct.pack('<11I', 1, len(vprog[0]), len(vprog[1]), 2, len(gprog[0]), len(gprog[1]), 0xF, 4, 0x3210, 0, 1)
+            + struct.pack(f'<{len(words)}I', *words) + tail)
+    return b'GSX ' + struct.pack('<I', len(body)) + body
+
+
+# a geometry shader record ships as both programs' fingerprints, after the vertex records, and comes back whole; one with a program the
+# game's DVLB lacks is left out
+gprog = ([0x55, 0x66, 0x88000000, 0x77], [0xD])
+gtail = bytes(range(88))
+base = tempfile.mkdtemp()
+try:
+    dvlb = vs(1, *prog, bytes(56)) + vs(0, *gprog, bytes(56))
+    progs = {r[2:4] for r in shaderlogs.records(dvlb) if r[0] == 'vs'}
+    log = gsx(prog, gprog, gtail) + vs(1, *prog, tail) + gsx(prog, other, gtail)
+    shipped, vsf, vsr, left = shaderlogs.split(log, progs)
+    assert not shipped and not vsr and not left and len(vsf) == shaderlogs.VSF + shaderlogs.GSF, len(vsf)
+    assert vsf.startswith(b'VSF ') and vsf[shaderlogs.VSF:].startswith(b'GSF ') and b'\x55\x00\x00\x00' not in vsf, 'fingerprints, no code'
+    with open(os.path.join(base, 'dvlb.bin'), 'wb') as f:
+        f.write(dvlb)
+    with open(os.path.join(base, 'run.vsf'), 'wb') as f:
+        f.write(vsf)
+    assert shaderlogs.restore(base) == (2, 0)
+    with open(os.path.join(base, 'run_vsf.bin'), 'rb') as f:
+        assert f.read() == vs(1, *prog, tail) + gsx(prog, gprog, gtail), 'both records back as they were logged'
+finally:
+    shutil.rmtree(base)
+
 rnd = random.Random(9)
 
 

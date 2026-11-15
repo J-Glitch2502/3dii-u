@@ -27,6 +27,9 @@ def keys(path):
             _, nc, ns = struct.unpack_from('<III', d, p + 4)
             p += 16 + (nc + ns) * 4 + 56
             continue
+        elif d[p:p + 4] == b'GSX ':  # a vertex shader and a geometry shader: its size after the tag
+            p += 8 + struct.unpack_from('<I', d, p + 4)[0]
+            continue
         n = struct.unpack_from('<I', d, p)[0]
         yield struct.unpack_from(f'<{n // 4}I', d, p + 4)
         p += 4 + n

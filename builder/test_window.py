@@ -1,6 +1,7 @@
 """Self-check for the window (ui/Main.qml), unseen: it loads without a QML warning, every app.<name> it uses exists on App (a missing one is a
 dead button), each page, build view, list and dialog loads cleanly with its delegates made, every pill has a name for screen readers, the
-theme switches, and the updater's part walks its states with updater's network and disk calls faked. python builder/test_window.py"""
+theme switches, and the updater's part walks its states with updater's network and disk calls faked; and the simple window (ui/Simple.qml)
+loads as cleanly and shows the app's questions. python builder/test_window.py"""
 import json
 import os
 import re
@@ -15,13 +16,13 @@ if sys.platform == 'win32':
     os.environ['QT_QPA_FONTDIR'] = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')  # Qt ships no fonts for the offscreen platform
 sys.path.insert(0, HERE)
 
-from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QUrl, qInstallMessageHandler  # noqa: E402
+from PySide6.QtCore import Q_ARG, QCoreApplication, QMetaObject, QObject, QUrl, qInstallMessageHandler  # noqa: E402
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtQuick import QQuickWindow  # noqa: E402
 import shiboken6  # noqa: E402
 
 warnings = []
-qInstallMessageHandler(lambda kind, ctx, msg: warnings.append(msg) if 'qml' in msg.lower() or 'Main.qml' in msg else None)
+qInstallMessageHandler(lambda kind, ctx, msg: warnings.append(msg) if 'qml' in msg.lower() else None)
 import gui  # noqa: E402
 
 base = tempfile.mkdtemp()
@@ -31,7 +32,17 @@ gui.updater.home = lambda: os.path.join(base, 'app')  # nor the downloaded versi
 os.makedirs(os.path.join(base, 'keys'))
 json.dump({'keys': os.path.join(base, 'keys')}, open(settings, 'w'))  # an empty key folder: the user's keys are never looked at
 try:
+    # a saved layout whose window won't load: the modern window comes up instead, and the setting goes back to it
+    broken = os.path.join(base, 'Broken.qml')
+    open(broken, 'w').write('import QtQuick\nWindow { nothing here }\n')
+    json.dump({'keys': os.path.join(base, 'keys'), 'layout': 'simple'}, open(settings, 'w'))
+    real_window_qml = gui.window_qml
+    gui.window_qml = lambda layout: QUrl.fromLocalFile(broken) if layout == 'simple' else real_window_qml(layout)
     qt, engine, state = gui.create(['test'])
+    gui.window_qml = real_window_qml
+    assert engine.rootObjects() and engine.rootObjects()[0].objectName() != 'simple', 'a broken layout left the app without a window'
+    assert json.load(open(settings))['layout'] == 'modern'
+    warnings.clear()  # the broken file's own
     engine.warnings.connect(lambda ws: warnings.extend(w.toString() for w in ws))
     assert engine.rootObjects(), warnings
     win = shiboken6.wrapInstance(shiboken6.getCppPointer(engine.rootObjects()[0])[0], QQuickWindow)
@@ -78,6 +89,16 @@ try:
     settle('the card menu')
     assert not win.findChild(QObject, 'pages').property('enabled'), 'Tab reaches the pages behind the card menu'
     menu.setProperty('visible', False)
+    state.set(hasGame=True, hasArt=True, hasIconArt=True, hasBezel=True, hasPadArt=True, hasGameSound=True, artText='A picture.png', iconText='An icon.png',
+              bezelText='A bezel.png', padArtText='A GamePad picture.png', gameSoundText='Its own')  # every line of the art menu
+    menu = win.findChild(QObject, 'artMenu')
+    art_pill = next(p for p in items(QQuickWindow.contentItem(win)) if p.objectName() == 'pill' and p.property('accessibleName') == 'Art and icon')
+    QMetaObject.invokeMethod(menu, 'openAt', Q_ARG('QVariant', art_pill))  # as the pill does: under it, its first line focused
+    settle('the art menu')
+    assert menu.property('visible') and not win.findChild(QObject, 'pages').property('enabled'), 'Tab reaches the pages behind the art menu'
+    menu.setProperty('visible', False)
+    state.set(hasGame=False, hasArt=False, hasIconArt=False, hasBezel=False, hasPadArt=False, hasGameSound=False, artText=gui.NO_ART, iconText=gui.NO_ART,
+              bezelText=gui.NO_BEZEL, padArtText=gui.NO_PAD_ART, gameSoundText=gui.NO_GAME_SOUND)
     stages = ['Reading', 'Recompiling', 'Packing']
     for view in ('building', 'done', 'failed', 'form'):
         state.set(view=view, stages=stages, stage=1, failed=view == 'failed', building=view == 'building', resultText='x', log='a\nb')
@@ -295,6 +316,159 @@ try:
     for st in ('downloading', 'unpacking', 'ready', 'restarting', 'failed'):
         state.set(updateState=st, updateProgress=37)
         settle(f'the update card, {st}')
+    # a picked game's art, with covers.py's two places faked: SteamGridDB's banner and icon where there's a key, GameTDB's cover for what it
+    # lacks and where there's none, and a key it turns down said so
+    made = {n: os.path.join(base, 'covers', n) for n in ('sgdb_1_banner.png', 'sgdb_1_icon.png', 'AAAE.jpg')}
+    os.makedirs(os.path.join(base, 'covers'))
+    for path in made.values():
+        img.save(path)
+    banner, square, cover = made.values()
+    picked = type('Game', (), dict(title_id=1, product='CTR-P-AAAE'))()
+    gui.covers.cover = lambda product, folder: cover
+
+    def pick(found, key='a key'):
+        def site(name, key, folder, title_id, also=None):
+            if found is None:
+                raise gui.covers.BadKey
+            return found
+        gui.covers.steamgriddb = site
+        state.st['sgdb_key'] = key
+        state.game, state.art, state.icon_art = picked, None, None
+        state.fetch_cover(picked, 'A game')
+        return state.art, state.icon_art, state.artText
+
+    assert pick(dict(banner=banner, icon=square)) == (banner, square, gui.FROM_SGDB) and state.iconText == gui.FROM_SGDB
+    assert pick(dict(banner=banner, icon=None)) == (banner, cover, gui.FROM_SGDB) and state.iconText == gui.FROM_TDB
+    assert pick(dict(banner=None, icon=square)) == (cover, square, gui.FROM_TDB) and state.iconText == gui.FROM_SGDB
+    assert pick(dict(banner=None, icon=None)) == (cover, None, gui.FROM_TDB) and state.iconText == gui.NO_ICON_ART
+    assert pick(dict(banner=banner, icon=square), key='') == (cover, None, gui.FROM_TDB), 'SteamGridDB asked without a key'
+    assert pick(None) == (cover, None, gui.FROM_TDB) and 'SteamGridDB' in state.dialog['title']
+    state.answer(True)
+    assert pick(None) == (cover, None, gui.FROM_TDB) and not state.dialog, 'a key turned down is said once, not for every game'
+
+    # a new key fetches the open game's art again, unless the player chose its picture or removed it on purpose
+    asked_again = threading.Event()
+    fetch_cover = state.fetch_cover
+    state.fetch_cover = lambda *a: asked_again.set()
+    gui.QInputDialog.getText = lambda *a, **k: (' another key ', True)
+    state.set_art(None, removed=True)  # removed: '' is remembered for the game
+    state.setArtKey()
+    assert state.st['sgdb_key'] == 'another key' and state.artKeySet and not asked_again.wait(0.3), 'art removed on purpose came back'
+    state.set_art(art)  # the player's own picture
+    state.setArtKey()
+    assert not asked_again.wait(0.3) and state.art == art, "the player's own picture was dropped"
+    own_icon = os.path.join(base, 'icon.png')
+    img.save(own_icon)
+    state.set_art(cover, own_icon)  # GameTDB's cover with an icon the player picked: the cover is looked up again, the icon stays
+    state.setArtKey()
+    assert asked_again.wait(5), "GameTDB's cover wasn't looked up again with the new key"
+    assert state.icon_art == own_icon, 'a new key dropped the icon the player picked'
+    gui.QInputDialog.getText = lambda *a, **k: ('', True)
+    state.setArtKey()
+    assert state.st['sgdb_key'] == '' and not state.artKeySet
+    state.fetch_cover = fetch_cover
+
+    # An icon picture of its own. Each line says what its own picture is; choosing the art keeps an icon the player picked, not a fetched one;
+    # removing the icon keeps the art; an icon picked with no art leaves the game's art to be fetched, and fetched art keeps that icon.
+    title = f'{picked.title_id:016x}'
+    chosen = iter([art, cover, own_icon, art])
+    gui.QFileDialog.getOpenFileName = lambda *a, **k: (next(chosen), '')
+    state.set_art(None, remember=False)
+    state.chooseIcon()
+    assert state.icon_art == art and state.art is None and state.hasIconArt and (state.iconText, state.artText) == (os.path.basename(art), gui.NO_ART)
+    assert title not in state.st['art'], 'an icon picked with no art marked the art as removed on purpose'
+    state.chooseArt()
+    assert state.art == cover and state.icon_art == art and (state.artText, state.iconText) == (gui.FROM_TDB, os.path.basename(art))
+    state.removeIcon()
+    assert state.icon_art is None and state.art == cover and not state.hasIconArt and state.iconText == gui.NO_ICON_ART
+    state.set_art(banner, square)  # SteamGridDB's banner and icon: art the player chooses now replaces both
+    state.chooseIcon()  # own_icon
+    state.set_art(None, own_icon)  # and with no art, what's fetched for it comes in beside that icon
+    state.cover_ready(title, banner, square)
+    assert (state.art, state.icon_art) == (banner, own_icon), 'fetched art took the place of the icon the player picked'
+    state.set_art(banner, square)
+    state.chooseArt()  # art
+    assert (state.art, state.icon_art) == (art, None) and state.artText == os.path.basename(art), "a fetched icon stayed beside the player's art"
+
+    # the GamePad's bezel: chosen, kept for the game, removed
+    gui.QFileDialog.getOpenFileName = lambda *a, **k: (cover, '')
+    state.chooseBezel()
+    assert state.bezel == cover and state.hasBezel and state.bezelText == os.path.basename(cover) and json.load(open(settings))['pad_bezel'][title] == cover
+    state.removeBezel()
+    assert state.bezel is None and not state.hasBezel and state.bezelText == gui.NO_BEZEL and title not in json.load(open(settings))['pad_bezel']
+    # the GamePad's start-up picture and the game's start-up sound: chosen, kept for the game, removed (the sound's file with it)
+    state.choosePadArt()
+    assert state.pad_art == cover and state.hasPadArt and state.padArtText == os.path.basename(cover) and json.load(open(settings))['pad_art'][title] == cover
+    state.removePadArt()
+    assert state.pad_art is None and not state.hasPadArt and state.padArtText == gui.NO_PAD_ART and title not in json.load(open(settings))['pad_art']
+    import wave
+    sound = os.path.join(base, 'start.wav')
+    with wave.open(sound, 'wb') as w:  # half a second of 48 kHz stereo
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(48000)
+        w.writeframes(bytes(4 * 24000))
+    gui.GAME_SOUNDS = os.path.join(base, 'boot_sounds')
+    gui.QFileDialog.getOpenFileName = lambda *a, **k: (sound, '')
+    state.chooseGameSound()
+    kept = json.load(open(settings))['boot_sound'][title]
+    assert kept == os.path.join(gui.GAME_SOUNDS, title + '.btsnd'), ('the game\'s sound went somewhere else, the sound for every game, say', kept)
+    assert state.game_sound == kept and os.path.isfile(kept) and state.hasGameSound and state.gameSoundText == 'Its own', kept
+    state.removeGameSound()
+    assert state.game_sound is None and not state.hasGameSound and not os.path.exists(kept) and title not in json.load(open(settings))['boot_sound']
+    assert state.gameSoundText == gui.NO_GAME_SOUND
+    # a 3DS save to pack into the build: chosen (an emulator's folder, its save taken from data/00000001), kept for the game, removed
+    emu = os.path.join(base, 'emu_save')
+    os.makedirs(os.path.join(emu, 'data', '00000001'))
+    open(os.path.join(emu, 'data', '00000001', 'main'), 'wb').write(b'save')
+    gui.QFileDialog.getExistingDirectory = lambda *a, **k: emu
+    state.bringSave()
+    assert state.save_in == emu and state.hasSave and state.saveText == 'emu_save' and json.load(open(settings))['save_in'][title] == emu
+    state.removeSave()
+    assert state.save_in is None and not state.hasSave and state.saveText == gui.NO_SAVE and title not in json.load(open(settings))['save_in']
+    gui.QFileDialog.getExistingDirectory = lambda *a, **k: os.path.join(base, 'keys')  # empty: not a save, said so
+    state.bringSave()
+    assert state.save_in is None and not state.hasSave and state.dialog
+    state.answer(True)  # the message closed
+    state.game = None
+
+    # the simple window (ui/Simple.qml): asked for, kept in the settings, and it loads cleanly with every app.<name> it uses on App, a
+    # question shown in it and answered; it comes back to the modern one the same way
+    used = set(re.findall(r'\bapp\.(\w+)', open(os.path.join(HERE, 'ui', 'Simple.qml'), encoding='utf-8').read()))
+    missing = sorted(n for n in used if not hasattr(state, n))
+    assert not missing, f'Simple.qml uses app.{missing}, which App lacks'
+    asked = []
+    state.layoutWanted.connect(asked.append)
+    state.setLayout('simple')
+    assert asked == ['simple'] and json.load(open(settings))['layout'] == 'simple', asked
+    engine.load(gui.window_qml('simple'))
+    simple = engine.rootObjects()[-1]
+    assert simple.objectName() == 'simple' and not simple.property('visible'), 'the simple window did not load, or showed itself'
+    settle('the simple window')
+    state.tell('A message', 'In the simple window.')
+    settle('a message in the simple window')
+    assert simple.findChild(QObject, 'dialog').property('visible'), 'the simple window did not show the message'
+    state.answer(True)
+    settle('the message answered')
+    assert not simple.findChild(QObject, 'dialog').property('visible')
+    # two questions waiting: its Yes button answers the first, and the second then stays up (the dialog follows app.dialog alone)
+    dialog = simple.findChild(QObject, 'dialog')
+    state.tell('First', 'The first question.')
+    state.tell('Second', 'The second question.')
+    settle('two messages in the simple window')
+    assert dialog.property('title') == 'First'
+    QMetaObject.invokeMethod(simple.findChild(QObject, 'yes'), 'click')
+    settle('the first answered')
+    assert dialog.property('visible') and dialog.property('title') == 'Second', (dialog.property('visible'), dialog.property('title'))
+    QMetaObject.invokeMethod(simple.findChild(QObject, 'yes'), 'click')
+    settle('the second answered')
+    assert not dialog.property('visible') and not state.dialogs
+    for dark in (True, False):
+        state.set(dark=dark)
+        settle(f'the simple window, dark {dark}')
+    state.setLayout('bogus')
+    state.setLayout('modern')
+    assert asked == ['simple', 'modern'] and json.load(open(settings))['layout'] == 'modern', asked
     del engine  # before the App it shows, or its bindings read a gone app on the way out
     print('window ok')
 finally:

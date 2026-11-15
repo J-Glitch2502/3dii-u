@@ -380,7 +380,7 @@ class Analyzer:
 
     def gap_candidates(self):
         """Code addresses suggested by the parts of .text no function covers: pointers into .text stored there
-        (tables), and function prologues right after a function's last instruction."""
+        (tables), and whatever stands right after a function's last instruction."""
         img = self.img
         cov = set()
         lits = set()
@@ -412,8 +412,10 @@ class Analyzer:
                 continue
             if w is not None and img.in_text(w) and not w & 3:
                 out.add(w)
-            # push {..., lr} / stmdb sp!, {..., lr} after the end of a function
-            if prev_end and w is not None and (w & 0xFFFF4000) == 0xE92D4000:
+            # The word after the end of a function: another function may start there that nothing known points at, with a
+            # push {..., lr} or without one (a script engine's short natives, the slots a float library's exception routine
+            # returns to). discover() keeps it only if it decodes and runs to an end.
+            if prev_end and w is not None:
                 out.add(a)
             prev_end = False
 

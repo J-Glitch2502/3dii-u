@@ -2,6 +2,8 @@
 //   shadergen <pipelines.bin> <fs and vs log dir> <output dir> <glsl compiler>
 // Inputs: the fragment state list shipped with the recompiler, plus what runs of the game recorded (vs_log.bin, fs_log.bin) and
 // what the console logged as missing (shader_misses.bin, same records). Outputs shaders.gsh and shaders.idx.
+//   shadergen --lists <out.bin> <romfs.bin>...
+// finds the vertex programs a game's files set up from GPU command lists instead (shadergen_lists.cpp), as records for those logs.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -41,16 +43,51 @@ struct VsRecord {
     u8 b[16], iu[16];
     s8 slots[24];
 };
+// a vertex shader and the geometry shader after it (gen_gsx_glsl), as the console logs a draw it had no shader for (gx2_backend.cpp)
+struct GsxRecord {
+    VsRecord vs, gs;  // gs.slots: the geometry shader's output map
+    u32 vs_outmask, gs_in, turns;
+    u64 gs_perm;
+};
 std::vector<std::string> fs_keys;
 std::vector<VsRecord> vs_records;
+std::vector<GsxRecord> gsx_records;
 
-// a log holds "VS  " records, or (fragment logs) length-prefixed keys, or "FS  " records among shader misses
+// a log holds "VS  " records, or (fragment logs) length-prefixed keys, or "FS  " records among shader misses, or "GSX " records (their size
+// after the tag first)
 void read_log(const std::string &path) {
     const std::vector<u8> d = read_file(path);
     size_t p = 0;
     auto u32at = [&](size_t o) { u32 v; memcpy(&v, &d[o], 4); return v; };
     while (p + 8 <= d.size()) {
-        if (!memcmp(&d[p], "VS  ", 4)) {
+        if (!memcmp(&d[p], "GSX ", 4)) {
+            const size_t end = p + 8 + u32at(p + 4);
+            if (end > d.size()) break;
+            size_t q = p + 8;
+            GsxRecord r;
+            const u32 vnc = u32at(q + 4), vns = u32at(q + 8), gnc = u32at(q + 16), gns = u32at(q + 20);
+            if (44 + ((size_t)vnc + vns + gnc + gns) * 4 + 88 != end - q) break;
+            r.vs.entry = u32at(q);
+            r.gs.entry = u32at(q + 12);
+            r.vs_outmask = u32at(q + 24);
+            r.gs_in = u32at(q + 28);
+            r.gs_perm = u32at(q + 32) | (u64)u32at(q + 36) << 32;
+            r.turns = u32at(q + 40);
+            q += 44;
+            using Words = std::pair<std::vector<u32> *, u32>;
+            for (const Words &w : {Words{&r.vs.code, vnc}, Words{&r.vs.swz, vns}, Words{&r.gs.code, gnc}, Words{&r.gs.swz, gns}}) {
+                w.first->resize(w.second);
+                memcpy(w.first->data(), &d[q], w.second * 4);
+                q += w.second * 4;
+            }
+            memcpy(r.vs.b, &d[q], 16);
+            memcpy(r.vs.iu, &d[q + 16], 16);
+            memcpy(r.gs.b, &d[q + 32], 16);
+            memcpy(r.gs.iu, &d[q + 48], 16);
+            memcpy(r.gs.slots, &d[q + 64], 24);
+            gsx_records.push_back(std::move(r));
+            p = end;
+        } else if (!memcmp(&d[p], "VS  ", 4)) {
             VsRecord r;
             r.entry = u32at(p + 4);
             const u32 nc = u32at(p + 8), ns = u32at(p + 12);
@@ -84,9 +121,12 @@ std::string hex64(u64 v) {
 }
 }  // namespace
 
+int lists_main(int argc, char **argv);  // shadergen_lists.cpp
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--lists")) return lists_main(argc, argv);
     if (argc < 5) {
-        fprintf(stderr, "usage: shadergen <pipelines.bin> <log dir> <output dir> <compiler>\n");
+        fprintf(stderr, "usage: shadergen <pipelines.bin> <log dir> <output dir> <compiler>\n       shadergen --lists <out.bin> <romfs.bin>...\n");
         return 2;
     }
     const std::string pipelines = argv[1], logs = argv[2], out = argv[3], compiler = argv[4];
@@ -210,7 +250,46 @@ int main(int argc, char **argv) {
             else vs_index[vs_variant_key(p, r.entry, none, r.slots, open)] = {add_vs(src), inputs};
         }
     }
-    printf("%zu fragment and %zu vertex shaders to compile; %u variants could not be translated\n", ps_files.size(), vs_files.size(), failed);
+    // a vertex shader and the geometry shader after it, for the set of bools the run met: the index entry's inputs carry the triangles a run makes.
+    // gsx.txt names them, for tools/win/build3ds.py: one a GPU can't take is left out of the index, and its draws stay with the CPU.
+    u32 gsx = 0;
+    std::set<u32> gsx_shaders;
+    for (const GsxRecord &r : gsx_records) {
+        auto decode = [](const VsRecord &v) {
+            std::vector<u32> code = v.code, swz = v.swz;
+            const u32 nc = (u32)code.size();
+            code.resize(4096);
+            swz.resize(4096);
+            return shader_decode(code.data(), nc, swz.data());
+        };
+        ShaderProgram *vs = decode(r.vs), *gs = decode(r.gs);
+        bool vb[16], gb[16];
+        u32 vbm = 0, gbm = 0;
+        for (u32 i = 0; i < 16; i++) {
+            vb[i] = r.vs.b[i];
+            gb[i] = r.gs.b[i];
+            vbm |= (u32)vb[i] << i;
+            gbm |= (u32)gb[i] << i;
+        }
+        u32 inputs = 0, tris = 0;
+        const std::string src = gen_gsx_glsl(vs, r.vs.entry, vbm, (const u8 (*)[4])r.vs.iu, gs, r.gs.entry, gbm, (const u8 (*)[4])r.gs.iu, r.vs_outmask, r.gs_in,
+                                             r.gs_perm, r.gs.slots, r.turns, &inputs, &tris);
+        if (src.empty() || tris > 0xffff) {
+            failed++;
+            continue;
+        }
+        const u32 i = add_vs(src);
+        const u64 key = gsx_variant_key(vs, r.vs.entry, vb, gs, r.gs.entry, gb, (const u8 (*)[4])r.gs.iu, r.vs_outmask, r.gs_in, r.gs_perm, r.gs.slots,
+                                        r.turns);
+        vs_index[key] = {i, (inputs & 0xffff) | tris << 16};
+        gsx_shaders.insert(i);
+        gsx++;
+    }
+    std::string listed;
+    for (u32 i : gsx_shaders) listed += std::to_string(i) + "\n";
+    write_file(glsl + "/gsx.txt", listed);
+    printf("%zu fragment and %zu vertex shaders to compile (%u drawing geometry shaders); %u variants could not be translated\n", ps_files.size(), vs_files.size(),
+           gsx, failed);
 
     // compiler "-": only list the files, in order, for tools/win/build3ds.py. Windows can't take thousands of file names on one command line, so it compiles them in batches.
     const bool list_only = compiler == "-";

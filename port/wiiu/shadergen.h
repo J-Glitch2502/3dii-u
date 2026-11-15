@@ -10,6 +10,10 @@ std::string gen_uber_fs(bool lit);
 constexpr char kUberKey[] = "uber", kUberLitKey[] = "uber lit";  // their entries in the fragment index, hashed like any key
 // open: the bools the shader reads as it runs, where it is to serve every set of them (vs_open_bools)
 std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs, u32 open = 0);
+// a vertex shader and the geometry shader after it, a corner a vertex (shadergen.cpp says how); *tris: the triangles a run makes, from a game
+// vertex, or from a primitive's vertices in fixed-primitive mode (gs_in with kGsxPrim)
+std::string gen_gsx_glsl(const ShaderProgram *vs, u32 vs_entry, u32 vb, const u8 (*viu)[4], const ShaderProgram *gs, u32 gs_entry, u32 gb,
+                         const u8 (*giu)[4], u32 vs_outmask, u32 gs_in, u64 gs_perm, const s8 *slot_src, bool turns, u32 *inputs, u32 *tris);
 std::string gen_passthrough_vs();
 std::string gen_blit_vs();
 std::string gen_blit_fs();
@@ -43,6 +47,11 @@ u32 vs_open_bools(const ShaderProgram *p, u32 entry);
 // the key of a vertex shader: the program, its entry point, the uniforms its flow control reads, and its output map. With `open`, of
 // the shader that leaves those bools open: they aren't in the key then.
 u64 vs_variant_key(const ShaderProgram *p, u32 entry, const bool *b, const s8 *slot_src, u32 open = 0);
+// the key of gen_gsx_glsl's shader: both programs, their entries and the bools they read, how the one's outputs become the other's inputs,
+// the geometry shader's output map, and the count, first aL and step (gi) of each of its loops that emit. Its index entry's inputs hold
+// the triangles a run makes above the input registers' 16 bits.
+u64 gsx_variant_key(const ShaderProgram *vs, u32 vs_entry, const bool *vb, const ShaderProgram *gs, u32 gs_entry, const bool *gb, const u8 (*gi)[4],
+                    u32 vs_outmask, u32 gs_in, u64 gs_perm, const s8 *slot_src, bool turns);
 
 // the compiled shaders' index, shaders.idx: this header, then the fragment and vertex keys with their indices in shaders.gsh
 struct ShaderIndexHeader {

@@ -635,7 +635,8 @@ struct DirSession : Service {
 // What an archive was formatted with: its size in bytes, how many directories and files it's for, and whether it keeps duplicate data. A game
 // asks for these back (GetFormatInfo) and formats again when they aren't what it formats with: The Legend of Zelda: A Link Between Worlds
 // wiped its save at every start while the answer was the same four numbers for every game (2026-11-11). Kept in a file beside the archive's
-// folder, in this machine's byte order: it never leaves the save it describes.
+// folder, in the byte order of the machine that formatted it, and read in either: a save made by the PC build read as no save on the Wii U
+// (Pokemon Ultra Sun went to its language choice, 2026-11-13).
 struct FormatInfo {
     u32 bytes = 0x20000, dirs = 0x10, files = 0x10, duplicate = 0;  // what's answered for an archive formatted before this was kept
 };
@@ -651,6 +652,9 @@ static FormatInfo format_info(const std::string &dir) {
         if (fread(&kept, sizeof kept, 1, f) == 1) info = kept;
         fclose(f);
     }
+    // the other byte order's: a count of directories or files, or the flag, reads as millions. shortcut: with all three zero nothing tells
+    if ((info.dirs | info.files | info.duplicate) > 0xFFFF)
+        info = {__builtin_bswap32(info.bytes), __builtin_bswap32(info.dirs), __builtin_bswap32(info.files), __builtin_bswap32(info.duplicate)};
     return info;
 }
 
@@ -1028,12 +1032,23 @@ struct FsUser : Service {
             ipc.set(5, info.duplicate);
             break;
         }
-        case 0x0851: {  // CreateExtSaveData(info[0..5 words], ...)
-            // ExtSaveDataInfo: media type (u8), unknown, save id (u64)...
-            u32 lo = ipc[2], hi = ipc[3];
+        case 0x0851:    // CreateExtSaveData(info: media type, save id u64, unknown; directories, files, size limit u64, icon size, [icon])
+        case 0x0852: {  // DeleteExtSaveData(info)
             char b[64];
-            snprintf(b, sizeof b, "/extdata/%08x%08x", hi, lo);
-            fsys::create_directories(save_root() + b);
+            snprintf(b, sizeof b, "/extdata/%08x%08x", ipc[3], ipc[2]);
+            const std::string d = save_root() + b;
+            if (ipc.cmd() == 0x0852) {  // what a game does before it makes its extra data anew ("initialize")
+                std::error_code ec;
+                SAVE_SETTLE(d, true);
+                fsys::remove_all(d, ec);
+                fsys::remove(d + ".format", ec);
+            } else {
+                // The counts are asked back (GetFormatInfo), with no size, as for a save: answered with a save's defaults, Pokemon Ultra Sun
+                // called its extra data corrupted at every start after the first (2026-11-13).
+                fsys::create_directories(d);
+                keep_format_info(d, {0, ipc[5], ipc[6], 0});
+            }
+            save_changed(d);
             ipc.ok();
             break;
         }

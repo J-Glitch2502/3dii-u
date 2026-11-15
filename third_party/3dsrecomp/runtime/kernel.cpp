@@ -1029,10 +1029,10 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
         u32 type = c->r[1], param = c->r[2];
         u64 v = 0;
         if (type == 0) {  // memory usage by region
-            if (param == 1) v = 0x04000000;            // application
+            if (param == 1) v = g_game.app_memory;     // application
             else if (param == 2) v = 0x00A00000;       // system
             else if (param == 3) v = 0x00200000;       // base
-            else v = 0x04000000 + 0x00A00000 + 0x00200000;
+            else v = g_game.app_memory + 0x00A00000 + 0x00200000;
         } else if (type == 2) {
             v = 0;
         } else if (type == 26) {
@@ -1102,7 +1102,7 @@ static void svc_locked(CPU *c, u32 imm, Lock &lk) {
             bool limit = imm == 0x39;
             switch (name) {
             case 0: v = limit ? 0x18 : 0x18; break;                                   // priority
-            case 1: v = limit ? 0x04000000 : heap_size + linear_used + 0x00400000; break;  // commit
+            case 1: v = limit ? g_game.app_memory : heap_size + linear_used + 0x00400000; break;  // commit
             case 2: v = limit ? 32 : threads.size(); break;
             case 3: v = limit ? 32 : 8; break;
             case 4: v = limit ? 32 : 8; break;
@@ -1283,8 +1283,11 @@ void start(const BootInfo &bi) {
 #ifdef __WIIU__
     OSInitEvent(&tq_event, FALSE, OS_EVENT_MODE_AUTO);
     tq_event_ready = true;
-    // from a megabyte clear of the program (its data and bss come last) to the heap
-    mem::lend(((g_game.data_addr + g_game.data_size + g_game.bss_size + 0xFFFFF) & ~0xFFFFFu) + 0x100000, mem::HEAP_BASE);
+    // From a megabyte clear of the program (its data and bss come last) to the heap. A game with modules has ldr:ro put them where it says,
+    // anywhere in the code's region, which ends at 0x04000000: only what is past that is lent then. Pokemon Ultra Sun's field modules
+    // landed on the host's threads, and the game froze as it loaded its first route (2026-11-13).
+    const u32 clear = ((g_game.data_addr + g_game.data_size + g_game.bss_size + 0xFFFFF) & ~0xFFFFFu) + 0x100000;
+    mem::lend(ro_has_modules() ? std::max(clear, 0x04000000u) : clear, mem::HEAP_BASE);
 #endif
     tq.th = std::thread(timeout_thread);
     tq.th.detach();

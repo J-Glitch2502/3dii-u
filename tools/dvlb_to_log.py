@@ -3,7 +3,9 @@
 
 Walks code.bin and the whole romfs, inside LZ10, LZ11 and Yaz0 streams and whatever they hold, for shader binaries (DVLB), and writes them as shader log records, which the shader
 generator reads like any other log: one for each vertex program and each one that can draw an outline. Which output each register feeds comes from the program's own table, as a game
-sets it up. dvlb_to_log.py <game dir> [--check]. Output: <game dir>/shader_logs/dvlb.bin. --check only compares with what runs have logged, and writes nothing.
+sets it up. With --lists and the shader generator's path, the programs a game loads with GPU command lists kept in its files go in too (Game Freak's model files: the generator
+finds them, tools/shadergen_lists.cpp). dvlb_to_log.py <game dir> [--check] [--lists <shadergen>]. Output: <game dir>/shader_logs/dvlb.bin. --check only compares with what runs
+have logged, and writes nothing.
 """
 import bisect
 import glob
@@ -11,7 +13,9 @@ import mmap
 import os
 import re
 import struct
+import subprocess
 import sys
+import tempfile
 
 OUTLINE_SLOT = 0x80
 SEMANTICS = {0: (0, 1, 2, 3), 1: (4, 5, 6, 7), 2: (8, 9, 10, 11), 3: (12, 13), 4: (16,), 5: (14, 15), 6: (22, 23), 8: (18, 19, 20)}
@@ -222,27 +226,46 @@ def record(entry, code, swz, b, slots):
     return out
 
 
+def vertex_records(d):
+    """(entry, code, swizzles, output map) of each vertex record among a log's records"""
+    p = 0
+    while p + 8 <= len(d):
+        if d[p:p + 4] == b'VS  ':
+            entry, nc, ns = struct.unpack_from('<III', d, p + 4)
+            p += 16
+            code = struct.unpack_from(f'<{nc}I', d, p)
+            swz = struct.unpack_from(f'<{ns}I', d, p + nc * 4)
+            p += (nc + ns) * 4
+            yield entry, code, swz, [x - 256 if x >= 128 else x for x in d[p + 32:p + 56]]
+            p += 56
+        elif d[p:p + 4] == b'GSX ':  # a vertex shader and a geometry shader (shadergen_main.cpp): its size after the tag
+            p += 8 + struct.unpack_from('<I', d, p + 4)[0]
+        else:
+            q = p + 4 if d[p:p + 4] == b'FS  ' else p
+            if q + 4 > len(d):
+                break
+            p = q + 4 + struct.unpack_from('<I', d, q)[0]
+
+
 def logged(game):
     for path in glob.glob(f'{game}/shader_logs/*.bin'):
         name = os.path.basename(path)
         if name == 'dvlb.bin' or name.startswith('other_') or name.endswith('_fs.bin'):
             continue
-        d = open(path, 'rb').read()
-        p = 0
-        while p + 8 <= len(d):
-            if d[p:p + 4] == b'VS  ':
-                entry, nc, ns = struct.unpack_from('<III', d, p + 4)
-                p += 16
-                code = struct.unpack_from(f'<{nc}I', d, p)
-                swz = struct.unpack_from(f'<{ns}I', d, p + nc * 4)
-                p += (nc + ns) * 4
-                yield entry, code, swz, d[p + 32:p + 56]
-                p += 56
-            else:
-                q = p + 4 if d[p:p + 4] == b'FS  ' else p
-                if q + 4 > len(d):
-                    break
-                p = q + 4 + struct.unpack_from('<I', d, q)[0]
+        yield from vertex_records(open(path, 'rb').read())
+
+
+def listed(game, shadergen):
+    """The records of the vertex programs the game's files, and its update's, load with GPU command lists, as the shader generator finds them: b'' if it can't.
+    (A file the update replaces is looked through all the same: a program no draw uses costs a build a little time.)"""
+    images = [p for p in (f'{game}/romfs.bin', f'{game}/update_romfs.bin') if os.path.exists(p)]
+    with tempfile.TemporaryDirectory() as tmp:
+        r = subprocess.run([os.path.abspath(shadergen), '--lists', tmp + '/lists.bin', *images], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+        if r.returncode:
+            print(f'command lists not looked through: {r.stdout[-200:].strip()}')
+            return b''
+        with open(tmp + '/lists.bin', 'rb') as f:
+            return f.read()
 
 
 def start_of(entry, code):
@@ -258,6 +281,7 @@ def start_of(entry, code):
 def main():
     game = sys.argv[1]
     check = '--check' in sys.argv
+    lists = listed(game, sys.argv[sys.argv.index('--lists') + 1]) if '--lists' in sys.argv[:-1] else b''
     out = b''
     table = {}
     done = set()
@@ -282,10 +306,14 @@ def main():
             out += record(entry, vs, swz, bytes(16), slots)
             if any(sem == 9 for sem, _, _ in outs):  # an output for the geometry shader alone: this one can draw an outline
                 out += record(entry, vs, swz, bytes(16), [OUTLINE_SLOT] * 24)
+    loaded = 0
+    for entry, code, _swz, slots in vertex_records(lists):
+        loaded += 1
+        table.setdefault(start_of(entry, code), slots)
+    out += lists
     agree = differ = unknown = 0
     missing = set()
-    for entry, code, _swz, slots in logged(game):
-        got = [x - 256 if x >= 128 else x for x in slots]
+    for entry, code, _swz, got in logged(game):
         if got[0] == -128:
             continue
         want = table.get(start_of(entry, code))
@@ -296,7 +324,7 @@ def main():
             agree += 1
         else:
             differ += 1
-    print(f'{os.path.basename(game.rstrip("/"))}: {binaries} shader binaries, {kept} vertex programs; logged records: {agree} agree, {differ} other output map, {unknown} not found ({len(missing)} programs)')
+    print(f'{os.path.basename(game.rstrip("/"))}: {binaries} shader binaries, {kept} vertex programs, {loaded} from command lists; logged records: {agree} agree, {differ} other output map, {unknown} not found ({len(missing)} programs)')
     if not check:
         with open(f'{game}/shader_logs/dvlb.bin', 'wb') as f:
             f.write(out)

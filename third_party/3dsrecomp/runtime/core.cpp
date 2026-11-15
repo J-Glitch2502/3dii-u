@@ -222,8 +222,8 @@ u32 hle_alloc(u32 size, u32 align) {
 // The block is 512 MB of real memory whatever the game maps of it, and what the title's heap had left held every texture, every guest thread's
 // stack and the shader compiler. With that full, a 4 MB texture or one more thread ended the game: "out of memory for a 4194304 byte texture"
 // in Bowser's Inside Story and "no memory for a guest thread" in Omega Ruby (two testers' consoles, 2026-11-11 and 12). Between the end of its
-// program and 0x08000000, where its heap starts, a game can map nothing on a 3DS, and kernel.cpp lets it map nothing here: that stretch, about
-// 100 MB of the block, is a heap for the host's largest needs.
+// program and 0x08000000, where its heap starts, a game can map nothing on a 3DS but its modules (kernel.cpp leaves their region out for a
+// game that has any), and kernel.cpp lets it map nothing here: that stretch, about 100 MB of the block, is a heap for the host's largest needs.
 static MEMHeapHandle lent_heap;
 static u32 lent_from, lent_to;
 

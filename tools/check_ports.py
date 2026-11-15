@@ -6,6 +6,9 @@ sources.json is this PC's own (git-ignored):
     {"otp": "<otp.bin>", "games": {"<name>": {"game": "<dump>", "update": "<dump>", "dlc": "<dump>", "route": "<a port's name>"}}}
 For each game: code, shaders and title; a port's RPX against what the console's loader wants; then its route from test_routes.py (GENERIC if it
 has none) on a blank save, and a restart on what that saved, which ends by quitting the game as a player does: it has to close.
+What no route reaches from a blank save in a check's time (a battle half an hour into a game) is checked from a save kept from playing there,
+as a name of its own in sources.json: {"of": "<the game's name there>", "save": "<the save's folder>", "route": "<its route>"} runs that
+game's build once, started from the save (the tree under the player's save folder: <3DS title id>/savedata/...).
 The games are built as the builder makes them, without what only measures a game: then a log has no frame rates or costs, and the pictures,
 the crashes, the sound's gaps and the rest decide. --measure builds and checks the measuring kind, which has them, and the scenes.
 Each leg's screenshots, of the TV and of the GamePad, are kept in games/<folder>/check_shots/<game>/<leg> and held to the good runs in
@@ -27,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -91,6 +95,7 @@ class Target:
     route: str = ''       # whose route in test_routes.py it plays, if not one under its own name
     like: str = ''        # a cold build: the usual build of the game, whose good pictures it's held to
     env: dict = field(default_factory=dict)  # a scene's switches (SCENES)
+    save: str = ''        # the save a run starts from, in place of a blank one (sources.json's "save")
 
     @property
     def common(self):
@@ -143,6 +148,18 @@ def built_from_dump(name, since=0):
     return None
 
 
+def mark_built(name, started, said):
+    """Says which check a build's work folder is for (check_name.txt): the pipeline names the folder after the game's code. Only the folder
+    of the game the pipeline said it built (its first line has the title ID): another game's build may be going beside this one, and each
+    marked the other's folder as its own (Ultra Sun and Ultra Moon, 2026-11-13)."""
+    built = re.search(r'\(([0-9A-F]{16})\)', said)
+    for out in glob.glob(ROOT + '/builder_work/*/out*'):
+        info = os.path.dirname(out) + '/info.json'
+        if built and os.path.getmtime(out) >= started and os.path.exists(info) and json.load(open(info))['program_id'][8:] == built.group(1)[8:]:
+            with open(os.path.dirname(out) + '/check_name.txt', 'w') as f:
+                f.write(name)
+
+
 def build_from_dump(name, src, otp):
     started = time.time()
     argv = [sys.executable, '-u', 'builder/pipeline.py', '--game', src['game'], '--otp', otp, '--out', ROOT + '/dist/builder', '--keep'] + ['--cold'] * COLD
@@ -154,10 +171,7 @@ def build_from_dump(name, src, otp):
     err = re.findall(r'@error (.*)', r.stdout)
     if r.returncode or err:
         return 'build failed: ' + (err[-1] if err else r.stdout[-400:])
-    for out in glob.glob(ROOT + '/builder_work/*/out*'):  # the pipeline names the folder after the game's code; this says which check it's for
-        if os.path.getmtime(out) >= started:
-            with open(os.path.dirname(out) + '/check_name.txt', 'w') as f:
-                f.write(name)
+    mark_built(name, started, r.stdout)
     return built_from_dump(name, started) or 'build failed: no work folder made'
 
 
@@ -169,6 +183,38 @@ def cemu(t, seconds, interp):
     if interp:
         ps.append('-Interpreter')
     return run(*ps).stdout
+
+
+def gsx_misses(path):
+    """the "GSX " records of a run's miss list: geometry shaders' draws the pack had no shader for, which the CPU drew (gx2_backend.cpp)"""
+    d, p, n = open(path, 'rb').read(), 0, 0
+    while p + 8 <= len(d):
+        tag = d[p:p + 4]
+        if tag in (b'GSX ', b'FS  '):
+            n += tag == b'GSX '
+            p += 8 + struct.unpack_from('<I', d, p + 4)[0]
+        elif tag == b'VS  ':
+            _, nc, ns = struct.unpack_from('<III', d, p + 4)
+            p += 16 + (nc + ns) * 4 + 56
+        else:
+            break
+    return n
+
+
+def learn_missed(t):
+    """Code the translation lacked, as the runtime notes it when a game gets there (missing_functions.txt in the save folder, core.cpp):
+    added to the list pipeline.py builds a game from its dump with. Not a first-build run's. How many entries were new."""
+    missed = t.player + '/save/missing_functions.txt'
+    if not os.path.exists(missed) or t.like or '/builder_work/' not in t.out:
+        return 0
+    learned = f'{ROOT}/games/{os.path.basename(os.path.dirname(t.out))}/functions.txt'
+    have = set(open(learned).read().split()) if os.path.exists(learned) else set()
+    new = {x for x in open(missed).read().split() if not re.match(r'0x00000[0-9a-f]*$', x)} - have
+    if new:
+        os.makedirs(os.path.dirname(learned), exist_ok=True)
+        with open(learned, 'w', newline='\n') as f:
+            f.write('\n'.join(sorted(have | new)) + '\n')
+    return len(new)
 
 
 UNLIKE = 45  # mean difference per colour channel, of 255, between two pictures shrunk to 64x36: a frame of the same scene a moment apart
@@ -269,6 +315,8 @@ def judge(t, seconds, flags, measured=False):
     d = t.common
     shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(t.player, ignore_errors=True)
+    if t.save:
+        shutil.copytree(t.save, t.player + '/save')
     # a run stopped while Cemu wrote its shader cache leaves a file that crashes the next start
     for f in glob.glob(f'{CEMU}/portable/shaderCache/transferable/00050000{t.low}_*'):
         os.remove(f)
@@ -286,8 +334,8 @@ def judge(t, seconds, flags, measured=False):
             f.write(''.join(f'{k}={v}\n' for k, v in t.env.items()))
     log = d + '/log.txt'
     interp = t.interp
-    # a scene is its level alone: a restart would stop before the route is back in it
-    for name, secs in (('blank save', seconds), ('restart', max(40, seconds // 4)))[:1 if t.env else 2]:
+    # a scene is its level alone, and a kept save its place in the game: a restart would stop before the route is back there
+    for name, secs in (('kept save' if t.save else 'blank save', seconds), ('restart', max(40, seconds // 4)))[:1 if t.env or t.save else 2]:
         read_log = lambda: open(log, 'rb').read().decode('utf-8', 'replace') if os.path.exists(log) else ''
         # The restart ends as a player ends a game, quit from its menu (a route's KEY quit), not killed: closing is where consoles have hung
         closing = name == 'restart'
@@ -382,10 +430,16 @@ def judge(t, seconds, flags, measured=False):
             notes.append(note)
         misses = d + '/shader_misses.bin'
         if os.path.exists(misses) and os.path.getsize(misses):
+            gsx = gsx_misses(misses)
+            if gsx:
+                notes.append(f"{name}: {gsx} geometry shaders' draws the pack lacked a shader for, drawn by the CPU")
             if not t.like:  # what a cold build missed stays out of the lists the usual builds are made from
                 os.makedirs(t.data + '/shader_logs', exist_ok=True)
                 run(sys.executable, 'tools/misses_to_log.py', misses, f'{t.data}/shader_logs/cemu_{time.strftime("%m%d_%H%M%S")}.bin')
             os.remove(misses)
+    found = learn_missed(t)
+    if found:
+        notes.append(f'{found} code entries noted for the next build')
     if os.path.isdir(d + '/save'):
         faults.append("the game saved in common storage, not the player's")
     elif not save_files(t):
@@ -431,13 +485,24 @@ def main():
                 ports_built.add(of)
                 t.name, t.route, t.env = game, of if env else '', env
         elif game in src['games']:
-            name = game + '_cold' * COLD
-            t = (built_from_dump(name) or 'not built yet') if built else build_from_dump(name, src['games'][game], src['otp'])
+            entry = src['games'][game]
+            of = entry.get('of', game)  # a kept save's game is that game's build, as this run has built it already
+            name = of + '_cold' * COLD
+            save = os.path.join(ROOT, entry['save']) if 'save' in entry else ''
+            if 'game' not in src['games'].get(of, {}):
+                t = f'its "of" names {of}, which is not a game with a dump in {SOURCES}'
+            elif save and not os.path.isdir(save):
+                t = f'the save it starts from is not there: {save}'
+            else:
+                t = (built_from_dump(name) or 'not built yet') if built or of in ports_built else build_from_dump(name, src['games'][of], src['otp'])
+            if not isinstance(t, str):
+                ports_built.add(of)
+                t.name, t.save = game + '_cold' * COLD, save
             if COLD and not isinstance(t, str):
                 t.like = game
                 # A game the builder knows by name is built cold under its product code, which would give it a folder of its own in games/:
                 # its logs and pictures go into the usual build's folder, where the good pictures it's held to are.
-                usual = built_from_dump(game)
+                usual = built_from_dump(of)
                 if usual:
                     t.data = usual.data
         else:

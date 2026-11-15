@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "../kernel.h"
+#include "languages.h"
 
 namespace kernel {
 // The host console's own Miis (the Wii U's accounts: frontend_wiiu.cpp), as 0x60-byte store data, filled before the services start.
@@ -23,6 +24,7 @@ void register_hid();
 void register_dsp();
 void register_misc();
 void register_ro();
+bool ro_has_modules();  // whether the game came with CRO modules, which ldr:ro maps where the game says
 
 std::shared_ptr<SharedMem> load_shared_font();
 // a file of a system archive (system_archives/<title id>.romfs), empty if missing
@@ -31,6 +33,11 @@ std::vector<u8> system_archive_file(u64 tid, const std::string &path);
 std::vector<u8> romfs_file(const std::string &path);
 void apt_notify(u32 signal);
 
+// cfg (languages.h has the rule)
+extern int g_system_language;  // the console's own language: the frontend sets it before the game starts (-1: none)
+u32 cfg_languages();           // the languages the game's region has, a bit each
+int cfg_language();            // the one the game is told, the same all run
+
 // gsp
 struct FramebufferInfo {
     u32 addr_left, addr_right, stride, format;
@@ -38,6 +45,7 @@ struct FramebufferInfo {
 };
 FramebufferInfo gsp_framebuffer(int screen);  // what the LCD shows (any thread)
 void gsp_vblank();                             // (host thread, lock not held) VBlank interrupts
+u32 gsp_swaps(int screen);                     // (any thread) the VBlanks at which that screen changed buffer, so far
 void gsp_process_gx();                         // (GPU/host thread) run queued GX commands
 extern volatile bool gx_hold;                  // while set, gsp_process_gx leaves the rest of the queue for later
 void gsp_cpu_wrote(u32 vaddr, u32 size);       // a service wrote guest memory the GPU may read

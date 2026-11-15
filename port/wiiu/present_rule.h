@@ -9,6 +9,15 @@
 // the last VBlank left, and reaches the TV a refresh sooner. Not every late frame is saved: one whose VBlank's turn already went to the
 // late bottom screen of the frame before it still waits, and can be replaced. With frames ending up to 3 ms either side of the VBlank
 // the old rule showed 79 in 100 and this one 95 (the test).
+//
+// A game that swaps its screens (services/gsp.cpp: the framebuffer it shows next, at a VBlank, as a 3DS's screens take it) is shown on its
+// swaps. A 3DS shows a frame from the VBlank the game swapped at, however early its picture was ready, so a game making a frame every other
+// VBlank is shown two refreshes a frame; shown as soon as its picture was drawn, a frame that came a little early or late against the
+// moment of a VBlank stood one refresh and the one before it three. So a present waits for the game's swap, and goes out once the screens
+// the game swapped are drawn: at the swap's VBlank, or the moment they are drawn after it, without waiting for the GPU thread to be idle,
+// as the game has swapped. Only the screens it swapped (Mario Kart 7 swaps its bottom screen less often than its top), and of those only
+// the ones its frames bring (frame): a screen this backend never draws can't hold the others up. A game that hasn't swapped for a while is
+// shown as before.
 #pragma once
 
 struct PresentRule {
@@ -16,18 +25,37 @@ struct PresentRule {
     unsigned fresh = 0;  // the screens drawn since the last present: bit 0 the top, bit 1 the bottom
     unsigned frame = 3;  // the screens a whole frame of this game brings: those drawn before any of the last few presents
     unsigned char absent[2] = {0, 0};  // presents in a row that came without that screen
+    unsigned swap_due = 0;             // the screens the game swapped whose frame isn't out yet
+    unsigned char since_swap = 255;    // VBlanks since the game last swapped
+    static constexpr unsigned char kSwapping = 8;  // a game that swapped within so many VBlanks is shown on its swaps (one at 7.5 frames a second)
 
     void drew(int screen) { fresh |= 1u << screen; }
-    // the first look after a VBlank: true if a present is to be made now (anything_new: a game screen, the menu or the keyboard was drawn)
-    bool vblank(bool anything_new) {
+    // the first look after a VBlank: true if a present is to be made now. anything_new: a game screen, the menu or the keyboard was drawn;
+    // swapped: the screens the game swapped at this VBlank; ours: the menu or the keyboard is up, which goes out at every VBlank
+    bool vblank(bool anything_new, unsigned swapped = 0, bool ours = false) {
         due = true;
-        return anything_new && take();
+        const bool waited = swap_due;  // a swap of an earlier VBlank still waiting for its screens
+        if (swapped) {
+            swap_due |= swapped;
+            since_swap = 0;
+        } else if (since_swap < 255) {
+            since_swap++;
+        }
+        if (ours || !on_swaps()) return anything_new && take();
+        // once every swapped screen is drawn; a swap already a VBlank old goes out with what there is
+        return swap_due && fresh && (swapped_drawn() || waited) && take();
     }
-    // any other look: true if a whole frame is there, a VBlank's turn is open, and the GPU thread was idle for its whole wait
-    bool between(bool quiet) { return quiet && due && fresh && (fresh & frame) == frame && take(); }
+    // any other look: true if a frame is there and its turn is open: the screens the game swapped, or a whole frame at a VBlank's turn with
+    // the GPU thread idle for its whole wait
+    bool between(bool quiet) {
+        if (on_swaps()) return swap_due && fresh && swapped_drawn() && take();
+        return quiet && due && fresh && (fresh & frame) == frame && take();
+    }
+    bool swapped_drawn() const { return (fresh & swap_due & frame) == (swap_due & frame); }
+    bool on_swaps() const { return since_swap < kSwapping; }
     void reset() {
         due = false;
-        fresh = 0;
+        swap_due = fresh = 0;
     }
 
   private:
@@ -43,7 +71,7 @@ struct PresentRule {
             }
         }
         due = false;
-        fresh = 0;
+        swap_due = fresh = 0;
         return true;
     }
 };

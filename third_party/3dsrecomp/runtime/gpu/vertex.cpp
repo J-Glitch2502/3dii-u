@@ -987,6 +987,50 @@ void vtx_draw(bool indexed) {
             d.outline_scale_w = g.gs.b[1];
             if (gx2_draw(d)) return;
         }
+        // A geometry shader that makes each vertex a few triangles (Mario Kart 7's particles): the vertex shader and it run on the GPU, a
+        // corner a vertex (gen_gsx_glsl), the CPU only reading the vertices' inputs. So does one that takes a primitive's vertices in its
+        // float uniforms (fixed-primitive mode: Luigi's Mansion 2's rain), for draws of whole primitives. One whose runs read bool 15 (set
+        // after the first) stays here, as does a draw whose pair no build made yet (in the miss list for the next one).
+        const bool point = gsp.mode == 0 && gsp.end <= gsp.vs_out_num && gsp.end <= (u32)__builtin_popcount(outmask);
+        const u32 run_vertices = gsp.mode >= 2 ? (gsp.end - gsp.begin) / gsp.vs_out_num : 0;
+        const bool fixed = run_vertices >= 1 && run_vertices <= 4 && gsp.end <= 96 && n % run_vertices == 0 && gsp.vs_out_num <= (u32)__builtin_popcount(outmask);
+        if ((point || fixed) && g.pa.index == 0 && (g.pa.topology == 0 || g.pa.topology == 3)) {
+            const ShaderProgram *gp = shader_get_program(g.gs);
+            const u32 gentry = regs[R::GS + R::SH_ENTRY] & 0xffff;
+            u64 id;
+            u32 bools, loops;
+            shader_entry_info(gp, gentry, &id, &bools, &loops);
+            Gx2Draw d;
+            fill_gx2_draw(d);
+            // the geometry shader's outputs are numbered among those its mask enables
+            u32 out_reg[16], nout = 0;
+            for (u32 r = 0; r < 16; r++)
+                if ((g.gs_emitter.output_mask >> r) & 1) out_reg[nout++] = r;
+            for (u32 i = 0; i < 24; i++) {
+                const s32 s = gsp.map.slot_src[i];
+                d.slot_src[i] = s >= 0 && (u32)(s >> 2) < nout ? (s8)(out_reg[s >> 2] * 4 + (s & 3)) : -1;
+            }
+            d.gs = gp;
+            d.gs_entry = gentry;
+            d.vs_outmask = outmask;
+            d.gs_in = point ? gsp.end : kGsxPrim | run_vertices | gsp.begin << 8 | gsp.vs_out_num << 16;
+            d.gs_perm = (u64)regs[R::GS + R::SH_PERM_LO] | ((u64)regs[R::GS + R::SH_PERM_HI] << 32);
+            if (!((bools >> 15) & 1) && gx2_gsx_ready(d)) {
+                static std::vector<V4> points;
+                const u32 maxi = regs[R::VS + R::SH_INPUT_CFG] & 0xf;
+                points.resize((size_t)(maxi + 1) * n);
+                V4 in[16];
+                for (u32 i = 0; i < n; i++) {
+                    load_vertex(L, idx_list[i], in);
+                    for (u32 a = 0; a <= maxi; a++) points[(size_t)a * n + i] = in[a];
+                }
+                d.points = points.data();
+                if (gx2_draw(d)) {
+                    g.gs.b[15] = true;  // as its runs here would have left it
+                    return;
+                }
+            }
+        }
 #endif
         // geometry shader path: sequential (GS state persists between invocations)
 #ifdef __WIIU__

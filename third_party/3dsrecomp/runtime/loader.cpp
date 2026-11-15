@@ -27,9 +27,9 @@ static void init_config_mem() {
     w8(c + 0x14, 1);       // unit info: retail
     w8(c + 0x16, 1);       // prev firm
     w32(c + 0x18, 0x0000F297);
-    w32(c + 0x30, 0);      // app memory type: 64 MB
-    w32(c + 0x40, 0x04000000);  // app memory
-    w32(c + 0x44, 0x02C00000);  // system memory
+    w32(c + 0x30, g_game.system_mode);  // app memory type
+    w32(c + 0x40, g_game.app_memory);
+    w32(c + 0x44, 0x06C00000 - g_game.app_memory);  // system memory: the rest of the 108 MB the two share
     w32(c + 0x48, 0x01400000);  // base memory
     w8(c + 0x61, 0);
     w8(c + 0x62, 0x34);
@@ -150,6 +150,12 @@ void load_game(const std::string &dir) {
     memcpy(&g_game.program_id, &ex[0x200], 8);
     g_game.program_id = le64(g_game.program_id);
     g_game.priority = ex[0x20F];
+    // The memory mode the header asks for: 64 MB, or one of the larger ones an old 3DS restarts into. A game that needs one checks what
+    // it was given before anything else and stops if it is less.
+    static const u32 k_app_memory[6] = {0x04000000, 0x04000000, 0x06000000, 0x05000000, 0x04800000, 0x02000000};
+    const u32 mode = ex[0x20E] >> 4;
+    g_game.system_mode = mode >= 2 && mode <= 5 ? mode : 0;
+    g_game.app_memory = k_app_memory[g_game.system_mode];
     u32 base = g_game.text_addr;
     // code.bin is the three segments at their page-aligned offsets
     auto copy = [&](u32 addr, u32 size) {

@@ -1,6 +1,7 @@
 // Small services: ptm, ndm, ac, frd, boss, cecd, news, ir, mic, cam, y2r, ldr:ro, soc, ssl, http, ...
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include "../loader.h"
@@ -574,6 +575,28 @@ struct Generic : Service {
     void handle(IPC &ipc) override { unimplemented(ipc); }
 };
 
+// ssl:C has no network behind it, but games take their random numbers from it: Pokemon Ultra Sun seeds its own generator with them at
+// every start and save. Unanswered, the buffer stayed as the game left it, and every start rolled the same.
+struct Ssl : Service {
+    using Service::Service;
+    void handle(IPC &ipc) override {
+        if (ipc.cmd() != 0x0011) return unimplemented(ipc);
+        // GenerateRandomData(size, [buffer]): the clock and the tick it's first asked at, stirred (splitmix64)
+        static u64 state = (u64)time(nullptr) << 32 ^ system_tick();
+        u64 z = 0;
+        for (u32 i = 0; i < std::min(ipc[1], ipc[2] >> 4); i++) {  // (no further than the buffer it names)
+            if (i % 8 == 0) {
+                z = (state += 0x9E3779B97F4A7C15ull);
+                z = (z ^ z >> 30) * 0xBF58476D1CE4E5B9ull;
+                z = (z ^ z >> 27) * 0x94D049BB133111EBull;
+                z ^= z >> 31;
+            }
+            w8(ipc[3] + i, (u8)(z >> (i % 8 * 8)));
+        }
+        ipc.ok(1, 2);  // (the buffer's two words go back as they came)
+    }
+};
+
 // dlp:SRVR: Download Play's server side. A game asks it whether it was itself started as a Download Play child; the answer word left out
 // (as an unimplemented command returns) read as "yes" from what the last request left there: Luigi's Mansion: Dark Moon then started in
 // its Thrill Tower multiplayer, as a child looking for its host ("Connection error", "Waiting for player"), not at its title screen.
@@ -728,7 +751,8 @@ void register_misc() {
     register_service(std::make_shared<DlpSrvr>("dlp:SRVR"));
     register_y2r();
     register_cam();
-    for (const char *n : {"news:u", "soc:U", "ssl:C", "http:C", "dlp:FKCL",
+    register_service(std::make_shared<Ssl>("ssl:C"));
+    for (const char *n : {"news:u", "soc:U", "http:C", "dlp:FKCL",
                           "pxi:dev", "act:u", "nim:aoc", "qtm:u", "csnd:SND", "nfc:u"})
         register_service(std::make_shared<Generic>(n));
 }

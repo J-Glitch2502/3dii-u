@@ -22,6 +22,10 @@ void save_resize(int fd, u64 size);
 const std::string &save_account_dir();  // the player's storage, /vol/save/<persistent id>, or empty without one
 bool save_pending();                     // saved by the game and not flushed yet
 bool save_copy_tree(const std::string &from, const std::string &to);
+extern volatile u32 files_copied;  // by save_copy_tree: the watchdog counts them as work while a game starts
+// a 3DS save packed into the game by the builder, taken in once before it starts (save_storage.cpp)
+void save_from_content(const std::string &packed, const std::string &save, const std::string &done);
+extern volatile bool settings_due;  // the options menu changed settings.ini's values: the card thread writes the file
 // (input thread) the right stick is held in: the microphone hears blowing
 void mic_blow(bool on);
 // a line in trace.txt, which survives a forced power-off, and the last one is on the screen if the game freezes: for first uses of what Cemu can't test

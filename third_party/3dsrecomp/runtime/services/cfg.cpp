@@ -1,20 +1,29 @@
 // cfg: system configuration blocks (language, region, user name, ...).
 #include "../loader.h"
 #include "../service.h"
+#include "../settings.h"
 #include "services.h"
 
 namespace kernel {
 
-static int cfg_language() {
-    // 0 JP, 1 EN, 2 FR, 3 DE, 4 IT, 5 ES, 6 ZH, 7 KO, 8 NL, 9 PT, 10 RU, 11 TW
-    if (const char *l = getenv("RECOMP_LANGUAGE")) return atoi(l);
-    return 1;
-}
+int g_system_language = -1;
 
 static u32 cfg_region() {
     // 0 JPN, 1 USA, 2 EUR, 3 AUS, 4 CHN, 5 KOR, 6 TWN: the game's own region (SMDH), EUR for region-free ones
     if (const char *r = getenv("RECOMP_REGION")) return (u32)atoi(r);
     return g_game.region >= 0 && g_game.region != 3 ? (u32)g_game.region : 2;
+}
+
+u32 cfg_languages() { return region_languages(cfg_region()); }
+
+// The game's language, the same all run, as a game may ask more than once (languages.h): the one picked in the options menu
+// (settings.ini), else the console's own
+int cfg_language() {
+    static const int language = [] {
+        if (const char *l = getenv("RECOMP_LANGUAGE")) return atoi(l);
+        return pick_language(cfg_languages(), g_settings.language, g_system_language);
+    }();
+    return language;
 }
 
 // country (CFG country code) and names matching the region

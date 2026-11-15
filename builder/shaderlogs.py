@@ -25,6 +25,13 @@ import struct
 
 TAIL = 56  # bool uniforms, int uniforms, output map
 VSF = 4 + 4 + 16 + TAIL  # b'VSF ', entry, fingerprint, tail
+# A "GSX " record (a draw's vertex shader and the geometry shader after it, tools/shadergen_main.cpp) ships as a GSF one, both programs by
+# fingerprint, after a .vsf file's VSF records: b'GSF ', the vertex and geometry entries, output mask, inputs, permutation (two words) and
+# turn flag, the two fingerprints, and both programs' uniforms and the output map
+GSX_HEAD = struct.Struct('<11I')  # vertex entry, code and swizzle words, geometry entry, code and swizzle words, the rest as in GSF
+GSF_HEAD = struct.Struct('<7I')
+GSX_TAIL = 88
+GSF = 4 + GSF_HEAD.size + 32 + GSX_TAIL
 VSR = 4 + 8 + 16 + TAIL  # b'VSR ', entry, code and swizzle piece counts, fingerprint, tail; then the pieces
 PIECE = struct.Struct('<BBHQ')  # source, stride (4, or 8 for a DVLB's swizzle table), words, byte offset (UNPACKED: file index << 32 | offset)
 SOURCES = ('code.bin', 'romfs.bin')  # where a recipe's pieces lie in a game's folder, as this repository and the build both extract them
@@ -37,7 +44,8 @@ ROOT = os.environ.get('THREEDII_ROOT') or os.path.dirname(os.path.dirname(os.pat
 
 # ---------------------------------------------------------------- logs and fingerprints
 def records(d):
-    """('vs', entry, code, swizzles, tail) or ('fs', raw bytes) for each record of a log, as tools/shadergen_main.cpp reads them"""
+    """('vs', entry, code, swizzles, tail), ('gsx', head, vertex code, swizzles, geometry code, swizzles, tail) or ('fs', raw bytes) for each
+    record of a log, as tools/shadergen_main.cpp reads them"""
     p = 0
     while p + 8 <= len(d):
         if d[p:p + 4] == b'VS  ':
@@ -45,6 +53,18 @@ def records(d):
             q = p + 16 + (nc + ns) * 4
             yield 'vs', entry, d[p + 16:p + 16 + nc * 4], d[p + 16 + nc * 4:q], d[q:q + TAIL]
             p = q + TAIL
+        elif d[p:p + 4] == b'GSX ':
+            end = p + 8 + struct.unpack_from('<I', d, p + 4)[0]
+            if end > len(d) or p + 8 + GSX_HEAD.size > end:
+                break
+            head = GSX_HEAD.unpack_from(d, p + 8)
+            q, parts = p + 8 + GSX_HEAD.size, []
+            for words in (head[1], head[2], head[4], head[5]):
+                parts.append(d[q:q + words * 4])
+                q += words * 4
+            if end - q == GSX_TAIL:
+                yield ('gsx', head, *parts, d[q:end])
+            p = end
         else:
             q = p + 4 if d[p:p + 4] == b'FS  ' else p
             if q + 4 > len(d):
@@ -298,19 +318,30 @@ def recipes(d):
 
 # ---------------------------------------------------------------- what the app ships, and what a build makes of it
 def split(d, progs, srcs=None, cache=None, unpacked=()):
-    """(fragment records as they are, vertex records as fingerprints (.vsf), as recipes (.vsr), and the vertex records left out, as (code,
-    swizzles)). A record whose memory starts with none of the game's programs goes as a recipe if the game's own files (srcs) hold its words.
-    cache keeps each memory's recipe across a game's logs."""
+    """(fragment records as they are, vertex records as fingerprints (.vsf, with the geometry shader records as GSF after them), as recipes
+    (.vsr), and the vertex records left out, as (code, swizzles)). A record whose memory starts with none of the game's programs goes as a
+    recipe if the game's own files (srcs) hold its words. cache keeps each memory's recipe across a game's logs."""
     cache = {} if cache is None else cache
-    frag, vsf, vsr, left = bytearray(), bytearray(), bytearray(), []
+    frag, vsf, vsr, gsf, left = bytearray(), bytearray(), bytearray(), bytearray(), []
+
+    def program(entry, code, swz):  # the game's program a shader memory starts with, the longest if several
+        found = [p for p in progs if entry < len(p[0]) // 4 and code.startswith(p[0]) and swz.startswith(p[1])]
+        return max(found, key=lambda p: len(p[0])) if found else None
+
     for r in records(d):
         if r[0] == 'fs':
             frag += r[1]
             continue
+        if r[0] == 'gsx':  # both programs by fingerprint, or left out: no recipes for these
+            _, h, vcode, vswz, gcode, gswz, tail = r
+            vp, gp = program(h[0], vcode, vswz), program(h[3], gcode, gswz)
+            if vp and gp:
+                gsf += b'GSF ' + GSF_HEAD.pack(h[0], h[3], *h[6:11]) + fingerprint(*vp) + fingerprint(*gp) + tail
+            continue
         _, entry, code, swz, tail = r
-        found = [p for p in progs if entry < len(p[0]) // 4 and code.startswith(p[0]) and swz.startswith(p[1])]
+        found = program(entry, code, swz)
         if found:
-            vsf += b'VSF ' + struct.pack('<I', entry) + fingerprint(*max(found, key=lambda p: len(p[0]))) + tail
+            vsf += b'VSF ' + struct.pack('<I', entry) + fingerprint(*found) + tail
             continue
         if srcs and (code, swz) not in cache:
             cache[(code, swz)] = recipe(code, swz, srcs, unpacked)
@@ -321,11 +352,11 @@ def split(d, progs, srcs=None, cache=None, unpacked=()):
             vsr += b''.join(PIECE.pack(*p) for p in pc + ps)
         else:
             left.append((code, swz))
-    return bytes(frag), bytes(vsf), bytes(vsr), left
+    return bytes(frag), bytes(vsf + gsf), bytes(vsr), left
 
 
 def _restore_fingerprints(logs):
-    """each .vsf file back into "VS  " records (<name>_vsf.bin), with the programs of this dump's dvlb.bin: (made, left out)"""
+    """each .vsf file back into "VS  " and "GSX " records (<name>_vsf.bin), with the programs of this dump's dvlb.bin: (made, left out)"""
     names = [f for f in os.listdir(logs) if f.endswith('.vsf')]
     dvlb = os.path.join(logs, 'dvlb.bin')
     found = {fingerprint(c, s): (c, s) for c, s in programs(dvlb)} if names and os.path.isfile(dvlb) else {}
@@ -334,15 +365,28 @@ def _restore_fingerprints(logs):
         with open(os.path.join(logs, name), 'rb') as f:
             d = f.read()
         out = bytearray()
-        for p in range(0, len(d) - VSF + 1, VSF):
-            if d[p:p + 4] != b'VSF ':
+        p = 0
+        while True:
+            if d[p:p + 4] == b'VSF ' and p + VSF <= len(d):
+                prog = found.get(d[p + 8:p + 24])
+                if prog:
+                    out += vs_record(struct.unpack_from('<I', d, p + 4)[0], *prog, d[p + 24:p + VSF])
+                p += VSF
+            elif d[p:p + 4] == b'GSF ' and p + GSF <= len(d):
+                h = GSF_HEAD.unpack_from(d, p + 4)
+                q = p + 4 + GSF_HEAD.size
+                vp, gp = found.get(d[q:q + 16]), found.get(d[q + 16:q + 32])
+                if vp and gp:
+                    (vc, vs), (gc, gs) = vp, gp
+                    head = GSX_HEAD.pack(h[0], len(vc) // 4, len(vs) // 4, h[1], len(gc) // 4, len(gs) // 4, *h[2:])
+                    body = head + vc + vs + gc + gs + d[q + 32:p + GSF]
+                    out += b'GSX ' + struct.pack('<I', len(body)) + body
+                prog = vp and gp
+                p += GSF
+            else:
                 break
-            prog = found.get(d[p + 8:p + 24])
-            if prog is None:
-                left += 1
-                continue
-            out += vs_record(struct.unpack_from('<I', d, p + 4)[0], *prog, d[p + 24:p + VSF])
-            made += 1
+            made += bool(prog)
+            left += not prog
         with open(os.path.join(logs, name[:-4] + '_vsf.bin'), 'wb') as f:
             f.write(out)
         os.remove(os.path.join(logs, name))

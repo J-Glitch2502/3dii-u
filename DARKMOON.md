@@ -268,6 +268,24 @@ flip (frames 5400, 8400-8700, 10800, 14700-15600 of console_runs/intro1), though
 show_lcd_from_memory showed their black LCD memory at every VBlank between the pictures their transfers bring (a7c25ad: only if written
 after the last transfer's picture). Confirmed gone on Senne's console. A reminder that the renderer changes here touch every game.
 
+## Nov 15: main merged (36 commits); compiled for the console, not yet run
+
+Main now has, among others: geometry shaders compiled to a GPU vertex shader (`shader_glsl_gs`, `gx2_gsx_ready`, "GSX " records),
+TV and GamePad layouts and a 480p option in an eight-line options menu, no SD card use (so no `learned.bin` from the card any more),
+3DS saves packed into the build, `Surface::copy` / `written_lo..hi` for targets the game wrote over, `memory_fills`.
+
+How the conflicts went:
+- Geometry shaders: main's GPU path is tried first (vertex.cpp); ours (native C, then the interpreter) is what's left when it declines.
+  Whether Dark Moon's rain goes to the GPU now is the first thing to look at on a console (`[vtx] shaded on the CPU` in a measuring build).
+- `metal_guest_read`: main's "memory is newer" test, with our pick of the target the GPU wrote last (`drawn`).
+- `bind_targets`: main's `get_surface(..., ds)` / depth made with its colour's scale, plus our depth-follows-a-downscaled-colour.
+- `dyn_res_update`: `top_720` is gone in main; `top_rows <= 720` stands in for it.
+- Options menu: main's eight lines; Dark Moon gets a ninth, FRAME LIMIT, before quitting (rows 36 apart instead of 40 to fit).
+- `shader_glsl_spec` keeps the fail line and instruction; `misses_to_log.py` reads both "GS  " and "GSX " records.
+- `builder/pipeline.py`: main's `console_learned(slug)` (no card).
+
+Every runtime source compiles for the console (`-fsyntax-only` with the measuring build's flags). Not built, not run in Cemu or on a console.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),

@@ -108,40 +108,29 @@ def derived(dump):
             'folder': folder, 'status': 'Untested', 'note': 'Not tested on a console yet: it may not start, or stop partway.'}
 
 
-def console_learned(info, slug, card):
-    """What consoles learned playing this game, as shader logs for its build. A game leaves the list of what the console had to compile for it
-    on the SD card as it closes (sd:/3dii-u/<title id>/learned.bin, port/wiiu/frontend_wiiu.cpp). The card this build is for is read, and what
-    was read before is kept (with the game's other logs in the repository, in the work folder for the standalone app), so a later build has
-    it without the card. Returns the logs."""
+def console_learned(slug):
+    """What consoles learned playing this game, as shader logs for its build: what earlier builds read off SD cards, where games left the
+    list of what a console had to compile until 2026-11-15 (they use no card now). Kept with the game's other logs in the repository, in the
+    work folder for the standalone app."""
     kept = os.path.join(ROOT, 'games', slug, 'shader_logs') if WORK == ROOT else os.path.join(WORK, 'learned', slug)
-    new = os.path.join(card.rstrip('\\/') + os.sep, '3dii-u', info['title_id'].lower(), 'learned.bin') if card else ''
-    if os.path.isfile(new) and os.path.getsize(new):
-        import hashlib
-        with open(new, 'rb') as f:
-            log = os.path.join(kept, 'console_card_' + hashlib.sha1(f.read()).hexdigest()[:12] + '.bin')
-        if not os.path.exists(log):
-            os.makedirs(kept, exist_ok=True)
-            r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'misses_to_log.py'), new, log], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                               errors='replace')
-            if r.returncode:  # cut short by a console switched off as it wrote: this build goes without it
-                if os.path.exists(log):
-                    os.remove(log)
-                print('What your console left on the SD card couldn\'t be read (the file is cut short): this build goes without it.', flush=True)
-            else:
-                made = sum(int(n) for n in re.findall(r'\d+', r.stdout))
-                print(f'From your console, on the SD card: the {made} shaders it had to make while you played are ready-made in this build.', flush=True)
-    # (each with the geometry shaders that card's runs met beside it, a .gsl: build3ds.py makes native code of them)
     return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
 
 
-def make_title(game_dir, out, info, art=None):
-    """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
+def tool(name):
+    """one of the repository's tool scripts, loaded by its path: the app carries them as files, not as modules"""
     import importlib.util
-    spec = importlib.util.spec_from_file_location('make_game_title', os.path.join(ROOT, 'tools', 'make_game_title.py'))
-    titles = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(titles)
-    titles.make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
-                      info['title_id'], info['name'], info['product'], ARCHIVES, art)
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, 'tools', name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_title(game_dir, out, info, art=None, icon_art=None, style='picture', released='', case_scan=False, pad_bezel=None, pad_art=None,
+               boot_sound=None):
+    """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
+    tool('make_game_title').make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
+                                       info['title_id'], info['name'], info['product'], ARCHIVES, art, icon_art, style, released, case_scan, pad_bezel,
+                                       pad_art, boot_sound)
     content = os.path.join(out, 'title', 'content')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')):
@@ -199,6 +188,14 @@ def main():
     ap.add_argument('--out', help='a folder to put the WUP in instead')
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
     ap.add_argument('--art', help="a picture (the cover art, say) for the start-up screens and the Wii U Menu icon; the game's own icon otherwise")
+    ap.add_argument('--icon-art', help='a square picture for the Wii U Menu icon alone, where --art is a wide banner')
+    ap.add_argument('--pad-bezel', help="a picture (854x480, say) the GamePad shows where it shows no screen, a bezel or overlay; black otherwise")
+    ap.add_argument('--pad-art', help="a picture of its own for the GamePad's start-up screen, shown as it is; the TV's otherwise")
+    ap.add_argument('--boot-sound', help="the game's own start-up sound, a .btsnd (tools/make_boot_sound.py); the one for every game otherwise")
+    ap.add_argument('--save', help="a 3DS save to pack in, which the game takes on the console (saves.py): Checkpoint's, JKSM's or an emulator's folder")
+    ap.add_argument('--art-style', choices=('picture', 'console'), default='console',
+                    help='the start-up screens: laid out as the Virtual Console shows a game, or --art as it is')
+    ap.add_argument('--tdb', help="a folder for GameTDB's list of 3DS games, where the Virtual Console's screens find the year a game came out")
     ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode (build3ds.Game.mixed)')
     ap.add_argument('--cold', action='store_true', help="for the checks: build it as a game nobody has built before, with none of this PC's lists of "
                                                         'its code and shaders (tools/check_ports.py --cold)')
@@ -307,7 +304,7 @@ def main():
         for f in os.listdir(logs):
             if not f.startswith('other_') and os.path.isfile(os.path.join(logs, f)):
                 shutil.copyfile(os.path.join(logs, f), os.path.join(game_dir, 'shader_logs', f))
-    for f in [] if a.cold else console_learned(info, (known or derived(game))['slug'], a.card):
+    for f in [] if a.cold else console_learned((known or derived(game))['slug']):
         os.makedirs(os.path.join(game_dir, 'shader_logs'), exist_ok=True)
         shutil.copyfile(f, os.path.join(game_dir, 'shader_logs', os.path.basename(f)))
 
@@ -320,8 +317,8 @@ def main():
     b3.WORK = os.path.join(WORK, 'build_win_builder').replace('\\', '/')
     prepare_logs = b3.prepare_logs
 
-    def with_vertex_programs(g):  # the standalone app's logs name vertex programs by fingerprint: this dump's own dvlb.bin has their code
-        prepare_logs(g)
+    def with_vertex_programs(g, shadergen):  # the standalone app's logs name vertex programs by fingerprint: this dump's own dvlb.bin has their code
+        prepare_logs(g, shadergen)
         made, left = shaderlogs.restore(g.dir + '/shader_logs')
         if made or left:
             print(f'vertex records from earlier runs: {made}, and {left} whose program this dump hasn\'t', flush=True)
@@ -392,7 +389,18 @@ def main():
         shutil.copyfile(dvlb, os.path.join(learned, 'dvlb.bin'))
 
     PROGRESS.stage('Making the title')
-    make_title(game_dir, out, info, a.art)
+    released, case_scan = '', False
+    if a.art and a.art_style == 'console' and a.tdb:
+        import covers  # only here: the one download a build may make, and only with the Virtual Console's screens chosen
+        released = covers.released(game.product, a.tdb)
+        case_scan = covers.is_case_scan(a.art, a.tdb)  # the folder is the covers' own
+    make_title(game_dir, out, info, a.art, a.icon_art, a.art_style, released, case_scan, a.pad_bezel, a.pad_art, a.boot_sound)
+    if a.save:
+        import saves
+        try:
+            saves.pack(a.save, os.path.join(out, 'title', 'content'))
+        except (saves.SaveError, OSError) as e:
+            fail(f"The 3DS save couldn't be packed in: {e}")
 
     if b3.MEASURE and not b3.MEASURE_CONSOLE:  # the checks' own kind of build, for Cemu (build3ds.py): packed only when asked by name
         print('a measuring build: not packed', flush=True)

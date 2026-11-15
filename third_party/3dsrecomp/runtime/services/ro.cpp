@@ -12,6 +12,7 @@
 #include <string>
 
 #include "../service.h"
+#include "ro_tree.h"
 #include "services.h"
 
 #ifdef RECOMP_MODULES  // several games in one app: the loaded game's slots, if it has CRO modules (set_game_cros)
@@ -52,6 +53,8 @@ enum : u32 {
     H_EXPORT_INDEXED_NUM = 0xDC,
     H_EXPORT_STRINGS = 0xE0,
     H_EXPORT_STRINGS_SIZE = 0xE4,
+    H_EXPORT_TREE = 0xE8,
+    H_EXPORT_TREE_NUM = 0xEC,
     H_IMPORT_MODULES = 0xF0,
     H_IMPORT_MODULE_NUM = 0xF4,
     H_EXT_RELOCS = 0xF8,
@@ -132,11 +135,21 @@ struct Cro {
 
     u32 unresolved() const { return tag_addr(f(H_ON_UNRESOLVED)); }
 
+    // A named export is found with the tree the module carries for it (ro_tree.h), as the 3DS's loader does: comparing the name with
+    // every export's takes imports times exports string compares, with the kernel lock held.
     u32 find_export(const std::string &sym) const {
-        u32 n = f(H_EXPORT_NAMED_NUM), tab = f(H_EXPORT_NAMED);
-        for (u32 i = 0; i < n; i++)
-            if (read_cstr(r32(tab + 8 * i), 256) == sym) return tag_addr(r32(tab + 8 * i + 4));
-        return 0;
+        u32 n = f(H_EXPORT_NAMED_NUM), tab = f(H_EXPORT_NAMED), tree = f(H_EXPORT_TREE), nodes = f(H_EXPORT_TREE_NUM);
+        if (!nodes) {  // a module with no tree: name by name, as this loader always did
+            for (u32 i = 0; i < n; i++)
+                if (read_cstr(r32(tab + 8 * i), 256) == sym) return tag_addr(r32(tab + 8 * i + 4));
+            return 0;
+        }
+        const auto entry = [&](u32 k, u16 *e) {
+            for (u32 j = 0; j < 4; j++) e[j] = r16(tree + 8 * k + 2 * j);
+        };
+        const s32 i = export_tree_leaf(entry, nodes, sym.data(), sym.size());
+        if (i < 0 || (u32)i >= n || read_cstr(r32(tab + 8 * i), 256) != sym) return 0;  // any name ends at some leaf: is it this one
+        return tag_addr(r32(tab + 8 * i + 4));
     }
 
     // ---- rebasing (code_base: where the text and rodata segments are)
@@ -382,6 +395,7 @@ struct Ro : Service {
         switch (ipc.cmd()) {
         case 0x0001: {  // Initialize(crs buffer, size, address, process)
             u32 buf = ipc[1], size = ipc[2], addr = ipc[3];
+            if (mem::lent(addr, size)) FATAL("[ldr:ro] the static module at %08x (%x bytes) would land on memory lent to the host\n", addr, size);
             if (addr != buf) memmove(gptr(addr), gptr(buf), size);
             g_crs = addr;
             Cro crs(addr);
@@ -448,6 +462,8 @@ struct Ro : Service {
     void load(IPC &ipc) {
         u32 buf = ipc[1], addr = ipc[2], size = ipc[3], data = ipc[4], data_size = ipc[6], bss = ipc[7],
             bss_size = ipc[8], auto_link = ipc[9] & 0xFF, level = ipc[10];
+        // where a module goes is the game's choice, and the host keeps memory in the same block (mem::lend): never a module over that
+        if (mem::lent(addr, size)) FATAL("[ldr:ro] a module at %08x (%x bytes) would land on memory lent to the host\n", addr, size);
         if (addr != buf) memmove(gptr(addr), gptr(buf), size);
         Cro c(addr);
         std::string name = read_cstr(addr + c.f(H_MODULE_NAME), c.f(H_MODULE_NAME_SIZE) + 1);
@@ -498,5 +514,7 @@ struct Ro : Service {
 }  // namespace
 
 void register_ro() { register_service(std::make_shared<Ro>("ldr:ro")); }
+
+bool ro_has_modules() { return guest_cro_count != 0; }
 
 }  // namespace kernel

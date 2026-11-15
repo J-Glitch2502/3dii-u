@@ -11,6 +11,7 @@ struct GameInfo {
     u32 text_addr = 0, text_size = 0, ro_addr = 0, ro_size = 0, data_addr = 0, data_size = 0, bss_size = 0;
     u32 stack_size = 0;
     int priority = 0x30;
+    u32 system_mode = 0, app_memory = 0x04000000;  // the memory mode its header asks for, and the application memory that mode gives
     int region = -1;  // from the SMDH region lockout: 0 JPN, 1 USA, 2 EUR, 3 AUS, 4 CHN, 5 KOR, 6 TWN; -1 region free
 };
 extern GameInfo g_game;

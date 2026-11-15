@@ -32,7 +32,29 @@ KID_ICARUS_PLAY = ['CUP+L+T@160/110 150', 'CLEFT+L+T@130/120 90', 'CUP+L 150', '
 # New Super Mario Bros. 2: to the world map on A (it's there within a minute), right to World 1-1's place on it, and in
 NSMB2_INTO_1_1 = A(55) + ['CRIGHT 20', 'WAIT 90', 'A 6', 'WAIT 360']
 
+# Pokemon Ultra Sun and Ultra Moon from a save kept on Route 1, the first partner just chosen (sources.json's "save"): through the title
+# into the game, left into the tall grass and round in it. A wild Pokemon comes within seconds, and the battle is fought by touch, which
+# does nothing while walking: Fight, then the second move (Leafage). B closes what an A too many opened, and runs; in a battle the stick
+# only moves the cursor about, and nothing presses A on it.
+USUM_BATTLE = ['WAIT 900'] + A(45, 90) + ['B 6', 'WAIT 60'] * 6 + ['CLEFT+B 240'] + [
+    line for d in ('CLEFT', 'CUP', 'CRIGHT', 'CDOWN') * 100 for line in (f'{d}+B 90', 'T@280/120 10', 'WAIT 50', 'T@250/85 10', 'WAIT 50')]
+
+# Mario Kart 7: A through the title and every menu's first choice (Single Player, Grand Prix, 50cc, Mario, his kart, the Mushroom Cup)
+# into the first race, then A held: the kart drives on, into walls and round them, among the other racers.
+MK7_RACE = ['WAIT 600'] + A(30, 120) + ['A 600', 'WAIT 10'] * 40
+
 ROUTES = {
+    'mario_kart_7': MK7_RACE,
+    # the same, held on through the cup: each race ends four to five minutes in with the kart against walls, and the third is Cheep Cheep
+    # Lagoon, whose water is where a console loses the most frames (the user, 2026-11-14). A course can't be swapped in for the first: the game
+    # never finishes loading another course's file under Toad Circuit's name.
+    'mario_kart_7_cup': MK7_RACE + ['A 600', 'WAIT 10'] * 60,
+    # the Shell Cup, the other cup a blank save has open (retro courses): down before A from the cc choice on, so the cup choice takes the
+    # second row; elsewhere it only picks the next cc, racer or part
+    'mario_kart_7_shell': ['WAIT 600'] + A(3, 120) + ['CDOWN 6', 'WAIT 30', 'A 6', 'WAIT 120'] * 8 + A(19, 120) + ['A 600', 'WAIT 10'] * 100,
+    'usum_battle': USUM_BATTLE,
+    # from the same save, into the game and no further: the place the save was made at, drawn frame after frame, the same in every run
+    'usum_stand': ['WAIT 900'] + A(4, 90) + ['B 6', 'WAIT 60'] * 4 + ['WAIT 30000'],
     'kid_icarus': GENERIC[:1 + 6 * 7] + A(2, 120) + KID_ICARUS_PLAY * 80,
     # Mario stays where the level starts: he jumps on the spot, the game is paused for 40 s, he jumps again. The check's pictures, one
     # every 33 s, then show the same screens every run. Running right he died somewhere else each time, and runs with nothing wrong were

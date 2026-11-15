@@ -102,20 +102,25 @@ a `DrawState`, and the backend turns each draw into GX2 state and a draw call.
 **Shaders are compiled ahead of time.** Nothing is compiled when the game first needs it, so there's no stutter.
 
 - [`shadergen.cpp`](port/wiiu/shadergen.cpp) writes GLSL. A fragment shader covers one fragment-pipeline state: TEV
-  combiners, fragment lighting, fog, alpha test. A vertex shader covers one PICA vertex program.
+  combiners, fragment lighting, fog, alpha test. A vertex shader covers one PICA vertex program, or a vertex program
+  and the geometry shader after it, where each geometry shader run makes a vertex (particles) or a primitive's vertices
+  (fixed-primitive mode: Luigi's Mansion 2's rain) a few triangles: each vertex drawn is a corner of a triangle it emits,
+  with its run's game vertices' inputs and the corner's number (`gen_gsx_glsl`).
 - [`shaderkeys.cpp`](port/wiiu/shaderkeys.cpp) defines the keys that name each shader. The generator on the PC and the
   renderer on the console compile the same code, so both compute the same key.
 - [`tools/shadergen_main.cpp`](tools/shadergen_main.cpp) generates every shader a game needs. CafeGLSL v0.2.0
   (`third_party/cafeglsl/glslcompiler.exe`) compiles them, and `build3ds.py` merges the results into `shaders.gsh`.
 - The shaders a game needs come from several places:
   - the PC trial's logs (`vs_log.bin`, `fs_log.bin`)
-  - every vertex program found in the game's files (`tools/dvlb_to_log.py`)
+  - every vertex program found in the game's files (`tools/dvlb_to_log.py`): shader binaries, and the GPU command lists
+    that Game Freak's model files load their shaders with instead (`tools/shadergen_lists.cpp`)
   - every material in its model files (`tools/tev_to_log.py`)
   - other games' logs, because fragment states don't depend on the game
   - misses reported by consoles (`tools/misses_to_log.py`)
 
 **When a shader is missing,** a fragment state draws with a generic "uber" shader or a plain fallback, and is logged.
-A vertex program without a shader is shaded on the CPU. The console can also compile missing pixel shaders itself, on a
+A vertex program without a shader is shaded on the CPU, as is a geometry shader's draw (logged for the next build, or
+left there where its result could depend on an earlier run's state). The console can also compile missing pixel shaders itself, on a
 thread of its own, with CafeGLSL's Wii U library ([`shader_compile.cpp`](port/wiiu/shader_compile.cpp)). The GLSL of
 each miss is kept in the save folder, so the next start compiles it before it's needed. A file named `noglslcompile`
 in the data folder turns this off.
@@ -128,7 +133,7 @@ The rest of the backend, in the order of the file's sections:
 - draws with a compiled vertex shader
 - draws shaded on the CPU
 - reading the GPU's work back to guest memory
-- presenting: the top screen is drawn at 1200x720 and scaled to the TV, and the bottom screen goes to the GamePad
+- presenting: the top screen is drawn at 1200x720 (800x480 at the menu's 480p) and each screen is scaled to where the TV's and the GamePad's layouts put it (`screen_layouts.h`)
 - the options menu, with its own small font
 - the software keyboard
 

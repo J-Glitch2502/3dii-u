@@ -3,6 +3,7 @@
 // runs far faster than its integer operations.
 #include "shadergen.h"
 
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <string>
@@ -665,8 +666,69 @@ void lighting() {
     return s;
 }
 
+// a vertex shader's outputs to the rasterizer and its uniform block (uInt: loop counts, starts and steps), with more members after uInt
+std::string vs_outputs(const char *more) {
+    return std::string("layout(location = 0) out vec4 vColor;\n"
+                       "layout(location = 1) out vec4 vTc01;\n"
+                       "layout(location = 2) out vec4 vTc2w;\n"
+                       "layout(location = 3) out vec4 vQuat;\n"
+                       "layout(location = 4) out vec4 vView;\n"
+                       "layout(location = 5) out vec2 vZw;\n"
+                       "layout(location = 6) out vec4 vTan;\n"
+                       "layout(binding = 0, std140) uniform VS { vec4 f[96]; vec4 uDraw; ivec4 uInt[4];") +
+           more + " };\n";
+}
+// the registers shader_glsl_spec's body uses, and its helpers
+const char *const vs_registers =
+    "vec4 o[16];\n"
+    "vec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0), t4 = vec4(0.0), t5 = vec4(0.0), t6 = vec4(0.0), t7 = vec4(0.0);\n"
+    "vec4 t8 = vec4(0.0), t9 = vec4(0.0), t10 = vec4(0.0), t11 = vec4(0.0), t12 = vec4(0.0), t13 = vec4(0.0), t14 = vec4(0.0), t15 = vec4(0.0);\n"
+    "int a0 = 0, a1 = 0, aL = 0; bool c0 = false, c1 = false;\n"
+    "vec4 sel_ge(vec4 a, vec4 b) { return vec4(greaterThanEqual(a, b)); }\n"
+    "vec4 sel_lt(vec4 a, vec4 b) { return vec4(lessThan(a, b)); }\n"
+    "vec4 vs_mul(vec4 a, vec4 b) { return a * b; }\n"
+    "vec4 vs_dp3(vec4 a, vec4 b) { return vec4(dot(a.xyz, b.xyz)); }\n"
+    "vec4 vs_dp4(vec4 a, vec4 b) { return vec4(dot(a, b)); }\n"
+    "vec4 vs_dph(vec4 a, vec4 b) { return vec4(dot(vec4(a.xyz, 1.0), b)); }\n"
+    "vec4 vs_dst(vec4 a, vec4 b) { return vec4(1.0, a.y * b.y, a.z, b.w); }\n"
+    "vec4 vs_max(vec4 a, vec4 b) { return max(a, b); }\n"
+    "vec4 vs_min(vec4 a, vec4 b) { return min(a, b); }\n"
+    // On a PICA 0 * infinity is 0. Superstar Saga's menu program divides by a z of 0 and multiplies that by 0: NaN here put its text boxes nowhere. Every multiply
+    // doing what a PICA does took up to 54 registers, over a real GPU's 48 (tools/shadergen_main.cpp checks), so reciprocals stop short of infinity instead: 1e20 is past any PICA float.
+    "vec4 vs_lim(float x) { return vec4(clamp(x, -1e20, 1e20)); }\n"
+    "int vs_s32(float x) { return int(x); }\n"
+    "vec4 vs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; return u >= 96 ? vec4(1.0) : f[u]; }\n";
+
+// What the rasterizer gets of the output registers in arr, through the output map. Y is negated: rows in a surface are PICA window rows, y up.
+void output_map(Gen &g, const s8 *slot_src, const char *arr) {
+    auto slot = [&](u32 i) {
+        const s32 s = slot_src[i];
+        char x[32];
+        if (s < 0) return std::string("1.0");
+        snprintf(x, sizeof x, "%s[%d].%c", arr, s >> 2, "xyzw"[s & 3]);
+        return std::string(x);
+    };
+    auto vec = [&](std::initializer_list<u32> slots, bool colour = false) {
+        std::string r;
+        for (u32 i : slots) {
+            if (!r.empty()) r += ", ";
+            r += colour ? "min(abs(" + slot(i) + "), 1.0)" : slot(i);
+        }
+        return r;
+    };
+    g.f("    vec4 p = vec4(%s);\n", vec({0, 1, 2, 3}).c_str());
+    g.f("    gl_Position = vec4(p.x, -p.y, p.z * uDraw.x + uDraw.y * p.w, p.w);\n");
+    g.f("    vZw = p.zw;\n");
+    g.f("    vec4 q = vec4(%s);\n", vec({4, 5, 6, 7}).c_str());
+    g.s += frame_outputs;
+    g.f("    vColor = vec4(%s);\n", vec({8, 9, 10, 11}, true).c_str());
+    g.f("    vTc01 = vec4(%s);\n", vec({12, 13, 14, 15}).c_str());
+    g.f("    vTc2w = vec4(%s, %s, 0.0);\n", vec({22, 23}).c_str(), slot(16).c_str());
+    g.f("    vView = vec4(%s, 0.0);\n", vec({18, 19, 20}).c_str());
+}
+
 // Everything but the program's body, which shader_glsl_spec() writes. Output registers are mapped to what the rasterizer needs
-// here, so a program used with two output maps is two vertex shaders. Y is negated: rows in a surface are PICA window rows, y up.
+// here, so a program used with two output maps is two vertex shaders.
 std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs, u32 open) {
     u32 used = 0;
     const std::string body = shader_glsl_spec(p, entry, b, iu, &used, open);
@@ -677,33 +739,8 @@ std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)
     g.s = "#version 450\n";
     for (u32 r = 0; r < 16; r++)
         if (used & (1u << r)) g.f("layout(location = %u) in vec4 v%u;\n", r, r);
-    g.f("layout(location = 0) out vec4 vColor;\n"
-        "layout(location = 1) out vec4 vTc01;\n"
-        "layout(location = 2) out vec4 vTc2w;\n"
-        "layout(location = 3) out vec4 vQuat;\n"
-        "layout(location = 4) out vec4 vView;\n"
-        "layout(location = 5) out vec2 vZw;\n"
-        "layout(location = 6) out vec4 vTan;\n"
-        "layout(binding = 0, std140) uniform VS { vec4 f[96]; vec4 uDraw; ivec4 uInt[4];%s };\n"  // uInt: loop counts, starts and steps
-        "vec4 o[16];\n"
-        "vec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0), t4 = vec4(0.0), t5 = vec4(0.0), t6 = vec4(0.0), t7 = vec4(0.0);\n"
-        "vec4 t8 = vec4(0.0), t9 = vec4(0.0), t10 = vec4(0.0), t11 = vec4(0.0), t12 = vec4(0.0), t13 = vec4(0.0), t14 = vec4(0.0), t15 = vec4(0.0);\n"
-        "int a0 = 0, a1 = 0, aL = 0; bool c0 = false, c1 = false;\n"
-        "vec4 sel_ge(vec4 a, vec4 b) { return vec4(greaterThanEqual(a, b)); }\n"
-        "vec4 sel_lt(vec4 a, vec4 b) { return vec4(lessThan(a, b)); }\n"
-        "vec4 vs_mul(vec4 a, vec4 b) { return a * b; }\n"
-        "vec4 vs_dp3(vec4 a, vec4 b) { return vec4(dot(a.xyz, b.xyz)); }\n"
-        "vec4 vs_dp4(vec4 a, vec4 b) { return vec4(dot(a, b)); }\n"
-        "vec4 vs_dph(vec4 a, vec4 b) { return vec4(dot(vec4(a.xyz, 1.0), b)); }\n"
-        "vec4 vs_dst(vec4 a, vec4 b) { return vec4(1.0, a.y * b.y, a.z, b.w); }\n"
-        "vec4 vs_max(vec4 a, vec4 b) { return max(a, b); }\n"
-        "vec4 vs_min(vec4 a, vec4 b) { return min(a, b); }\n"
-        // On a PICA 0 * infinity is 0. Superstar Saga's menu program divides by a z of 0 and multiplies that by 0: NaN here put its text boxes nowhere. Every multiply
-        // doing what a PICA does took up to 54 registers, over a real GPU's 48 (tools/shadergen_main.cpp checks), so reciprocals stop short of infinity instead: 1e20 is past any PICA float.
-        "vec4 vs_lim(float x) { return vec4(clamp(x, -1e20, 1e20)); }\n"
-        "int vs_s32(float x) { return int(x); }\n"
-        "vec4 vs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; return u >= 96 ? vec4(1.0) : f[u]; }\n",
-        outline ? " vec4 uOutline[2];" : "");
+    g.s += vs_outputs(outline ? " vec4 uOutline[2];" : "");
+    g.s += vs_registers;
     g.f("void vs_output() {\n");
     if (outline) {
         // what Level-5's outline geometry shader does to each vertex of a silhouette edge, for the whole mesh: output 2 is the direction.
@@ -731,33 +768,157 @@ std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)
         g.f("    vs_output();\n}\n");
         return g.s;
     }
-    auto slot = [&](u32 i) {
-        const s32 s = slot_src[i];
-        char x[32];
-        if (s < 0) return std::string("1.0");
-        snprintf(x, sizeof x, "o[%d].%c", s >> 2, "xyzw"[s & 3]);
-        return std::string(x);
-    };
-    auto vec = [&](std::initializer_list<u32> slots, bool colour = false) {
-        std::string r;
-        for (u32 i : slots) {
-            if (!r.empty()) r += ", ";
-            r += colour ? "min(abs(" + slot(i) + "), 1.0)" : slot(i);
-        }
-        return r;
-    };
-    g.f("    vec4 p = vec4(%s);\n", vec({0, 1, 2, 3}).c_str());
-    g.f("    gl_Position = vec4(p.x, -p.y, p.z * uDraw.x + uDraw.y * p.w, p.w);\n");
-    g.f("    vZw = p.zw;\n");
-    g.f("    vec4 q = vec4(%s);\n", vec({4, 5, 6, 7}).c_str());
-    g.s += frame_outputs;
-    g.f("    vColor = vec4(%s);\n", vec({8, 9, 10, 11}, true).c_str());
-    g.f("    vTc01 = vec4(%s);\n", vec({12, 13, 14, 15}).c_str());
-    g.f("    vTc2w = vec4(%s, %s, 0.0);\n", vec({22, 23}).c_str(), slot(16).c_str());
-    g.f("    vView = vec4(%s, 0.0);\n", vec({18, 19, 20}).c_str());
+    output_map(g, slot_src, "o");
     g.f("}\nvoid main() {\n");
     g.s += body;
     g.f("    vs_output();\n}\n");
+    return g.s;
+}
+
+// "v3" as "cv3", not inside a longer name: a fixed-primitive geometry shader's vertex shader runs once for each of a primitive's vertices,
+// on variables main sets from that vertex's inputs
+static std::string inputs_as_variables(const std::string &s) {
+    std::string out;
+    auto word = [&](size_t i) { return isalnum((unsigned char)s[i]) || s[i] == '_'; };
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == 'v' && (i == 0 || !word(i - 1)) && i + 1 < s.size() && isdigit((unsigned char)s[i + 1])) {
+            size_t j = i + 1;
+            while (j < s.size() && isdigit((unsigned char)s[j])) j++;
+            if (j == s.size() || !word(j)) out += 'c';
+        }
+        out += s[i];
+    }
+    return out;
+}
+
+// the geometry shader's reads of the uniforms [lo, hi), which the vertex shader's outputs fill in fixed-primitive mode: from gp instead
+static std::string primitive_uniforms(const std::string &s, u32 lo, u32 hi) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        if (!s.compare(i, 3, "gf[") && (i == 0 || !(isalnum((unsigned char)s[i - 1]) || s[i - 1] == '_'))) {
+            size_t j = i + 3;
+            u32 n = 0;
+            while (j < s.size() && isdigit((unsigned char)s[j])) n = n * 10 + (u32)(s[j++] - '0');
+            if (j > i + 3 && j < s.size() && s[j] == ']' && n >= lo && n < hi) {
+                out += "gp[" + std::to_string(n - lo) + "]";
+                i = j + 1;
+                continue;
+            }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
+// A vertex shader and the geometry shader after it, as one vertex shader: each vertex drawn is a corner of a triangle the geometry shader
+// emits for one vertex of the game's draw (shader_glsl_gs), with that vertex's inputs and, in aCorner, which triangle and which of its corners
+// (gx2_draw: a run is an instance, its inputs per instance, the corner per vertex); one it doesn't emit is put out of sight. No gl_VertexID.
+// The geometry shader takes the vertex shader's outputs in its output mask's order (vertex.cpp, gs_submit_vertex), each to the input register
+// its permutation names.
+// slot_src maps the geometry shader's output registers.
+// In fixed-primitive mode (gs_in has kGsxPrim, Gx2Draw says how) a run takes a primitive's vertices instead: the vertex shader runs for each,
+// its first outputs going to the geometry shader's float uniforms from `begin` on (gp here), and the vertex's inputs are named by its place
+// in the primitive: v, w, x, y.
+std::string gen_gsx_glsl(const ShaderProgram *vs, u32 vs_entry, u32 vb, const u8 (*viu)[4], const ShaderProgram *gs, u32 gs_entry, u32 gb,
+                         const u8 (*giu)[4], u32 vs_outmask, u32 gs_in, u64 gs_perm, const s8 *slot_src, bool turns, u32 *inputs, u32 *tris) {
+    const bool prim = gs_in & kGsxPrim;
+    const u32 run_vertices = prim ? gs_in & 0xff : 1, begin = prim ? gs_in >> 8 & 0xff : 0, outputs = prim ? gs_in >> 16 & 0xff : 0;
+    u64 out_comps = 0;
+    u32 out_regs = 0, in_regs = 0;
+    for (u32 i = 0; i < 24; i++)
+        if (slot_src[i] >= 0) {
+            out_comps |= 1ull << slot_src[i];
+            out_regs |= 1u << (slot_src[i] >> 2);
+        }
+    if (!prim)
+        for (u32 a = 0; a < gs_in; a++) in_regs |= 1u << ((gs_perm >> (4 * a)) & 15);
+    u32 out_reg[16], nout = 0;
+    for (u32 r = 0; r < 16; r++)
+        if ((vs_outmask >> r) & 1) out_reg[nout++] = r;
+    u32 used = 0;
+    std::string vbody = shader_glsl_spec(vs, vs_entry, vb, viu, &used);
+    std::string gbody = shader_glsl_gs(gs, gs_entry, gb, giu, out_comps, in_regs, turns, tris, begin, begin + run_vertices * outputs);
+    const bool fits = prim ? run_vertices && run_vertices <= 4 && outputs && outputs <= nout && begin + run_vertices * outputs <= 96 : gs_in <= nout;
+    if (vbody.empty() || gbody.empty() || !fits) return "";
+    for (size_t at = vbody.find("vs_output(); return;"); at != std::string::npos; at = vbody.find("vs_output(); return;", at))
+        vbody.replace(at, 20, "return;");
+    if (prim) {
+        vbody = inputs_as_variables(vbody);
+        gbody = primitive_uniforms(gbody, begin, begin + run_vertices * outputs);
+        // Only the inputs this entry's code reads: each takes a location for every vertex of the run, of GX2's 16, and a program's other
+        // entries read more (Luigi's Mansion 2's rain reads v0, its program v0 to v11).
+        used = 0;
+        for (u32 r = 0; r < 16; r++) {
+            const std::string name = "cv" + std::to_string(r);
+            for (size_t at = vbody.find(name); at != std::string::npos; at = vbody.find(name, at + 1)) {
+                const size_t end = at + name.size();
+                if ((at == 0 || !(isalnum((unsigned char)vbody[at - 1]) || vbody[at - 1] == '_')) &&
+                    (end == vbody.size() || !(isalnum((unsigned char)vbody[end]) || vbody[end] == '_'))) {
+                    used |= 1u << r;
+                    break;
+                }
+            }
+        }
+    }
+    *inputs = used;
+    Gen g;
+    g.s = "#version 450\n";
+    int corner = 15;  // a location no input register takes
+    if (!prim) {
+        while (corner >= 0 && ((used >> corner) & 1)) corner--;
+        if (corner < 0) return "";
+        for (u32 r = 0; r < 16; r++)
+            if (used & (1u << r)) g.f("layout(location = %u) in vec4 v%u;\n", r, r);
+    } else {
+        int location = 0;  // each vertex's inputs, then the corner: GX2 has 16 attribute buffers
+        for (u32 k = 0; k < run_vertices; k++)
+            for (u32 r = 0; r < 16; r++)
+                if (used & (1u << r)) g.f("layout(location = %d) in vec4 %c%u;\n", location++, "vwxy"[k], r);
+        corner = location;
+        if (corner > 15) return "";
+        for (u32 r = 0; r < 16; r++)
+            if (used & (1u << r)) g.f("vec4 cv%u;\n", r);
+        g.f("vec4 gp[%u];\n", run_vertices * outputs);
+    }
+    g.f("layout(location = %d) in vec4 aCorner;\n", corner);
+    g.s += vs_outputs(" vec4 gf[96]; ivec4 gInt[4];");
+    g.s += vs_registers;
+    g.s += "vec4 gv0 = vec4(0.0), gv1 = vec4(0.0), gv2 = vec4(0.0), gv3 = vec4(0.0), gv4 = vec4(0.0), gv5 = vec4(0.0), gv6 = vec4(0.0), gv7 = vec4(0.0);\n"
+           "vec4 gv8 = vec4(0.0), gv9 = vec4(0.0), gv10 = vec4(0.0), gv11 = vec4(0.0), gv12 = vec4(0.0), gv13 = vec4(0.0), gv14 = vec4(0.0), gv15 = vec4(0.0);\n"
+           "vec4 gt0 = vec4(0.0), gt1 = vec4(0.0), gt2 = vec4(0.0), gt3 = vec4(0.0), gt4 = vec4(0.0), gt5 = vec4(0.0), gt6 = vec4(0.0), gt7 = vec4(0.0);\n"
+           "vec4 gt8 = vec4(0.0), gt9 = vec4(0.0), gt10 = vec4(0.0), gt11 = vec4(0.0), gt12 = vec4(0.0), gt13 = vec4(0.0), gt14 = vec4(0.0), gt15 = vec4(0.0);\n"
+           "vec4 go0[16], go1[16], co[16];\n"
+           "int ga0 = 0, ga1 = 0, gaL = 0; bool gc0 = false, gc1 = false;\n";
+    if (prim)
+        g.f("vec4 gs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; if (u >= %u && u < %u) return gp[u - %u]; "
+            "return u >= 96 ? vec4(1.0) : gf[u]; }\n",
+            begin, begin + run_vertices * outputs, begin);
+    else
+        g.s += "vec4 gs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; return u >= 96 ? vec4(1.0) : gf[u]; }\n";
+    if (gbody.find("gs_ru(") != std::string::npos)  // a loop's read that can't reach the primitive (shader.cpp, MslWriter::off_primitive)
+        g.s += "vec4 gs_ru(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; return u >= 96 ? vec4(1.0) : gf[u]; }\n";
+    g.s += "int gtri = 0, wantT = 0, wantJ = 0; bool got = false;\n";
+    for (u32 r = 0; r < 16; r++)
+        if ((out_regs >> r) & 1) g.f("vec4 s0_%u = vec4(0.0), s1_%u = vec4(0.0), s2_%u = vec4(0.0);\n", r, r, r);
+    g.s += "void vs_main() {\n" + vbody + "}\nvoid gs_main() {\n" + gbody + "}\nvoid main() {\n";
+    g.s += "    wantT = int(aCorner.x + 0.5);\n    wantJ = int(aCorner.y + 0.5);\n";
+    if (!prim) {
+        g.s += "    vs_main();\n";
+        for (u32 a = 0; a < gs_in; a++) g.f("    gv%u = o[%u];\n", (u32)(gs_perm >> (4 * a)) & 15, out_reg[a]);
+    }
+    for (u32 k = 0; k < (prim ? run_vertices : 0); k++) {  // each of the primitive's vertices through the vertex shader, its outputs to the uniforms
+        for (u32 r = 0; r < 16; r++)
+            if (used & (1u << r)) g.f("    cv%u = %c%u;\n", r, "vwxy"[k], r);
+        g.s += "    vs_main();\n";
+        for (u32 m = 0; m < outputs; m++) g.f("    gp[%u] = o[%u];\n", k * outputs + m, out_reg[m]);
+    }
+    g.s += "    gs_main();\n"
+           "    if (!got) {  // no such triangle: outside the view, where nothing is drawn\n"
+           "        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);\n"
+           "        return;\n"
+           "    }\n";
+    output_map(g, slot_src, "co");
+    g.s += "}\n";
     return g.s;
 }
 

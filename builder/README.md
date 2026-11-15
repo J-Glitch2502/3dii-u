@@ -66,6 +66,11 @@ Windows 10 or 11 for now (Linux is planned):
   - Its `engine` folder holds the rest: the recompiler, the runtime's sources, devkitPro's PowerPC toolchain with wut, the CafeGLSL shader compiler, and a ready-built shader generator.
   - It builds in `%LOCALAPPDATA%\3Dii U Builder`, which keeps the compiled runtime for the next game.
   - Beside it, `objcache` keeps up to 2 GB of compiled game code by what went into it (`tools/win/objcache.py`). A game built again by a newer app, or with its update, then compiles only the files whose code changed.
+- A game's art comes from the web when the game is picked (`covers.py`); the user's own pictures, one for the start-up screens and one for the icon (the Art pill's menu), or removing them override it. The same menu takes a GamePad bezel, a picture the build scales to 854x480 (`make_game_title.bezel_pixels`), which the GamePad shows beside the screens in place of black. It also takes a GamePad start-up picture of the game's own (`--pad-art`, shown as it is) and a start-up sound for that game alone (`--boot-sound`, a .btsnd in the work folder's `boot_sounds`).
+  - With the user's SteamGridDB key (Help page, "Art and sound"; kept in `settings.json`, never in the repository): a wide banner for the start-up screens and a square icon for the Wii U Menu, found by the game's name, or by its other regions' names where SteamGridDB doesn't know this one (Luigi's Mansion 2 is Dark Moon there).
+  - Without a key, or where SteamGridDB has nothing: the cover from GameTDB, by the product code's four letters.
+  - GameTDB's list of 3DS games (`3dstdb.zip`), fetched once, gives the year a game came out, for the Virtual Console's start-up screens (a build goes on without a year if it can't be had), and its names in other regions.
+- The start-up sound is the user's own too (Help page, "Art and sound", a WAV file): `tools/make_boot_sound.py` turns it into `boot_sound.btsnd` in the work folder, and every title built after carries it, unless the game has a sound of its own.
 - The 3DS system archives (its shared font and Mii data) don't come with it: they're your own 3DS's files.
   - The builder copies them from Azahar's or Citra's user folder, or from any folder holding a 3DS NAND up to three levels down in Downloads, Desktop or Documents, whatever it's called. It keeps them in its work folder.
   - Off a 3DS, GodMode9 copies `title/0004009b` (font, Mii data) and `title/000400db` (the bad-word list) out of `[1:] SYSNAND CTRNAND`; the user picks either folder (or the one holding them) with "Folder". A build stops if the game's code names an archive the files lack (`dumps.archives_named`): Tomodachi Life stops at start without the word list. Azahar gets them with File > Set Up System Files and the Artic Setup Tool.
@@ -82,7 +87,7 @@ Windows 10 or 11 for now (Linux is planned):
 
 ## How it works
 
-- The window is Qt Quick: `ui/Main.qml` draws it (Wii U Menu glass laid out on a 1280x720 surface scaled to the window, light and dark, the in-window questions, the update card), and `gui.py` holds what it shows and does what its buttons ask. A choice that asks several things is a generator that yields each question.
+- The window is Qt Quick: `ui/Main.qml` draws it (Wii U Menu glass laid out on a 1280x720 surface scaled to the window, light and dark, the in-window questions, the update card), `ui/Simple.qml` is the plainer window the About card can switch to and back from (the same `app`, one window at a time), and `gui.py` holds what it shows and does what its buttons ask. A choice that asks several things is a generator that yields each question.
 - `app.py` is the one program: the window, the build when run with `--pipeline`, and `python.exe`'s part for the repository's tool scripts the build runs. In the standalone app, the build's compilers start without console windows.
 - `make_app.py` builds the standalone app with PyInstaller (`python builder/make_app.py`, on a PC with the build tools above).
   - It leaves out the parts of Qt the window never loads.

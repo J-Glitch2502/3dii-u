@@ -232,6 +232,8 @@ void save_resize(int fd, u64 size) {
     grow(fd, size);  // whichever of those turned it down, or a truncate that doesn't lengthen a file
 }
 
+volatile u32 files_copied;
+
 // A folder and all in it, each file read and written whole from an aligned buffer (write_out says why): the C library's copy goes a little at a time. false: something
 // didn't copy.
 bool save_copy_tree(const std::string &from, const std::string &to) {
@@ -257,8 +259,54 @@ bool save_copy_tree(const std::string &from, const std::string &to) {
         if (out >= 0) close(out);
         free(buf);
         if (!ok) return false;
+        files_copied = files_copied + 1;
     }
     return !ec;
+}
+
+// A copy made whole beside where it goes, then put in its place, what was there set aside until it is: a copy cut short, or a flush
+// partway through one (a full journal, write_retrying), never stands for a save
+static bool copy_into_place(const std::string &from, const std::string &to) {
+    namespace fs = std::filesystem;
+    std::error_code ec, aside;
+    const std::string fresh = to + "_new", old = to + "_old";
+    fs::remove_all(fresh, ec);
+    if (!save_copy_tree(from, fresh)) {
+        fs::remove_all(fresh, ec);
+        return false;
+    }
+    fs::remove_all(old, ec);
+    fs::rename(to, old, aside);  // nothing there yet is fine
+    fs::rename(fresh, to, ec);
+    if (ec) {
+        if (!aside) fs::rename(old, to, aside);
+        fs::remove_all(fresh, aside);
+        return false;
+    }
+    fs::remove_all(old, ec);
+    return true;
+}
+
+// A 3DS save the builder packed into the game (builder/saves.py, the title's save_import), taken in once, before the game starts: its
+// files take the place of the game's save, which is kept as previous beside it first; nothing is replaced if that copy fails. It waits
+// for the game's save folder, there once the game has formatted on this console (services/fs.cpp, OpenArchive), whose first format would
+// wipe it: so the game starts once, then takes the save at its next start. done marks it taken, beside the save: it stays when the
+// software is deleted, as the save does, so a reinstall with the same save packed in leaves the progress made since alone.
+void save_from_content(const std::string &packed, const std::string &save, const std::string &done) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::is_directory(packed, ec) || fs::is_empty(packed, ec) || !fs::is_directory(save, ec) || fs::exists(done, ec)) return;
+    if (!copy_into_place(save, save + "_previous")) return;
+    const bool in = copy_into_place(packed, save);
+    if (in) {
+        save_dirty();
+        save_flush(true);
+    }
+    if (FILE *f = fopen(done.c_str(), "wb")) {  // taken, or tried once: a save that can't be copied isn't tried at every start
+        fputs(in ? "taken" : "failed", f);
+        fclose(f);
+    }
+    LOG("[save] the 3DS save packed into the game: %s\n", in ? "taken in" : "COULD NOT BE COPIED, the game's own kept");
 }
 
 // A game's save file, from memory when it's been opened before: null for one too big to hold, which then goes to storage as before

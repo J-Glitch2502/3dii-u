@@ -262,6 +262,9 @@ def records(path):
             _, nc, ns = struct.unpack_from('<III', d, p + 4)
             p += 16 + (nc + ns) * 4 + 56
             continue
+        if tag == b'GSX ':  # a vertex shader and a geometry shader: its size after the tag
+            p += 8 + struct.unpack_from('<I', d, p + 4)[0]
+            continue
         n = struct.unpack_from('<I', d, p)[0]
         if n > 4096 or n % 4:
             raise ValueError(f'{path}: not a fragment log at {p}')

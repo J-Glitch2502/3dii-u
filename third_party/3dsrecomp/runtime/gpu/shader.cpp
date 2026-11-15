@@ -45,7 +45,7 @@ struct ShaderProgram {
     bool simd_ok = true;  // can run in the 4-wide SoA interpreter
     u64 hash = 0;
     std::vector<u32> raw_code, raw_swz;  // what it was decoded from (for shader_entry_info)
-    struct EntryInfo { u64 id; u32 bmask, lmask; };
+    struct EntryInfo { u64 id; u32 bmask, lmask, emask; };  // emask: the int uniforms of loops whose bodies EMIT
     std::unordered_map<u32, EntryInfo> entries;
     s8 outline = -1;  // shader_outline_gs: not looked at yet
     u32 outline_color = 0, outline_thick = 0;
@@ -198,7 +198,7 @@ void shader_entry_info(const ShaderProgram *pc, u32 entry, u64 *id, u32 *bmask, 
         const u32 n = (u32)p->ins.size();
         std::vector<char> seen(n, 0);
         std::vector<u32> todo{entry};
-        ShaderProgram::EntryInfo e{0xcbf29ce484222325ull, 0, 0};
+        ShaderProgram::EntryInfo e{0xcbf29ce484222325ull, 0, 0, 0};
         while (!todo.empty()) {
             u32 i = todo.back();
             todo.pop_back();
@@ -208,7 +208,11 @@ void shader_entry_info(const ShaderProgram *pc, u32 entry, u64 *id, u32 *bmask, 
                 if (I.op == OP_END) break;
                 switch (I.op) {
                 case OP_JMPU: case OP_CALLU: case OP_IFU: e.bmask |= 1u << I.bid; break;
-                case OP_LOOP: e.lmask |= 1u << I.iid; break;
+                case OP_LOOP:
+                    e.lmask |= 1u << I.iid;
+                    for (u32 k = i + 1; k <= I.fdst && k < n; k++)
+                        if (p->ins[k].op == OP_EMIT) e.emask |= 1u << I.iid;
+                    break;
                 default: break;
                 }
                 if (I.op == OP_JMPU || I.op == OP_JMPC || I.op == OP_CALL || I.op == OP_CALLC || I.op == OP_CALLU) todo.push_back(I.fdst);
@@ -234,6 +238,13 @@ void shader_entry_info(const ShaderProgram *pc, u32 entry, u64 *id, u32 *bmask, 
     *id = it->second.id;
     *bmask = it->second.bmask;
     *lmask = it->second.lmask;
+}
+
+u32 shader_emit_loops(const ShaderProgram *p, u32 entry) {
+    u64 id;
+    u32 bmask, lmask;
+    shader_entry_info(p, entry, &id, &bmask, &lmask);  // made and kept there, from the code entry reaches
+    return p->entries.find(entry)->second.emask;
 }
 
 void shader_free(const ShaderProgram *p) { delete p; }
@@ -885,23 +896,42 @@ struct MslWriter {
     const ShaderProgram *P;
     std::string o;
     const char *al = "0";  // the loop counter register's expression
+    // a geometry shader's registers are named apart from its vertex shader's, in the one GLSL shader both make (shader_glsl_gs): "g" before
+    // them, its uniforms gf, and its outputs in the bank its emits have come to (shader_run switches banks at every EMIT); -1: a vertex shader's o
+    std::string pre;
+    const char *uni = "f";
+    int bank = -1;
+    // A geometry shader's float uniforms prim_lo to prim_hi are a fixed-primitive run's vertices (gen_gsx_glsl's gp), which gs_rel tells apart.
+    // An aL-relative read that none of al_values (the aLs of the loop being written) takes into them reads the uniforms alone: gs_ru, which
+    // leaves gp unread, so the compiler needn't keep it in registers through the loop.
+    u32 prim_lo = 0, prim_hi = 0;
+    std::vector<int> al_values;
+    bool off_primitive(int base, int aidx) const {
+        if (aidx != 3 || al_values.empty() || prim_lo >= prim_hi) return false;
+        for (int off : al_values) {
+            const u32 u = (u32)(base + (off < -128 || off > 127 ? 0 : off)) & 127;  // as gs_rel takes it
+            if (u >= prim_lo && u < prim_hi) return false;
+        }
+        return true;
+    }
     char b[512];
     template <class... A> void f(const char *fmt, A... a) {
         snprintf(b, sizeof b, fmt, a...);
         o += b;
     }
     std::string reg(u32 idx) {
-        if (idx < REG_TMP) return "v" + std::to_string(idx);
-        if (idx < REG_UNI) return "t" + std::to_string(idx - REG_TMP);
-        if (idx < REG_OUT) return "P.f[" + std::to_string(idx - REG_UNI) + "]";
-        if (idx < REG_ZERO) return "o[" + std::to_string((idx - REG_OUT) & 15) + "]";
+        if (idx < REG_TMP) return pre + "v" + std::to_string(idx);
+        if (idx < REG_UNI) return pre + "t" + std::to_string(idx - REG_TMP);
+        if (idx < REG_OUT) return std::string("P.") + uni + "[" + std::to_string(idx - REG_UNI) + "]";
+        if (idx < REG_ZERO) return (bank < 0 ? std::string("o[") : "go" + std::to_string(bank) + "[") + std::to_string((idx - REG_OUT) & 15) + "]";
         return idx == REG_ONE ? "float4(1.0)" : "float4(0.0)";
     }
     std::string src(const DInst &I, int k) {
-        const char *aname[4] = {"0", "a0", "a1", al};
+        const std::string aname[4] = {"0", pre + "a0", pre + "a1", al};
         std::string r;
         if (I.rel == k)
-            r = "vs_rel(P, " + std::to_string((int)I.src[k] - (int)REG_UNI) + ", " + aname[I.aidx] + ")";
+            r = (pre.empty() ? "vs_rel(P, " : off_primitive((int)I.src[k] - (int)REG_UNI, I.aidx) ? "gs_ru(P, " : "gs_rel(P, ") +
+                std::to_string((int)I.src[k] - (int)REG_UNI) + ", " + aname[I.aidx] + ")";
         else
             r = reg(I.src[k]);
         static const char xyzw[] = "xyzw";
@@ -924,9 +954,9 @@ struct MslWriter {
             o += "    { const float4 r_ = " + expr + "; " + d + "." + m + " = r_." + m + "; }\n";
     }
     std::string cond(const DInst &I) {
-        snprintf(b, sizeof b, "(c0 == %s)", I.refx ? "true" : "false");
+        snprintf(b, sizeof b, "(%sc0 == %s)", pre.c_str(), I.refx ? "true" : "false");
         const std::string x = b;
-        snprintf(b, sizeof b, "(c1 == %s)", I.refy ? "true" : "false");
+        snprintf(b, sizeof b, "(%sc1 == %s)", pre.c_str(), I.refy ? "true" : "false");
         const std::string y = b;
         switch (I.fop) {
         case 0: return "(" + x + " || " + y + ")";
@@ -956,22 +986,22 @@ struct MslWriter {
         case OP_SGE: write(I, "select(float4(0.0), float4(1.0), " + src(I, 0) + " >= " + src(I, 1) + ")"); break;
         case OP_SLT: write(I, "select(float4(0.0), float4(1.0), " + src(I, 0) + " < " + src(I, 1) + ")"); break;
         case OP_LITP:
-            o += "    { const float4 a_ = " + src(I, 0) + "; c0 = a_.x > 0.0; c1 = a_.w > 0.0;\n";
+            o += "    { const float4 a_ = " + src(I, 0) + "; " + pre + "c0 = a_.x > 0.0; " + pre + "c1 = a_.w > 0.0;\n";
             o += "      const float4 l_ = float4(max(a_.x, 0.0), max(a_.y, 0.0), a_.z, clamp(a_.w, -127.9961, 127.9961));\n";
             write(I, "l_");
             o += "    }\n";
             break;
         case OP_MOVA:
             o += "    { const float4 a_ = " + src(I, 0) + ";";
-            if (I.mask[0]) o += " a0 = vs_s32(a_.x);";
-            if (I.mask[1]) o += " a1 = vs_s32(a_.y);";
+            if (I.mask[0]) o += " " + pre + "a0 = vs_s32(a_.x);";
+            if (I.mask[1]) o += " " + pre + "a1 = vs_s32(a_.y);";
             o += " }\n";
             break;
         case OP_CMP: {
             o += "    { const float4 a_ = " + src(I, 0) + ", b_ = " + src(I, 1) + ";";
             static const char *ops[6] = {"==", "!=", "<", "<=", ">", ">="};
-            if (I.cmpx < 6) f(" c0 = a_.x %s b_.x;", ops[I.cmpx]);
-            if (I.cmpy < 6) f(" c1 = a_.y %s b_.y;", ops[I.cmpy]);
+            if (I.cmpx < 6) f(" %sc0 = a_.x %s b_.x;", pre.c_str(), ops[I.cmpx]);
+            if (I.cmpy < 6) f(" %sc1 = a_.y %s b_.y;", pre.c_str(), ops[I.cmpy]);
             o += " }\n";
             break;
         }
@@ -1128,6 +1158,107 @@ struct SpecGen {
     bool fail = false;
     int why = 0;  // the source line that gave up, and the instruction (shader_glsl_fail)
     u32 at = 0;
+    // A geometry shader (shader_glsl_gs): each vertex of the GLSL shader is one corner of one triangle the program emits, so every EMIT is
+    // written out once, keeping that corner if it's this vertex's (wantT, wantJ). Whatever a run of shader_run carries over from the run before
+    // (an emit's vertex id and flags, the triangle slots, an output bank's registers, temporaries, address registers, condition flags, input
+    // registers no attribute loads) has to be set in the same run before it's read, or the program stays with the CPU: es says what is set,
+    // along the code being written.
+    bool gs = false;
+    bool emitting = false;  // writing the body of a loop whose EMITs emitting_loop allows
+    u64 gs_need = 0;       // the output components the output map reads (register * 4 + component)
+    u32 gs_out = 0;        // their registers, which an emit copies
+    u32 gs_in = 0;         // the input registers a run is given
+    bool gs_wind = false;  // the draw's topology turns a triangle round on SETEMIT's winding flag (pa_submit)
+    u32 tris = 0;          // the triangles written out, the most a run can emit
+    struct Emit {
+        int bank = -1;                        // the output bank (the writer's)
+        int vid = -1, prim = -1, wind = -1;  // what SETEMIT last set (-1: not known here)
+        u32 filled = 0;                       // the triangle slots an emit filled
+        u64 written[2] = {0, 0};              // the output components each bank had written (register * 4 + component)
+        u64 temps = 0;                        // the temporaries' components written
+        u32 flags = 0;                        // a0, a1, c0, c1 written
+    } es;
+    static int sources(u8 op) {
+        switch (op) {
+        case OP_NOP: return 0;
+        case OP_EX2: case OP_LG2: case OP_LITP: case OP_FLR: case OP_RCP: case OP_RSQ: case OP_MOVA: case OP_MOV: return 1;
+        case OP_MAD: return 3;
+        default: return 2;
+        }
+    }
+    // an arithmetic instruction of a geometry shader: false if it reads what this run hasn't set; else what it sets is noted
+    bool reads_set(const DInst &I) {
+        for (int k = 0; k < sources(I.op); k++) {
+            const u32 r = I.src[k];
+            if (I.rel == k && !(I.aidx == 3 ? loops > 0 : (es.flags >> (I.aidx - 1)) & 1)) return false;
+            if (r < REG_TMP && !((gs_in >> r) & 1)) return false;
+            if (r >= REG_TMP && r < REG_UNI)
+                for (int c = 0; c < 4; c++)
+                    if (!((es.temps >> ((r - REG_TMP) * 4 + I.sel[k][c])) & 1)) return false;
+        }
+        const Comps out = writes(I, w.bank);
+        es.written[w.bank] |= out.o[w.bank];
+        es.temps |= out.t;
+        es.flags |= out.f;
+        return true;
+    }
+    // a condition the flags this run set decide
+    bool cond_set(const DInst &I) const {
+        const u32 needs = I.fop == 2 ? 4 : I.fop == 3 ? 8 : 12;
+        return !gs || (es.flags & needs) == needs;
+    }
+    Emit now() const {
+        Emit e = es;
+        e.bank = w.bank;
+        return e;
+    }
+    void set(const Emit &e) {
+        es = e;
+        w.bank = e.bank;
+    }
+    // where two ways through the code meet (a: the first, which may not reach the meeting; b: the second): what both have set. Their banks
+    // must agree, or which registers the code after it writes would depend on the vertex.
+    void join(const Emit &a, bool a_reaches, const Emit &b, bool b_reaches) {
+        if (!a_reaches || !b_reaches) return set(a_reaches ? a : b);
+        if (a.bank != b.bank) fail = true;
+        Emit m = a;
+        m.vid = a.vid == b.vid ? a.vid : -1;
+        m.prim = a.prim == b.prim ? a.prim : -1;
+        m.wind = a.wind == b.wind ? a.wind : -1;
+        m.filled = a.filled & b.filled;
+        m.written[0] = a.written[0] & b.written[0];
+        m.written[1] = a.written[1] & b.written[1];
+        m.temps = a.temps & b.temps;
+        m.flags = a.flags & b.flags;
+        set(m);
+    }
+    // EMIT, as shader_run's: the outputs into the slot SETEMIT named, and with its primitive flag a triangle of the three slots, which
+    // pa_submit turns round on the winding flag where the draw's topology says so. False: it depends on what a run before left.
+    bool emit() {
+        if (es.vid < 0) return false;
+        if (es.vid < 3) {
+            if ((es.written[w.bank] & gs_need) != gs_need || es.prim < 0 || (es.prim && es.wind < 0)) return false;
+            for (u32 r = 0; r < 16; r++)
+                if ((gs_out >> r) & 1) w.f("    s%d_%u = go%d[%u];\n", es.vid, r, w.bank, r);
+            es.filled |= 1u << es.vid;
+            if (es.prim) {
+                if (es.filled != 7) return false;
+                static const int straight[3] = {0, 1, 2}, turned[3] = {1, 0, 2};
+                const int *order = es.wind && gs_wind ? turned : straight;
+                w.o += "    if (gtri == wantT) {\n";
+                for (int j = 0; j < 3; j++) {
+                    w.f("        %sif (wantJ == %d) {", j ? "else " : "", j);
+                    for (u32 r = 0; r < 16; r++)
+                        if ((gs_out >> r) & 1) w.f(" co[%u] = s%d_%u;", r, order[j], r);
+                    w.o += " }\n";
+                }
+                w.o += "        got = true;\n    }\n    gtri++;\n";
+                tris++;
+            }
+        }
+        w.bank ^= 1;
+        return true;
+    }
     // end-check addresses of the active regions: shader_run tests every region type against the address
     // after the last executed instruction, so two active regions must never share one
     std::vector<u32> ends;
@@ -1138,6 +1269,164 @@ struct SpecGen {
         return true;
     }
     static bool plain(const DInst &I) { return I.op <= OP_MAD || I.op == OP_NOP; }
+    bool emits_in(u32 s, u32 e) const {
+        for (u32 k = s; k < e && k < n; k++)
+            if (P->ins[k].op == OP_EMIT) return true;
+        return false;
+    }
+
+    // Register components, as a turn of a loop reads and writes them: temporaries (register * 4 + component), outputs in each bank,
+    // a0 a1 c0 c1
+    struct Comps {
+        u64 t = 0, o[2] = {0, 0};
+        u32 f = 0;
+        bool any() const { return t || o[0] || o[1] || f; }
+        Comps operator&(const Comps &x) const {
+            Comps r;
+            r.t = t & x.t, r.o[0] = o[0] & x.o[0], r.o[1] = o[1] & x.o[1], r.f = f & x.f;
+            return r;
+        }
+        Comps operator~() const {
+            Comps r;
+            r.t = ~t, r.o[0] = ~o[0], r.o[1] = ~o[1], r.f = ~f;
+            return r;
+        }
+        Comps &operator|=(const Comps &x) {
+            t |= x.t, o[0] |= x.o[0], o[1] |= x.o[1], f |= x.f;
+            return *this;
+        }
+    };
+    // what an arithmetic instruction reads (every component its swizzles name) and writes, its outputs in bank bk
+    Comps reads(const DInst &I) const {
+        Comps c;
+        for (int k = 0; k < sources(I.op); k++) {
+            const u32 r = I.src[k];
+            if (r >= REG_TMP && r < REG_UNI)
+                for (int x = 0; x < 4; x++) c.t |= 1ull << ((r - REG_TMP) * 4 + I.sel[k][x]);
+            if (I.rel == k && (I.aidx == 1 || I.aidx == 2)) c.f |= 1u << (I.aidx - 1);
+        }
+        return c;
+    }
+    static Comps writes(const DInst &I, int bk) {
+        Comps c;
+        u64 m = 0;
+        for (int x = 0; x < 4; x++)
+            if (I.mask[x]) m |= 1ull << x;
+        switch (I.op) {
+        case OP_NOP: break;
+        case OP_MOVA: c.f = (u32)(m & 3); break;
+        case OP_CMP: c.f = (I.cmpx < 6 ? 4u : 0u) | (I.cmpy < 6 ? 8u : 0u); break;
+        default:
+            if (I.op == OP_LITP) c.f = 12;
+            if (I.dst >= REG_OUT && I.dst < REG_ZERO) c.o[bk] = m << (((I.dst - REG_OUT) & 15) * 4);
+            else if (I.dst >= REG_TMP && I.dst < REG_UNI) c.t = m << ((I.dst - REG_TMP) * 4);
+        }
+        return c;
+    }
+
+    // A loop whose body emits (Luigi's Mansion 2's rain trail: 19 turns of 22 emits, each turn's corners from its own uniforms and from what
+    // the turn before left). Each vertex of the GLSL shader wants one triangle, so it runs the turn holding that triangle (the last turn, for one
+    // after the loop) after just the part of the turn before that sets what a turn carries over. That is shader_run's result where the body is
+    // straight code of arithmetic, SETEMITs and EMITs at the top level, with an even number of emits (the banks come round), its first SETEMIT
+    // before its first EMIT, every triangle of corners its own turn emitted, and everything a turn carries over set from what that turn
+    // reads alone. Anything else stays with the CPU. The count, first aL and step are in the key (gsx_variant_key).
+    bool emitting_loop(const DInst &L, u32 s, u32 e) {
+        if (loops || ifs || calls || !iu) return false;
+        const u32 turns = iu[L.iid][0] + 1u;
+        std::vector<int> bank_at(e - s);
+        Comps body;  // what the body writes
+        int bk = w.bank;
+        u32 emits = 0, per_turn = 0, filled = 0;
+        for (u32 k = s; k < e; k++) {
+            const DInst &I = P->ins[k];
+            bank_at[k - s] = bk;
+            if (I.op == OP_SETEMIT) {
+                if (I.vid > 2) return false;
+                continue;
+            }
+            if (I.op == OP_EMIT) {
+                emits++;
+                bk ^= 1;
+                continue;
+            }
+            if (!plain(I)) return false;
+            body |= writes(I, bk);
+        }
+        // the triangles a turn makes, of corners it emitted itself, each emit named by the turn's own SETEMIT
+        int vid = -1, prim = 0;
+        for (u32 k = s; k < e; k++) {
+            const DInst &I = P->ins[k];
+            if (I.op == OP_SETEMIT) vid = I.vid, prim = I.prim;
+            if (I.op != OP_EMIT) continue;
+            if (vid < 0) return false;
+            filled |= 1u << vid;
+            if (prim) {
+                if (filled != 7) return false;
+                per_turn++;
+            }
+        }
+        if ((emits & 1) || !per_turn) return false;
+        // what a turn carries over (read before the turn writes it, and written in it), and whether a component's value at the turn's end
+        // depends on any of it
+        Comps done, tainted, carried;
+        for (u32 k = s; k < e; k++) {
+            const DInst &I = P->ins[k];
+            if (I.op == OP_SETEMIT) continue;
+            Comps in;
+            if (I.op == OP_EMIT) in.o[bank_at[k - s]] = gs_need;
+            else in = reads(I);
+            const Comps old = in & body & ~done;
+            carried |= old;
+            if (I.op == OP_EMIT) continue;
+            const Comps out = writes(I, bank_at[k - s]);
+            const bool from_old = old.any() || (in & tainted).any();
+            done |= out;
+            tainted = tainted & ~out;
+            if (from_old) tainted |= out;
+        }
+        if ((carried & tainted).any()) return false;
+        // the part of a turn that sets what the next carries over, found backwards from it
+        std::vector<char> part(e - s, 0);
+        Comps need = carried;
+        for (u32 k = e; k-- > s;) {
+            const DInst &I = P->ins[k];
+            if (I.op == OP_SETEMIT || I.op == OP_EMIT) continue;
+            const Comps out = writes(I, bank_at[k - s]);
+            if (!(out & need).any()) continue;
+            part[k - s] = 1;
+            need = need & ~out;
+            need |= reads(I);
+        }
+        // Integer arithmetic as floats, exact at these sizes: no integer divide or multiply, which no shader here has had, for the console's
+        // compiler or Cemu to meet first (each has failed on an integer operation before: the unsigned compare at OP_LOOP below).
+        const int k = counter++;
+        const int saved = w.bank;
+        for (u32 t = 0; t < turns; t++) w.al_values.push_back((int)iu[L.iid][1] + (int)t * (int)iu[L.iid][2]);  // as the GLSL counts them
+        // A vertex whose triangle came before the loop has it already and skips the loop. (Not a return at each triangle: each nests the
+        // rest of the program a level deeper in the compiled branches.)
+        w.f("    if (!got) { int tt%d = int((float(wantT - gtri) + 0.5) / %u.0);\n", k, per_turn);
+        w.f("    if (tt%d > %u) tt%d = %u;\n", k, turns - 1, k, turns - 1);
+        w.f("    if (tt%d > 0) {\n    %s = uInt[%u].y + int(float(tt%d - 1) * float(uInt[%u].z));\n", k, w.al, L.iid, k, L.iid);
+        for (u32 x = s; x < e; x++)
+            if (part[x - s]) {
+                w.bank = bank_at[x - s];
+                w.op(P->ins[x]);
+            }
+        w.bank = saved;
+        w.f("    }\n    gtri += int(float(tt%d) * %u.0);\n", k, per_turn);
+        w.f("    %s = uInt[%u].y + int(float(tt%d) * float(uInt[%u].z));\n", w.al, L.iid, k, L.iid);
+        const u32 tris_before = tris;
+        loops++;
+        emitting = true;
+        const bool reaches = block(s, e, true, L.iid);
+        emitting = false;
+        loops--;
+        w.al_values.clear();
+        if (!reaches || fail || w.bank != saved || tris - tris_before != per_turn) return false;
+        tris = tris_before + per_turn * turns;
+        w.f("    %s += uInt[%u].z; }\n", w.al, L.iid);
+        return true;
+    }
     // the last instruction of a region must be plain (or END), so that shader_run pops exactly that region there
     bool ends_plain(u32 s, u32 e) {
         return e <= s || (e - 1 < n && (plain(P->ins[e - 1]) || P->ins[e - 1].op == OP_END));
@@ -1157,11 +1446,19 @@ struct SpecGen {
             }
             const DInst &I = P->ins[i];
             if (w.op(I)) {
+                if (gs && !reads_set(I)) {
+                    fail = true;
+                    return false;
+                }
                 i++;
                 continue;
             }
             const u32 dst = I.fdst, num = I.fnum;
             u32 cont = i + 1;
+            if (((I.op == OP_BREAKC && loops) || I.op == OP_JMPC || I.op == OP_CALLC || I.op == OP_IFC) && !cond_set(I)) {
+                fail = true;
+                return false;
+            }
             switch (I.op) {
             case OP_END:
                 w.o += "    vs_output(P, o, outv, li); return;\n";
@@ -1174,17 +1471,16 @@ struct SpecGen {
                     return false;
                 }
                 if (I.op == OP_BREAK) {
-                    w.f("    aL += uInt[%d].z; break;\n", inc);
+                    w.f("    %s += uInt[%d].z; break;\n", w.al, inc);
                     return false;
                 }
-                w.o += "    if (" + w.cond(I) + ") { aL += uInt[" + std::to_string(inc) + "].z; break; }\n";
+                w.o += "    if (" + w.cond(I) + ") { " + w.al + " += uInt[" + std::to_string(inc) + "].z; break; }\n";
                 break;
             case OP_JMPU:
             case OP_JMPC: {
-                // A JMPU is settled by the variant's bools: one not taken does nothing, and one taken is a goto the code can follow, backwards too
-                // (Luigi's Mansion: Dark Moon's one vertex program jumps back on b14 at 0e5, 101, 141, 181... and all 108 of its variants that
-                // reach one ran on the console's CPU, at 1.6 fps). Only outside every call, if and loop, where no region ends between the two.
-                // An open bool (decided(), left to run time) isn't settled here: that one is written out below.
+                // A JMPU the variant's bools settle (an open one is written out below): one not taken does nothing, and one taken is a goto the
+                // code can follow, backwards too, outside every call, if and loop, where no region ends between the two. Luigi's Mansion 2's one
+                // vertex program jumps back on b14: every variant reaching one ran on the CPU, 1.6 fps on a console (Senne, darkmoon 965b3d5, 4bb53fe).
                 if (I.op == OP_JMPU && decided(I) && ((b >> I.bid) & 1) != !(num & 1)) break;
                 if (I.op == OP_JMPU && decided(I) && dst < i && dst < n && ends.empty() && !loops && !ifs && !calls) {
                     cont = dst;
@@ -1199,11 +1495,15 @@ struct SpecGen {
                     break;
                 }
                 // JMPU jumps on its bool being set, or with the low bit of num on its being clear
+                const Emit before = now();
                 w.o += "    if (" + (I.op == OP_JMPC ? w.cond(I) : (num & 1) ? "!(" + open_bool(I) + ")" : open_bool(I)) + ") {\n";
                 const bool r1 = block(dst, e, in_loop, inc);
+                const Emit jumped = now();
+                set(before);
                 w.o += "    } else {\n";
                 const bool r2 = block(i + 1, e, in_loop, inc);
                 w.o += "    }\n";
+                join(jumped, r1, now(), r2);
                 return r1 || r2;
             }
             case OP_CALL:
@@ -1219,12 +1519,16 @@ struct SpecGen {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
+                const Emit before = now();
                 if (dyn) w.o += "    if (" + (I.op == OP_CALLC ? w.cond(I) : open_bool(I)) + ") {\n";
                 calls++;
-                block(dst, dst + num, false, 0);
+                const bool returns = block(dst, dst + num, false, 0);
                 calls--;
                 ends.pop_back();
-                if (dyn) w.o += "    }\n";
+                if (dyn) {
+                    w.o += "    }\n";
+                    join(now(), returns, before, true);
+                }
                 if (cont == e) {  // shader_run would not pop the enclosing region on the return
                     fail = true; why = __LINE__; at = i;
                     return false;
@@ -1249,15 +1553,20 @@ struct SpecGen {
                     if (taken) block(i + 1, dst, false, 0);
                     else block(dst, dst + num, false, 0);
                 } else {
+                    const Emit before = now();
                     w.o += "    if (" + (I.op == OP_IFC ? w.cond(I) : open_bool(I)) + ") {\n";
-                    block(i + 1, dst, false, 0);
+                    const bool r1 = block(i + 1, dst, false, 0);
+                    const Emit then = now();
+                    set(before);
+                    bool r2 = true;
                     if (num) {
                         w.o += "    } else {\n";
                         ends.pop_back();
-                        block(dst, dst + num, false, 0);
+                        r2 = block(dst, dst + num, false, 0);
                         ends.push_back(dst);
                     }
                     w.o += "    }\n";
+                    join(then, r1, now(), r2);
                 }
                 if (taken) ends.pop_back();
                 ifs--;
@@ -1276,22 +1585,39 @@ struct SpecGen {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
+                if (gs && emits_in(i + 1, dst + 1)) {
+                    const bool made = emitting_loop(I, i + 1, dst + 1);
+                    ends.pop_back();
+                    cont = dst + 1;
+                    if (!made || cont == e) {
+                        fail = true;
+                        return false;
+                    }
+                    break;
+                }
                 // The count, start and step come from the uniform block (uInt, the integer uniforms the key already fixes), not the number itself:
                 // a bound the compiler can see gets the loop unrolled, and a 7-turn body of relative reads never came out of CafeGLSL on a console.
                 // Counted with signed numbers (the count is a byte): from an unsigned compare the console's compiler makes PRED_SETGE_UINT, which
                 // no program the PC's compiler makes holds and Cemu doesn't know, so there the draws of a shader compiled on the console vanished.
                 const int k = counter++;
-                w.f("    aL = uInt[%u].y;\n    for (int it%d = 0; it%d <= uInt[%u].x; it%d++) {\n", I.iid, k, k, I.iid, k);
+                w.f("    %s = uInt[%u].y;\n    for (int it%d = 0; it%d <= uInt[%u].x; it%d++) {\n", w.al, I.iid, k, k, I.iid, k);
                 loops++;
                 const int saved_ifs = ifs, saved_calls = calls;
                 ifs = calls = 0;  // a BREAKC directly in this body ends this loop
+                const Emit before = now();
                 block(i + 1, dst + 1, true, I.iid);
                 ifs = saved_ifs;
                 calls = saved_calls;
                 loops--;
                 ends.pop_back();
-                w.f("    aL += uInt[%u].z;\n    }\n", I.iid);
-                if (loops) w.f("    aL = uInt[%u].y;\n", I.iid);  // shader_run restores the counter it saved: this loop's start
+                w.f("    %s += uInt[%u].z;\n    }\n", w.al, I.iid);
+                if (loops) w.f("    %s = uInt[%u].y;\n", w.al, I.iid);  // shader_run restores the counter it saved: this loop's start
+                // a BREAKC may have left the body before any of it: only what was set before the loop is sure (emits stay out of loops)
+                join(before, true, now(), true);
+                es.written[0] = before.written[0];
+                es.written[1] = before.written[1];
+                es.temps = before.temps;
+                es.flags = before.flags;
                 cont = dst + 1;
                 if (cont == e) {
                     fail = true; why = __LINE__; at = i;
@@ -1299,8 +1625,23 @@ struct SpecGen {
                 }
                 break;
             }
-            default:  // EMIT/SETEMIT
-                fail = true; why = __LINE__; at = i;
+            case OP_SETEMIT:
+                if (!gs) {
+                    fail = true;
+                    return false;
+                }
+                es.vid = I.vid;
+                es.prim = I.prim;
+                es.wind = I.wind;
+                break;
+            case OP_EMIT:
+                if (!gs || (loops && !emitting) || !emit()) {
+                    fail = true;
+                    return false;
+                }
+                break;
+            default:
+                fail = true;
                 return false;
             }
             i = cont;
@@ -1310,13 +1651,7 @@ struct SpecGen {
 };
 }  // namespace
 
-// The body of main() for GLSL (port/wiiu/shadergen.cpp declares the registers and helpers).
-int shader_glsl_fail_line;  // why the last shader_glsl_spec gave up: the line in this file, and the instruction
-u32 shader_glsl_fail_at;
-
-std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open) {
-    const u32 n = (u32)P->ins.size();
-    if (entry >= n) return "";
+static u32 inputs_read(const ShaderProgram *P) {
     u32 in_used = 0;
     for (const DInst &I : P->ins) {
         const int ns = I.op == OP_MAD ? 3 : 2;
@@ -1324,28 +1659,26 @@ std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 
             for (int k = 0; k < ns; k++)
                 if (I.src[k] < REG_TMP) in_used |= 1u << I.src[k];
     }
-    *inputs = in_used;
-    MslWriter w{P};
-    w.al = "aL";
-    SpecGen g{w, P, n, b, iu, open};
-    g.block(entry, n, false, 0);
-    if (g.fail) {
-        shader_glsl_fail_line = g.why;
-        shader_glsl_fail_at = g.at;
-        return "";
-    }
-    std::string s = w.o;
+    return in_used;
+}
+
+// The Metal-flavoured text SpecGen writes, as GLSL. gs: a geometry shader's (shader_glsl_gs), whose END ends its own function.
+static std::string glsl_text(std::string s, bool gs) {
     auto replace_all = [&](const char *from, const char *to) {
         const std::string f = from, t = to;
         for (size_t at = s.find(f); at != std::string::npos; at = s.find(f, at + t.size())) s.replace(at, f.size(), t);
     };
-    replace_all("vs_output(P, o, outv, li); return;", "vs_output(); return;");
+    replace_all("vs_output(P, o, outv, li); return;", gs ? "return;" : "vs_output(); return;");
+    if (gs) replace_all("uInt[", "gInt[");
     replace_all("const float4", "vec4");
     replace_all("float4(1.0 / ", "vs_lim(1.0 / ");  // gen_vs_glsl says why
     replace_all("float4", "vec4");
     replace_all("precise::", "");
     replace_all("P.f[", "f[");
+    replace_all("P.gf[", "gf[");
     replace_all("vs_rel(P, ", "vs_rel(");
+    replace_all("gs_rel(P, ", "gs_rel(");
+    replace_all("gs_ru(P, ", "gs_ru(");
     replace_all("select(vec4(0.0), vec4(1.0), ", "SEL(");
     replace_all("uint it", "int it");
     for (char op : {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}) {
@@ -1368,6 +1701,50 @@ std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 
         s.replace(at, end - at, std::string(ge ? "sel_ge(" : "sel_lt(") + lhs + ", " + rhs + ")");
     }
     return s;
+}
+
+// The body of main() for GLSL (port/wiiu/shadergen.cpp declares the registers and helpers).
+int shader_glsl_fail_line;  // why the last shader_glsl_spec gave up: the line in this file, and the instruction
+u32 shader_glsl_fail_at;
+
+std::string shader_glsl_spec(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u32 *inputs, u32 open) {
+    const u32 n = (u32)P->ins.size();
+    if (entry >= n) return "";
+    *inputs = inputs_read(P);
+    MslWriter w{P};
+    w.al = "aL";
+    SpecGen g{w, P, n, b, iu, open};
+    g.block(entry, n, false, 0);
+    if (g.fail) {
+        shader_glsl_fail_line = g.why;
+        shader_glsl_fail_at = g.at;
+        return "";
+    }
+    return glsl_text(w.o, false);
+}
+
+std::string shader_glsl_gs(const ShaderProgram *P, u32 entry, u32 b, const u8 (*iu)[4], u64 out_comps, u32 in_regs, bool turns, u32 *tris,
+                           u32 prim_lo, u32 prim_hi) {
+    const u32 n = (u32)P->ins.size();
+    if (entry >= n || !out_comps) return "";
+    MslWriter w{P};
+    w.al = "gaL";
+    w.pre = "g";
+    w.uni = "gf";
+    w.bank = 0;
+    w.prim_lo = prim_lo;
+    w.prim_hi = prim_hi;
+    SpecGen g{w, P, n, b, iu, 0};
+    g.gs = true;
+    g.gs_need = out_comps;
+    for (u32 r = 0; r < 16; r++)
+        if ((out_comps >> (4 * r)) & 15) g.gs_out |= 1u << r;
+    g.gs_in = in_regs;
+    g.gs_wind = turns;
+    g.block(entry, n, false, 0);
+    if (g.fail || !g.tris) return "";
+    *tris = g.tris;
+    return glsl_text(w.o, true);
 }
 
 std::string shader_msl_spec(const ShaderProgram *P, u32 entry, const char *name, u32 b, const u8 (*iu)[4]) {

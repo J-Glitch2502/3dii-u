@@ -17,7 +17,7 @@ from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QSize, QStanda
 from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog, QInputDialog
 
 import covers
 import credits
@@ -25,6 +25,7 @@ import decrypt
 import dumps
 import mods
 import pipeline
+import saves
 import updater
 import user_files
 
@@ -37,6 +38,13 @@ DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
 NO_ART = "The game's own icon"
+NO_ICON_ART = 'The same as the art'  # the Wii U Menu icon without a picture of its own
+NO_BEZEL = 'Black'  # the GamePad beside the screens without a picture
+NO_PAD_ART = 'The same as the TV'  # the GamePad's start-up screen without a picture of its own
+NO_SAVE = 'None: the game starts a save of its own'  # no 3DS save packed in
+NO_GAME_SOUND = 'The one for all games'  # a game without a start-up sound of its own: the one for every game, if there is one
+BOOT_SOUND = os.path.join(os.path.dirname(pipeline.ARCHIVES), 'boot_sound.btsnd')  # where every build picks it up (tools/make_game_title.py)
+GAME_SOUNDS = os.path.join(os.path.dirname(BOOT_SOUND), 'boot_sounds')  # a game's own, <title id>.btsnd
 LIBRARY_MAX = 40  # games the Games page remembers
 # What each of "Your Files" is and how to get it from your own consoles: the Info buttons, and the message when one is missing.
 # Testers asked what the system files were and how to get seeddb.bin (Nov 9 and 10).
@@ -73,6 +81,25 @@ HELP = {
 def settings_file():
     base = os.environ.get('APPDATA') if WIN else os.path.join(os.path.expanduser('~'), '.config')
     return os.path.join(base or HERE, APP, 'settings.json')
+
+
+def covers_folder():
+    return os.path.join(os.path.dirname(settings_file()), 'covers')
+
+
+FROM_SGDB, FROM_TDB = 'From SteamGridDB', 'From GameTDB'
+
+
+def picked(path):
+    """whether a picture is one the player chose, not one fetched into the covers folder (covers.py)"""
+    return bool(path) and os.path.dirname(os.path.abspath(path)) != os.path.abspath(covers_folder())
+
+
+def source(path):
+    """a picture's line in the window: where it was fetched from, or its file's name"""
+    if picked(path):
+        return os.path.basename(path)
+    return FROM_SGDB if os.path.basename(path).startswith('sgdb_') else FROM_TDB
 
 
 def load_settings():
@@ -196,7 +223,7 @@ def theme():
     light = {'pageTop': '#ffffff', 'pageBottom': '#eef1f0', 'card': '#cbd2d0', 'gloss': '#dde1e0', 'shadow': '#40000000',
              'title': '#7e8b88', 'sub': '#a8b3b0', 'label': '#6c7976', 'subLabel': '#a3aeab',
              'cyanBase': '#9fdde8', 'cyanText': '#35b5cb', 'redBase': '#eba3aa', 'redText': '#c93a4c', 'greyBase': '#bfc7c5', 'greyText': '#6c7976',
-             'lightRed': '#c9283c', 'lightCyan': '#2fb4cc', 'lightGrey': '#aab4b1', 'socket': '#98a3a0',
+             'lightRed': '#c9283c', 'lightCyan': '#2fb4cc', 'lightGreen': '#3aa856', 'lightGrey': '#aab4b1', 'socket': '#98a3a0',
              'tileGloss': '#ffffff', 'tileBase': '#cdd3d1', 'plus': '#8b9996', 'buildText': '#3c4846',
              'rail': '#e6e9e8', 'railTop': '#dde1e0', 'railActive': '#f3f5f4', 'railLine': '#fbfcfc', 'railEdge': '#cfd5d3', 'railText': '#7b8885',
              'help': '#5c6a67', 'helpActive': '#6e7d7a', 'helpText': '#ffffff', 'helpRing': '#3c4846', 'helpFace': '#ffffff',
@@ -217,7 +244,9 @@ def theme():
 # ---- what the window shows, and what its buttons do
 class App(QObject):
     changed = Signal()
-    coverReady = Signal(str, str)  # title id, path: from fetch_cover's thread
+    coverReady = Signal(str, str, str)  # title id, the picture's path, the icon's: from fetch_cover's thread
+    layoutWanted = Signal(str)  # setLayout: run() swaps the window
+    keyRefused = Signal()  # SteamGridDB turned the key down: from fetch_cover's thread
     updateEvent = Signal(str, object)  # what, value: from the updater's worker threads, the value passed as it is
     logChanged = Signal()
 
@@ -229,6 +258,11 @@ class App(QObject):
     updateText, hasUpdate, dlcText, hasDlc = _p(str, 'updateText'), _p(bool, 'hasUpdate'), _p(str, 'dlcText'), _p(bool, 'hasDlc')
     modText, hasMod = _p(str, 'modText'), _p(bool, 'hasMod')
     artText, hasArt, artUrl = _p(str, 'artText'), _p(bool, 'hasArt'), _p(str, 'artUrl')
+    iconText, hasIconArt, iconArtUrl, tileUrl = _p(str, 'iconText'), _p(bool, 'hasIconArt'), _p(str, 'iconArtUrl'), _p(str, 'tileUrl')
+    bezelText, hasBezel = _p(str, 'bezelText'), _p(bool, 'hasBezel')
+    padArtText, hasPadArt, gameSoundText, hasGameSound = _p(str, 'padArtText'), _p(bool, 'hasPadArt'), _p(str, 'gameSoundText'), _p(bool, 'hasGameSound')
+    saveText, hasSave = _p(str, 'saveText'), _p(bool, 'hasSave')
+    artKeySet, soundSet, artStyle = _p(bool, 'artKeySet'), _p(bool, 'soundSet'), _p(str, 'artStyle')
     library = _p('QVariantList', 'library')
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
@@ -249,7 +283,11 @@ class App(QObject):
         if not self.st.get('keys'):
             self.st['keys'] = decrypt.KEYS_DEFAULT
         decrypt.use_keys(self.st['keys'])
-        self.game = self.update = self.dlc = self.mod = self.art = None  # the mod and the banner art are paths
+        self.game = self.update = self.dlc = self.mod = self.art = self.icon_art = None  # the mod, the banner art and the icon art are paths
+        self.bezel = None  # the GamePad's picture beside the screens, a path
+        self.pad_art = self.game_sound = None  # the GamePad's start-up picture and the game's start-up sound (a .btsnd), paths
+        self.save_in = None  # the folder of a 3DS save to pack into the build (saves.py)
+        self.refused_key = None  # the SteamGridDB key it turned down, if it did (fetch_cover)
         self.proc, self.result, self.cancelled = None, None, False
         self.lines, self.log_lines, self.dialogs, self.flow = queue.Queue(), [], [], None
         compat = json.load(open(os.path.join(HERE, 'compat.json'), encoding='utf-8'))
@@ -262,7 +300,7 @@ class App(QObject):
         theme_mode = self.st.get('theme')
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
-                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
+                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', iconText=NO_ART, hasIconArt=False, iconArtUrl='', tileUrl='', bezelText=NO_BEZEL, hasBezel=False, padArtText=NO_PAD_ART, hasPadArt=False, gameSoundText=NO_GAME_SOUND, hasGameSound=False, saveText=NO_SAVE, hasSave=False, artKeySet=bool(self.st.get('sgdb_key')), soundSet=os.path.isfile(BOOT_SOUND), artStyle=self.st.get('art_style', 'console'), library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
                        otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
@@ -282,6 +320,7 @@ class App(QObject):
         QGuiApplication.styleHints().colorSchemeChanged.connect(self.apply_theme)  # "system" follows Windows switching while the window is open
         self.apply_theme()
         self.coverReady.connect(self.cover_ready)
+        self.keyRefused.connect(self.key_refused)
         self.refresh_library()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
@@ -326,6 +365,24 @@ class App(QObject):
     @Slot()
     def about(self):
         self.tell(f'About {APP}', credits.about())
+
+    @Slot(str)
+    def setLayout(self, name):
+        """the modern window (ui/Main.qml) or the simple one (ui/Simple.qml): kept in the settings, and the window swapped at once (run)"""
+        if name not in ('modern', 'simple') or self._s['building']:
+            return
+        self.st['layout'] = name
+        save_settings(self.st)
+        self.layoutWanted.emit(name)
+
+    @Slot(str)
+    def setArtStyle(self, style):
+        """the start-up screens: the art as it is, or laid out as the Wii U's Virtual Console shows a game (tools/make_game_title.py, console_screens)"""
+        if style not in ('picture', 'console'):
+            return
+        self.st['art_style'] = style
+        save_settings(self.st)
+        self.set(artStyle=style)
 
     @Slot(str)
     def setThemeMode(self, mode):
@@ -393,9 +450,18 @@ class App(QObject):
         self.set_extra('dlc', None)
         self.set_extra('mod', None)
         saved = self.st.get('art', {}).get(f'{d.title_id:016x}')  # a game keeps the banner art chosen for it; '' is "none, on purpose"
-        self.set_art(saved if saved and os.path.isfile(saved) else None, remember=False)
+        icon = self.st.get('icon_art', {}).get(f'{d.title_id:016x}')
+        self.set_art(saved if saved and os.path.isfile(saved) else None, icon if icon and os.path.isfile(icon) else None, remember=False)
+        bezel = self.st.get('pad_bezel', {}).get(f'{d.title_id:016x}')
+        self.set_bezel(bezel if bezel and os.path.isfile(bezel) else None, remember=False)
+        pad_art = self.st.get('pad_art', {}).get(f'{d.title_id:016x}')
+        self.set_pad_art(pad_art if pad_art and os.path.isfile(pad_art) else None, remember=False)
+        sound = self.st.get('boot_sound', {}).get(f'{d.title_id:016x}')
+        self.set_game_sound(sound if sound and os.path.isfile(sound) else None, remember=False)
+        save = self.st.get('save_in', {}).get(f'{d.title_id:016x}')
+        self.set_save(save if save and os.path.isdir(save) else None, remember=False)
         if saved is None:  # nothing chosen yet: its cover art, fetched off the window's thread
-            threading.Thread(target=self.fetch_cover, args=(d,), daemon=True).start()
+            threading.Thread(target=self.fetch_cover, args=(d, info['name']), daemon=True).start()
         self.refresh_files()
         self.remember_game(d, info['name'])
         if ask:  # a game picked again from the library keeps quiet
@@ -412,10 +478,11 @@ class App(QObject):
     def refresh_library(self):
         """what the window shows of each remembered game: its name, its picture (the cover if this PC has it, else its own icon), and
         which one is open"""
-        covers_dir = os.path.join(os.path.dirname(settings_file()), 'covers')
+        covers_dir = covers_folder()
         shown = []
         for g in self.st.get('library', []):
-            art = self.st.get('art', {}).get(g['id']) or os.path.join(covers_dir, (covers.game_code(g['product']) or '-') + '.jpg')
+            art = (self.st.get('icon_art', {}).get(g['id']) or self.st.get('art', {}).get(g['id'])  # a square icon fills a tile best
+                   or os.path.join(covers_dir, (covers.game_code(g['product']) or '-') + '.jpg'))
             cover = QUrl.fromLocalFile(art).toString() if os.path.isfile(art) else ''
             shown.append(dict(path=g['path'], name=g['name'], icon=g['icon'], cover=cover, current=bool(self.game and self.game.path == g['path'])))
         self.set(library=shown)
@@ -515,45 +582,223 @@ class App(QObject):
         m.close()
         self.set_extra('mod', path, ', '.join(parts))
 
-    @Slot()
-    def chooseArt(self):
-        path = QFileDialog.getOpenFileName(None, f'A picture for {self._s["gameName"]}: its cover art, say', self.st.get('art_folder', ''),
-                                           'Pictures (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)')[0]
+    def ask_picture(self, title):
+        """a picture the player picks, or None"""
+        path = QFileDialog.getOpenFileName(None, title, self.st.get('art_folder', ''), 'Pictures (*.png *.jpg *.jpeg *.bmp *.webp);;All files (*.*)')[0]
         if not path:
-            return
+            return None
         if QImage(path).isNull():
             self.tell("That picture can't be read", 'Choose a PNG or JPEG picture.', 'error')
-            return
+            return None
         self.st['art_folder'] = os.path.dirname(path)
-        self.set_art(path)
+        return path
+
+    @Slot()
+    def chooseArt(self):
+        path = self.ask_picture(f'A picture for {self._s["gameName"]}: its cover art, say')
+        if path:
+            self.set_art(path, self.icon_art if picked(self.icon_art) else None)  # an icon the player picked stays, a fetched one goes with the old art
+
+    @Slot()
+    def chooseIcon(self):
+        path = self.ask_picture(f'A square picture for the Wii U Menu icon of {self._s["gameName"]}')
+        if path:
+            self.set_art(self.art, path)
 
     @Slot()
     def removeArt(self):
-        self.set_art(None)
+        self.set_art(None, removed=True)
 
-    def fetch_cover(self, game):
-        """on a thread of its own: the game's cover art from GameTDB (covers.py), handed to the window's thread when it's here"""
-        path = covers.cover(game.product, os.path.join(os.path.dirname(settings_file()), 'covers'))
+    @Slot()
+    def removeIcon(self):
+        self.set_art(self.art, None)
+
+    @Slot()
+    def chooseBezel(self):
+        path = self.ask_picture(f'A bezel or overlay for the GamePad beside the screens of {self._s["gameName"]}: any picture, scaled to fill it')
         if path:
-            self.coverReady.emit(f'{game.title_id:016x}', path)
+            self.set_bezel(path)
 
-    def cover_ready(self, title_id, path):
+    @Slot()
+    def removeBezel(self):
+        self.set_bezel(None)
+
+    def set_bezel(self, path, remember=True):
+        """the picture the GamePad shows where it shows no screen (tools/make_game_title.py, bezel_pixels), remembered for the game"""
+        self.bezel = path
+        if self.game and remember:
+            self.keep_for_game('pad_bezel', path)
+        self.set(bezelText=os.path.basename(path) if path else NO_BEZEL, hasBezel=bool(path))
+
+    def keep_for_game(self, key, path):
+        """a path chosen for the open game (settings[key][title id]), or forgotten with None"""
+        chosen = self.st.setdefault(key, {})
+        if path:
+            chosen[f'{self.game.title_id:016x}'] = path
+        else:
+            chosen.pop(f'{self.game.title_id:016x}', None)
+        save_settings(self.st)
+
+    @Slot()
+    def choosePadArt(self):
+        path = self.ask_picture(f'A picture for the GamePad while {self._s["gameName"]} starts, shown as it is')
+        if path:
+            self.set_pad_art(path)
+
+    @Slot()
+    def removePadArt(self):
+        self.set_pad_art(None)
+
+    def set_pad_art(self, path, remember=True):
+        """the GamePad's start-up screen of its own (tools/make_game_title.py, pad_art), remembered for the game"""
+        self.pad_art = path
+        if self.game and remember:
+            self.keep_for_game('pad_art', path)
+        self.set(padArtText=os.path.basename(path) if path else NO_PAD_ART, hasPadArt=bool(path))
+
+    @Slot()
+    def chooseGameSound(self):
+        sound = os.path.join(GAME_SOUNDS, f'{self.game.title_id:016x}.btsnd')
+        if self.ask_sound(f'A sound to play while {self._s["gameName"]} starts', sound):
+            self.set_game_sound(sound)
+
+    @Slot()
+    def removeGameSound(self):
+        if self.game_sound:
+            try:
+                os.remove(self.game_sound)
+            except OSError:
+                pass  # forgotten either way: the build goes back to the sound for every game
+        self.set_game_sound(None)
+
+    def set_game_sound(self, path, remember=True):
+        """the game's own start-up sound, a .btsnd made from the player's WAV (tools/make_boot_sound.py), remembered for the game"""
+        self.game_sound = path
+        if self.game and remember:
+            self.keep_for_game('boot_sound', path)
+        self.set(gameSoundText='Its own' if path else NO_GAME_SOUND, hasGameSound=bool(path))
+
+    @Slot()
+    def bringSave(self):
+        """a 3DS save to pack into the game's build, which the game takes in on the console (saves.py)"""
+        chosen = QFileDialog.getExistingDirectory(None, f"The folder with the save of {self._s['gameName']}: Checkpoint's, JKSM's or an emulator's",
+                                                  self.st.get('save_folder', ''))
+        if not chosen:
+            return
+        self.st['save_folder'] = os.path.dirname(chosen)
+        save_settings(self.st)
+        try:
+            saves.checked(chosen)
+        except (saves.SaveError, OSError) as e:
+            self.tell("That folder can't be used", str(e), 'error')
+            return
+        self.set_save(chosen)
+
+    @Slot()
+    def removeSave(self):
+        self.set_save(None)
+
+    def set_save(self, path, remember=True):
+        """the folder of the save to pack into the build, remembered for the game"""
+        self.save_in = path
+        if self.game and remember:
+            self.keep_for_game('save_in', path)
+        self.set(saveText=os.path.basename(os.path.normpath(path)) if path else NO_SAVE, hasSave=bool(path))
+
+    def fetch_cover(self, game, name):
+        """on a thread of its own: the game's banner and icon from SteamGridDB where the player gave a key, its cover from GameTDB otherwise
+        and for what SteamGridDB lacks (covers.py), handed to the window's thread when they're here"""
+        folder, title_id, key = covers_folder(), f'{game.title_id:016x}', self.st.get('sgdb_key')
+        found = {}
+        try:
+            # a game SteamGridDB doesn't know by this region's name is looked for by the others' (GameTDB's list): Luigi's Mansion 2 is Dark Moon
+            also = lambda: covers.other_names(game.product, folder)  # noqa: E731
+            found = (covers.steamgriddb(name, key, folder, title_id, also=also) if key and key != self.refused_key else None) or {}
+        except covers.BadKey:
+            self.refused_key = key  # not asked with again until it's changed, and said once
+            self.keyRefused.emit()
+        cover = None if found.get('banner') and found.get('icon') else covers.cover(game.product, folder)
+        banner, icon = found.get('banner') or cover, found.get('icon') or (cover if found.get('banner') else None)
+        if banner or icon:
+            self.coverReady.emit(title_id, banner or '', icon or '')
+
+    def cover_ready(self, title_id, path, icon):
+        # fetched art where the game has none; an icon the player picked stays
         if self.game and f'{self.game.title_id:016x}' == title_id and not self.art and not self._s['building']:
-            self.set_art(path)
+            self.set_art(path or None, self.icon_art if picked(self.icon_art) else (icon or None))
         self.refresh_library()
 
-    def set_art(self, path, remember=True):
-        """the picture this game's start-up screens and Wii U Menu icon are made from, remembered for the game: a path, or '' once the
-        player has removed it, so its cover isn't fetched again"""
-        self.art = path
+    def key_refused(self):
+        self.tell("SteamGridDB didn't take the key", 'Check it on the Help page, under Art and sound: it is the long code on steamgriddb.com under '
+                  'Preferences, API. Until then the art comes from GameTDB.', 'warn')
+
+    def set_art(self, path, icon=None, remember=True, removed=False):
+        """the pictures this game's start-up screens and Wii U Menu icon are made from, remembered for the game: path for both, or for the
+        screens alone where icon is the icon's. removed: the player took the art away, remembered as '' so none is fetched again"""
+        self.art, self.icon_art = path, icon
         if self.game and remember:
-            self.st.setdefault('art', {})[f'{self.game.title_id:016x}'] = path or ''
+            title, arts, icons = f'{self.game.title_id:016x}', self.st.setdefault('art', {}), self.st.setdefault('icon_art', {})
+            if path or removed:
+                arts[title] = path or ''
+            else:
+                arts.pop(title, None)  # none chosen yet: the next time the game opens, its art is looked for again
+            if icon:
+                icons[title] = icon
+            else:
+                icons.pop(title, None)
             save_settings(self.st)
-        cover = bool(path) and os.path.dirname(path) == os.path.join(os.path.dirname(settings_file()), 'covers')
-        self.set(artText=('Its cover art, from GameTDB' if cover else os.path.basename(path)) if path else NO_ART, hasArt=bool(path),
-                 artUrl=QUrl.fromLocalFile(path).toString() if path else '')  # the Build page's tile shows it
+        url = lambda p: QUrl.fromLocalFile(p).toString() if p else ''  # noqa: E731
+        self.set(artText=source(path) if path else NO_ART, hasArt=bool(path or icon), artUrl=url(path),
+                 iconText=source(icon) if icon else NO_ICON_ART if path else NO_ART, hasIconArt=bool(icon), iconArtUrl=url(icon),
+                 tileUrl=url(icon or path))  # the Build page's tile: a square icon fills it best
         if remember:
             self.refresh_library()
+
+    @Slot()
+    def setArtKey(self):
+        key, ok = QInputDialog.getText(None, 'SteamGridDB', 'Your SteamGridDB API key: the long code on steamgriddb.com under Preferences, API.\n'
+                                       "It stays on this PC, in the builder's settings. Leave it empty to stop asking SteamGridDB.")
+        if not ok:
+            return
+        self.st['sgdb_key'] = key.strip()
+        save_settings(self.st)
+        self.set(artKeySet=bool(self.st['sgdb_key']))
+        removed = self.game and self.st.get('art', {}).get(f'{self.game.title_id:016x}') == ''  # on purpose: it stays removed
+        if self.game and self.st['sgdb_key'] and not self._s['building'] and not removed and (not self.art or source(self.art) == FROM_TDB):
+            # the open game's fetched art, again from the new place; a picture the player chose stays
+            self.set_art(None, self.icon_art if picked(self.icon_art) else None, remember=False)
+            threading.Thread(target=self.fetch_cover, args=(self.game, self._s['gameName']), daemon=True).start()
+
+    def ask_sound(self, title, to):
+        """a sound the player picks, made into a start-up sound at to (tools/make_boot_sound.py); False if none, or after saying why not"""
+        path = QFileDialog.getOpenFileName(None, title, self.st.get('sound_folder', ''), 'Sounds (*.wav *.btsnd);;All files (*.*)')[0]
+        if not path:
+            return False
+        self.st['sound_folder'] = os.path.dirname(path)
+        save_settings(self.st)
+        try:
+            data = pipeline.tool('make_boot_sound').boot_sound(path)
+            os.makedirs(os.path.dirname(to), exist_ok=True)
+            with open(to, 'wb') as f:
+                f.write(data)
+        except (OSError, ValueError, EOFError, ImportError) as e:
+            self.tell("That sound can't be used", f'{e}. Choose a WAV file: most sound programs can save one.', 'error')
+            return False
+        return True
+
+    @Slot()
+    def chooseSound(self):
+        if self.ask_sound('A sound to play while your games start', BOOT_SOUND):
+            self.set(soundSet=True)
+
+    @Slot()
+    def removeSound(self):
+        try:
+            if os.path.isfile(BOOT_SOUND):
+                os.remove(BOOT_SOUND)
+        except OSError as e:
+            self.tell("The sound couldn't be removed", str(e), 'error')
+        self.set(soundSet=os.path.isfile(BOOT_SOUND))
 
     @Slot(str)
     def removeExtra(self, kind):
@@ -855,7 +1100,17 @@ class App(QObject):
         if self.mod:
             argv += ['--mod', self.mod]
         if self.art:
-            argv += ['--art', self.art]
+            argv += ['--art', self.art, '--art-style', self._s['artStyle'], '--tdb', covers_folder()]
+        if self.icon_art:
+            argv += ['--icon-art', self.icon_art]
+        if self.bezel:
+            argv += ['--pad-bezel', self.bezel]
+        if self.pad_art:
+            argv += ['--pad-art', self.pad_art]
+        if self.game_sound:
+            argv += ['--boot-sound', self.game_sound]
+        if self.save_in:
+            argv += ['--save', self.save_in]
         self.log_lines, self.result, self.cancelled = [], None, False
         stages = [n for n, _ in pipeline.STAGES if n != 'Copying' or self._s['target'] == 'card']
         self.set(building=True, view='building', stages=stages, stage=0, failed=False, progress=0.0, detail='Starting...', log='')
@@ -883,7 +1138,7 @@ class App(QObject):
                     if name in self._s['stages']:
                         self.set(stage=self._s['stages'].index(name))
                 elif line.startswith('@progress '):
-                    self.set(progress=float(line.split()[1]))
+                    self.set(progress=float(line.split()[1]) / 100)  # the pipeline's 0-100; the window's bars go 0 to 1
                 elif line.startswith(('@done ', '@error ')):
                     self.result = line
                 else:
@@ -938,7 +1193,27 @@ class App(QObject):
         return bool(self.proc and self.proc.poll() is None)
 
     def stop_for_close(self):
+        """the app is quitting: a build and an update download stop with it"""
         self.cancel()
+        self.cancelUpdate()
+
+
+def window_qml(layout):
+    """the window the settings' layout asks for: the simple one, or the modern one"""
+    return QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Simple.qml' if layout == 'simple' else 'Main.qml'))
+
+
+def place(win):
+    """a window sized to its screen's free area and centred on it: the modern one 16:9 up to 1280 wide, the simple one at its own size"""
+    area = win.screen().availableGeometry()  # its own screen's free area, not the whole desktop: "Build It!" stays above the taskbar
+    if win.objectName() == 'simple':
+        w, h = min(win.width(), area.width()), min(win.height(), area.height())
+        win.setMinimumSize(QSize(min(640, area.width()), min(480, area.height())))
+    else:
+        w = int(min(1280, area.width() * 0.9, area.height() * 0.9 * 16 / 9))
+        h = w * 9 // 16
+        win.setMinimumSize(QSize(min(960, area.width()), min(540, area.height())))
+    win.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - h) // 2, w, h)
 
 
 def create(argv=None):
@@ -956,7 +1231,11 @@ def create(argv=None):
     engine.rootContext().setContextProperty('app', state)
     engine.rootContext().setContextProperty('T', theme())
     engine.rootContext().setContextProperty('appIcon', png_url(draw_icon(512)))  # the rail shows it at 162: 512 stays sharp up to a 4K window
-    engine.load(QUrl.fromLocalFile(os.path.join(HERE, 'ui', 'Main.qml')))
+    engine.load(window_qml(state.st.get('layout')))
+    if not engine.rootObjects():  # the saved layout's window didn't load: the modern one, so the app always shows one
+        state.st['layout'] = 'modern'
+        save_settings(state.st)
+        engine.load(window_qml('modern'))
     for win in engine.rootObjects():  # its first frame on screen is when it has really been shown (App.windowShown)
         quick = shiboken6.wrapInstance(shiboken6.getCppPointer(win)[0], QQuickWindow)
         # it comes at every frame, from the render thread: windowShown ends the connection at the first
@@ -969,14 +1248,24 @@ def run():
     if not engine.rootObjects():
         return 1
     win = engine.rootObjects()[0]  # loaded hidden, so a check can load it without showing it
-    area = win.screen().availableGeometry()  # its own screen's free area, not the whole desktop: "Build It!" stays above the taskbar
-    w = int(min(1280, area.width() * 0.9, area.height() * 0.9 * 16 / 9))
-    win.setMinimumSize(QSize(min(960, area.width()), min(540, area.height())))
-    win.setGeometry(area.x() + (area.width() - w) // 2, area.y() + (area.height() - w * 9 // 16) // 2, w, w * 9 // 16)
+    place(win)
     win.show()
+
+    def swap(layout):  # the other window, shown before this one goes, so the app never has no window
+        old = engine.rootObjects()[-1]
+        engine.load(window_qml(layout))
+        new = engine.rootObjects()[-1]
+        if new is old:  # it didn't load: the window stays as it was
+            return
+        place(new)
+        new.show()
+        old.close()
+        old.deleteLater()
+    state.layoutWanted.connect(swap)
     # The first frame is the sign the window came up. A window started minimised draws none, so a timer says it for one that isn't showing.
     # One that is showing and has still drawn nothing is broken, and is left unconfirmed: updater sets that version aside.
-    QTimer.singleShot(10000, lambda: None if win.isExposed() else state.windowShown())
+    qt.aboutToQuit.connect(state.stop_for_close)  # not a swap: the new window is shown before the old one closes
+    QTimer.singleShot(10000, lambda: None if not engine.rootObjects() or engine.rootObjects()[-1].isExposed() else state.windowShown())
     code = qt.exec()
     del engine  # before the App it shows, or its bindings read a gone app on the way out
     return code

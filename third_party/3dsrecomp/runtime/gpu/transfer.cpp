@@ -176,9 +176,11 @@ void texture_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_gap, u32 o
     const u32 in_width = in_gap == 0 ? remaining : (in_width_gap & 0xffff) * 16;
     const u32 out_width = out_gap == 0 ? remaining : (out_width_gap & 0xffff) * 16;
     if (!in_width || !out_width) return;
-    const u32 out_total = size / out_width * (out_width + out_gap) + out_width;
-    metal_guest_read(in_paddr, size / in_width * (in_width + in_gap) + in_width);
-    const bool from_gpu = metal_gpu_made(in_paddr, size / in_width * (in_width + in_gap) + in_width);
+    // the bytes from the first one copied to the last, gaps between rows included
+    const u32 in_total = (remaining - 1) / in_width * (in_width + in_gap) + (remaining - 1) % in_width + 1;
+    const u32 out_total = (remaining - 1) / out_width * (out_width + out_gap) + (remaining - 1) % out_width + 1;
+    metal_guest_read(in_paddr, in_total);
+    const bool from_gpu = metal_gpu_made(in_paddr, in_total);
     metal_guest_prewrite(out_paddr, out_total);
     u32 ri = in_width, ro = out_width;
     while (remaining) {

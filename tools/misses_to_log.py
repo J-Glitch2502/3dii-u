@@ -43,6 +43,13 @@ while p + 8 <= len(d):
             gs_out += rec
             gs += 1
         p += 16 + (nc + ns) * 4
+    elif tag == b'GSX ':  # a vertex shader and the geometry shader after it: its size, then words already little-endian
+        rec = d[p:p + 8 + struct.unpack_from('<I', d, p + 4)[0]]
+        if rec not in known:
+            known.add(rec)
+            out += rec
+            vs += 1
+        p += len(rec)
     else:
         sys.exit(f'unknown record at {p}: {tag!r}')
 open(sys.argv[2], 'wb').write(out)

@@ -11,12 +11,15 @@
 #include <coreinit/systeminfo.h>
 #include <coreinit/time.h>
 #include <coreinit/title.h>
+#include <coreinit/userconfig.h>
 #include <gx2/event.h>
 #include <proc_ui/procui.h>
 #include <sysapp/launch.h>
 #include <sys/stat.h>
 #include <malloc.h>
 #include <nn/act.h>
+#include <padscore/kpad.h>
+#include <padscore/wpad.h>
 #include <unistd.h>
 #include <vpad/input.h>
 #include <whb/gfx.h>
@@ -220,6 +223,37 @@ static int gpu_thread(int, void *) {
     return 0;
 }
 
+// A Wii U Pro Controller's buttons, as the GamePad's are mapped (map_buttons)
+static u32 map_pro(u32 h) {
+    u32 b = 0;
+    if (h & WPAD_PRO_BUTTON_A) b |= 1u << 0;
+    if (h & WPAD_PRO_BUTTON_B) b |= 1u << 1;
+    if (h & WPAD_PRO_BUTTON_MINUS) b |= 1u << 2;
+    if (h & WPAD_PRO_BUTTON_PLUS) b |= 1u << 3;
+    if (h & WPAD_PRO_BUTTON_RIGHT) b |= 1u << 4;
+    if (h & WPAD_PRO_BUTTON_LEFT) b |= 1u << 5;
+    if (h & WPAD_PRO_BUTTON_UP) b |= 1u << 6;
+    if (h & WPAD_PRO_BUTTON_DOWN) b |= 1u << 7;
+    if (h & (WPAD_PRO_BUTTON_R | WPAD_PRO_BUTTON_ZR)) b |= 1u << 8;
+    if (h & (WPAD_PRO_BUTTON_L | WPAD_PRO_BUTTON_ZL)) b |= 1u << 9;
+    if (h & WPAD_PRO_BUTTON_X) b |= 1u << 10;
+    if (h & WPAD_PRO_BUTTON_Y) b |= 1u << 11;
+    return b;
+}
+
+// its presses as the GamePad's, for the options menu (menu_input): the left stick in to open it, the D-pad, A and B
+static u32 pro_as_gamepad(u32 t) {
+    u32 v = 0;
+    if (t & WPAD_PRO_BUTTON_STICK_L) v |= VPAD_BUTTON_STICK_L;
+    if (t & WPAD_PRO_BUTTON_A) v |= VPAD_BUTTON_A;
+    if (t & WPAD_PRO_BUTTON_B) v |= VPAD_BUTTON_B;
+    if (t & WPAD_PRO_BUTTON_UP) v |= VPAD_BUTTON_UP;
+    if (t & WPAD_PRO_BUTTON_DOWN) v |= VPAD_BUTTON_DOWN;
+    if (t & WPAD_PRO_BUTTON_LEFT) v |= VPAD_BUTTON_LEFT;
+    if (t & WPAD_PRO_BUTTON_RIGHT) v |= VPAD_BUTTON_RIGHT;
+    return v;
+}
+
 // 3DS button bits as hid.cpp expects them: A B Select Start Right Left Up Down R L X Y
 static u32 map_buttons(u32 h) {
     u32 b = 0;
@@ -252,27 +286,33 @@ static int hid_thread(int, void *) {
         fclose(f);
         kernel::g_live_path = live_path.c_str();
     }
+    // Pro Controllers beside the GamePad: what either holds counts, and the stick pushed further is the circle pad
+    KPADInit();
+    WPADEnableURCC(TRUE);
     u32 tick = 0;
     bool touch_was = false, leaving = false;
     VPADStatus st{};
     VPADTouchData cal{};
-    u32 buttons = 0;
+    u32 buttons = 0, pad_buttons = 0, pro_hold[4] = {};
+    float pad_x = 0, pad_y = 0, pro_x[4] = {}, pro_y[4] = {};
     s16 cx = 0, cy = 0;
     bool touch = false;
     u16 tx = 0, ty = 0;
     for (;;) {
+        u32 presses = 0;  // the GamePad's way, from either, for the options menu
         VPADReadError err = VPAD_READ_SUCCESS;
         VPADRead(VPAD_CHAN_0, &st, 1, &err);
+        if (err == VPAD_READ_INVALID_CONTROLLER) {  // no GamePad: nothing held on it
+            pad_buttons = 0;
+            pad_x = pad_y = 0;
+            touch = false;
+        }
         if (err == VPAD_READ_SUCCESS) {
-            buttons = map_buttons(st.hold);
+            pad_buttons = map_buttons(st.hold);
+            presses |= st.trigger;
             wiiu::mic_blow(st.hold & VPAD_BUTTON_STICK_R);
-            wiiu::menu_input(st.trigger);
-            if (!leaving && wiiu::menu_wants_quit()) {
-                leaving = true;
-                SYSLaunchMenu();
-            }
-            cx = (s16)(st.leftStick.x * 156.0f);
-            cy = (s16)(st.leftStick.y * 156.0f);
+            pad_x = st.leftStick.x;
+            pad_y = st.leftStick.y;
             // The GamePad's sensors in the 3DS's frame: y comes out of the screen and z towards the player. 512 is 1g; 14.375 is a degree a second, and the GamePad's 1.0 is a turn a second.
             auto to_s16 = [](float v) { return (s16)std::clamp(v, -32767.0f, 32767.0f); };
             const VPADVec3D &ac = st.accelerometer.acc;
@@ -291,6 +331,34 @@ static int hid_thread(int, void *) {
             }
             wiiu::keyboard_input(st.trigger, down && !touch_was, px, py);
             touch_was = down;
+        }
+        buttons = pad_buttons;
+        float sx = pad_x, sy = pad_y;
+        for (int ch = 0; ch < 4; ch++) {
+            KPADStatus ks{};
+            KPADError kerr = KPAD_ERROR_OK;
+            const bool read = KPADReadEx((KPADChan)ch, &ks, 1, &kerr) > 0 && kerr == KPAD_ERROR_OK;
+            if (read && ks.extensionType == WPAD_EXT_PRO_CONTROLLER) {
+                pro_hold[ch] = ks.pro.hold;
+                pro_x[ch] = ks.pro.leftStick.x;
+                pro_y[ch] = ks.pro.leftStick.y;
+                presses |= pro_as_gamepad(ks.pro.trigger);
+            } else if (read || kerr == KPAD_ERROR_INVALID_CONTROLLER) {  // another kind of controller there, or none
+                pro_hold[ch] = 0;
+                pro_x[ch] = pro_y[ch] = 0;
+            }
+            buttons |= map_pro(pro_hold[ch]);
+            if (std::fabs(pro_x[ch]) + std::fabs(pro_y[ch]) > std::fabs(sx) + std::fabs(sy)) {
+                sx = pro_x[ch];
+                sy = pro_y[ch];
+            }
+        }
+        cx = (s16)(sx * 156.0f);
+        cy = (s16)(sy * 156.0f);
+        wiiu::menu_input(presses);
+        if (!leaving && wiiu::menu_wants_quit()) {
+            leaving = true;
+            SYSLaunchMenu();
         }
         if (autoplay || kernel::g_live_path || wiiu::test_run()) {
             tick++;
@@ -498,7 +566,7 @@ static int watchdog_thread(int, void *) {
         // minutes before the screen says otherwise. Counted by drawing alone, any start slower than 30 s ended as "frozen": a tester's Mario
         // Kart 7 ended 30 s after its second list on its first start, its last note the save it had just written, and started the second
         // time (2026-11-12). Whether that one was at work or stopped, the screen couldn't say.
-        const u32 asking = kernel::svcs + (u32)kernel::gx_stats.transfers;
+        const u32 asking = kernel::svcs + (u32)kernel::gx_stats.transfers + wiiu::files_copied;  // and saves copied as it starts (save_copy_tree, save_from_content)
         quiet = asking == asked ? quiet + 1 : 0;
         asked = asking;
         if (++seconds >= 41 && !drawn && (quiet >= 30 || seconds >= 180) && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
@@ -522,6 +590,8 @@ static int watchdog_thread(int, void *) {
     return 0;
 }
 
+volatile bool wiiu::settings_due;
+
 // Slow work for later, at the lowest priority on its core: flushing saves, and the log, which only reaches storage when the game ends: the PC and the report on the screen don't need it.
 static int card_thread(int, void *) {
     for (u32 pass = 1;; pass++) {
@@ -530,6 +600,13 @@ static int card_thread(int, void *) {
             const u32 seconds = want_hang_dump - 1;
             want_hang_dump = 0;
             dump_hang(seconds);
+        }
+        if (wiiu::settings_due) {  // before the flush below, and so before the one a quit asks for
+            wiiu::settings_due = false;
+            wiiu::fs_begin(0xC00E);
+            settings_save();
+            wiiu::fs_end();
+            wiiu::save_dirty();
         }
         if (kMeasure && pass % 300 == 0) {
             const struct mallinfo m = mallinfo();
@@ -567,21 +644,6 @@ static void let_card_catch_up() {
     for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(ms); card_passes == seen && OSGetSystemTime() < until;) OSSleepTicks(OSMillisecondsToTicks(5));
 }
 
-// What this console has had to compile for the game, copied to the SD card as the game closes: sd:/3dii-u/<title id>/learned.bin. It lives in
-// the title's save, which nothing on a PC reads. The builder folds it into its next build of the game (builder/pipeline.py). With no card
-// in, or no room on it, nothing happens. The game's log stays in its save: it is not copied anywhere.
-static void copy_to_card(const std::string &from, const std::string &to) {
-    FILE *in = fopen(from.c_str(), "rb");
-    if (!in) return;
-    if (FILE *out = fopen(to.c_str(), "wb")) {
-        alignas(64) static char block[64 << 10];
-        for (size_t n; (n = fread(block, 1, sizeof block, in)) > 0;)
-            if (fwrite(block, 1, n, out) != n) break;
-        fclose(out);
-    }
-    fclose(in);
-}
-
 // Whether what a database slot held, as a 3DS game would read it, is a Mii: a name of printable characters, an author's name of them, the
 // padding empty, a birthday and a favourite colour that exist, a height and a build within their 127
 static bool looks_like_mii(const std::array<u8, 0x60> &m) {
@@ -613,17 +675,6 @@ static void read_mii_maker(FILE *f) {
         m[0x5F] = (u8)crc;
         if (kernel::mii_3ds(m, as_3ds) && looks_like_mii(as_3ds)) kernel::g_host_miis.push_back(m);
     }
-}
-
-static void leave_on_card() {
-    char dir[64];
-    snprintf(dir, sizeof dir, "fs:/vol/external01/3dii-u/%016llx", (unsigned long long)OSGetTitleID());
-    const std::string to = dir, from = wiiu::data_dir();
-    wiiu::fs_begin(0xC00D);
-    mkdir("fs:/vol/external01/3dii-u", 0777);
-    mkdir(dir, 0777);
-    copy_to_card(from + "/shader_misses.bin", to + "/learned.bin");
-    wiiu::fs_end();
 }
 
 void frontend_run() {
@@ -721,7 +772,6 @@ void frontend_run() {
     rt_log_sync();  // the lines since the card thread's last look, these [quit] ones among them: they never reached the file before
     wiiu::fs_end();
     fflush(nullptr);
-    leave_on_card();
 }
 
 // a crash shows what happened on the screen, so it can be reported: the addresses can be looked up against build/game.nm
@@ -800,6 +850,8 @@ int main(int argc, char **argv) {
     load_game(CONTENT_DIR);
     stage("game loaded");
     std::filesystem::create_directories(kernel::save_root(), no_save);
+    if (!wiiu::test_run())  // services/fs.cpp's folder for the game's save (archive_dir)
+        wiiu::save_from_content(std::string(CONTENT_DIR) + "/save_import", kernel::save_root() + "/savedata", kernel::save_root() + "/save_imported");
     rt_log_open(wiiu::data_dir() + "/log.txt");
     if (FILE *f = fopen((wiiu::data_dir() + "/logsync").c_str(), "rb")) {  // debug aid: each line to the card as it's logged (core.cpp)
         fclose(f);
@@ -829,6 +881,13 @@ int main(int argc, char **argv) {
     }
     LOG("[wiiu] guest memory at %p\n", g_mem);
     settings_load();
+    // the Wii U's language: a game takes it when its region has it, until the player picks another in the options menu (services/cfg.cpp)
+    if (const UCHandle uc = UCOpen(); uc >= 0) {
+        u32 language = 0;
+        UCSysConfig c = {"cafe.language", 0x777, UC_DATATYPE_UNSIGNED_INT, 0, sizeof language, &language};
+        if (UCReadSysConfig(uc, 1, &c) == 0 && c.error == 0) kernel::g_system_language = (int)language;
+        UCClose(uc);
+    }
     // The console's Miis, one per account: the game finds them in Mii Maker and as the player's Mii (services/misc.cpp, fs.cpp). On since
     // the user's yes on 2026-11-08 ("Yes, next build"); a `nowiimiis` flag turns it off, and the games then get the stand-in Mii as before.
     if (!wiiu::debug_flag("nowiimiis") && nn::act::Initialize().IsSuccess()) {

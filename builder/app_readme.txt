@@ -89,15 +89,19 @@ WHAT STAYS ON YOUR PC
   It keeps its compiled runtime there for the next game, plus up to 2 GB of each game's compiled code, so building a game again
   (with its update, or with a newer builder) only compiles what changed. It deletes each game's other work files when the build ends.
   Deleting that folder frees the space; the builder makes it again.
-- When a game closes it leaves learned.bin on the SD card, in the folder 3dii-u, in a folder named after the game's number: the shaders your
-  console had to make while you played, because the build didn't have them ready. Build the game again onto that SD card and the builder
-  reads it: the new build has them ready-made, and the places that stuttered the first time don't. The builder keeps what it read, so
-  later builds have it too.
+- The games don't use the SD card: their saves, settings and the shaders your console makes for them stay on the console.
 - Your dumps are never changed. Your keys are only read.
 - The games you build are made from your dumps and your keys: don't share them.
 
 - When you pick a game, the builder downloads its cover art from GameTDB (art.gametdb.com) for the game's start-up screens and Wii U Menu icon.
-  It sends only the four letters of the game's product code. The "Art" pill on the game's tile lets you choose your own picture, or "Remove art" to use the game's icon.
+  It sends only the four letters of the game's product code. The "Art" pill on the game's tile lets you choose your own picture for the start-up screens, another for the Wii U Menu icon, or remove them to use the game's icon.
+  Its "GamePad bezel" line takes a picture the GamePad shows beside the screens, a bezel or overlay, in place of black: any picture, scaled to fill
+  the GamePad (854x480), its edges cut where its shape differs. "GamePad start screen" gives the GamePad a start-up picture of its own,
+  shown as it is (the TV's otherwise), and "This game's sound" a start-up sound for that game alone, in place of the one for all games.
+- With a SteamGridDB key (Help page, "Art and sound"; the key is free, on steamgriddb.com under Preferences, API) each game gets a banner for
+  its start-up screens and an icon for the Wii U Menu from SteamGridDB instead. The builder sends the game's name (and its names in other
+  regions, if SteamGridDB doesn't know this one) and your key there, and nothing else; the key stays in the builder's settings on this PC.
+- A start-up sound is yours to add (Help page, "Art and sound"): choose a WAV file and every game you build plays it while it starts.
 - The builder asks GitHub for the list of its releases, and downloads one from there only when you press "Update".
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
