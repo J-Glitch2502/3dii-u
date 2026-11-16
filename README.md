@@ -60,7 +60,8 @@ To play what you build, you need a Wii U running [Aroma](https://aroma.foryour.c
 
 Most people want **3Dii U Builder**, the desktop app in [`builder/`](builder/README.md). You pick a dump, and it builds
 the game and puts it on your SD card. Releases of the standalone app need no Python and no toolchain. Its About button,
-and `pipeline.py --credits`, list the projects it's built on.
+and `pipeline.py --credits`, list the projects it's built on. Its UI and art design are by syntcity, and sennecaelen and
+Clone-34242342 contributed code.
 
 ## Working on it
 

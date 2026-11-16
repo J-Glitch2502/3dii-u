@@ -67,7 +67,7 @@ IF A GAME RUNS SLOWLY OR FREEZES ON THE WII U
 
 UPDATES
 
-- When it starts, the builder asks GitHub for the list of its releases; it only downloads the one you choose. If a newer one is out, the
+- When it starts, the builder asks GitHub for the list of its releases; it only downloads the one you choose. If there's an update, the
   Build page offers it; Help > Check for updates asks again at any time.
 - Press "Update" and the new version is downloaded into the builder's data folder, %LOCALAPPDATA%\3Dii U Builder\app. It opens from then
   on: at once with "Restart now", or the next time you start the builder. The folder you unzipped is never changed.
@@ -87,7 +87,7 @@ WHAT STAYS ON YOUR PC
 
 - The builder works in %LOCALAPPDATA%\3Dii U Builder.
   It keeps its compiled runtime there for the next game, plus up to 2 GB of each game's compiled code, so building a game again
-  (with its update, or with a newer builder) only compiles what changed. It deletes each game's other work files when the build ends.
+  (with its update, or after a Builder update) only compiles what changed. It deletes each game's other work files when the build ends.
   Deleting that folder frees the space; the builder makes it again.
 - The games don't use the SD card: their saves, settings and the shaders your console makes for them stay on the console.
 - Your dumps are never changed. Your keys are only read.
@@ -103,6 +103,8 @@ WHAT STAYS ON YOUR PC
   regions, if SteamGridDB doesn't know this one) and your key there, and nothing else; the key stays in the builder's settings on this PC.
 - A start-up sound is yours to add (Help page, "Art and sound"): choose a WAV file and every game you build plays it while it starts.
 - The builder asks GitHub for the list of its releases, and downloads one from there only when you press "Update".
+
+UI and art design by syntcity.
 
 The builder comes with no game, no game data and no keys. This is a beta, with no warranty.
 Third-party notices.txt lists the open-source software it carries.

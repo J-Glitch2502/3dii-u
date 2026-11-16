@@ -671,7 +671,7 @@ ApplicationWindow {
                         id: updateCard
                         readonly property string st: app.updateState
                         visible: ["available", "downloading", "unpacking", "ready", "restarting", "failed"].indexOf(st) >= 0
-                        title: st === "failed" ? "The update stopped" : "A newer Builder is out"
+                        title: st === "failed" ? "The update stopped" : "An update is out"
                         titleColor: st === "failed" ? pal.redText : pal.title
                         subtitle: app.updateTitle
                         Column {
@@ -890,7 +890,7 @@ ApplicationWindow {
                 Repeater {
                     model: [
                         { title: "Complete", sub: "Confirmed finished on a real Wii U.", list: app.games.filter(g => g.status === "Complete"), light: "cyan" },
-                        { title: "Plays", sub: "Tested on a real Wii U, without their updates.", list: app.games.filter(g => g.status === "Plays"), light: "grey" },
+                        { title: "Plays", sub: "Tested on a real Wii U.", list: app.games.filter(g => g.status === "Plays"), light: "grey" },
                         { title: "Runs in Cemu", sub: "Built with this builder and played in the Cemu emulator, not yet on a real Wii U.", list: app.others, light: "grey" }
                     ]
                     Card {
@@ -952,12 +952,12 @@ ApplicationWindow {
                 Card {
                     width: 1030
                     title: "Art and sound"
-                    subtitle: "What your games show and play on the Wii U while they start."
+                    subtitle: "What your games show and play on the Wii U."
                     CardRow {
                         label: "Banners and icons"
                         sub: app.artKeySet ? "From SteamGridDB, with your key. GameTDB's covers fill in where it has nothing."
                                            : "Covers from GameTDB. With a free SteamGridDB key (steamgriddb.com, Preferences, API) each game gets a banner and an icon from there."
-                        Pill { text: app.artKeySet ? "Change key" : "Add key"; accessibleName: "SteamGridDB key"; tone: "cyan"; onClicked: app.setArtKey() }
+                        Pill { text: app.artKeySet ? "Key" : "Add key"; accessibleName: "SteamGridDB key"; tone: "cyan"; onClicked: app.setArtKey() }
                     }
                     CardRow {
                         label: "Start-up screens"
@@ -965,6 +965,12 @@ ApplicationWindow {
                                                         : "A game's art on its own, filling the screen."
                         Pill { text: "Art"; accessibleName: "Art on its own"; tone: app.artStyle === "picture" ? "cyan" : "grey"; onClicked: app.setArtStyle("picture") }
                         Pill { text: "Virtual Console"; accessibleName: "As the Virtual Console shows a game"; tone: app.artStyle === "console" ? "cyan" : "grey"; onClicked: app.setArtStyle("console") }
+                    }
+                    CardRow {
+                        label: "In-game menu"
+                        sub: app.gameMenu ? "Click the left stick in a game for its options, on the TV and the GamePad." : "Left out of the games you build."
+                        Pill { text: "On"; accessibleName: "In-game menu on"; tone: app.gameMenu ? "cyan" : "grey"; onClicked: app.setGameMenu(true) }
+                        Pill { text: "Off"; accessibleName: "In-game menu off"; tone: app.gameMenu ? "grey" : "cyan"; onClicked: app.setGameMenu(false) }
                     }
                     CardRow {
                         label: "Start-up sound"
@@ -978,23 +984,28 @@ ApplicationWindow {
                     title: "About"
                     subtitle: "3Dii U Builder " + app.version
                     CardRow {
-                        label: "Version " + app.version; sub: "Free and open-source: the licences and the software it carries."
+                        label: "Version " + app.version; sub: "Free and open source. See the licenses and the software it includes."
                         Pill { text: "About and licences"; onClicked: app.about() }
                     }
                     CardRow {
-                        label: "Window"; sub: "This one, or a simple one of plain tabs, buttons and file paths."
+                        label: "Window"; sub: "Switch between this window and a simple one with tabs and buttons."
                         Pill { text: "This one"; accessibleName: "Keep this window"; tone: "cyan" }
                         Pill { text: "Simple"; accessibleName: "Switch to the simple window"; enabled: !app.building; onClicked: app.setLayout("simple") }
+                    }
+                    CardRow {
+                        label: "Build folder"; sub: app.buildText
+                        Pill { text: "Folder"; accessibleName: "Choose a folder for building games"; tone: "cyan"; enabled: !app.building; onClicked: app.chooseBuild() }
+                        Pill { text: "Default"; accessibleName: "Build in the usual folder"; visible: app.buildCustom; enabled: !app.building; onClicked: app.defaultBuild() }
                     }
                     CardRow {
                         id: updatesRow
                         readonly property string st: app.updateState
                         readonly property bool offered: ["available", "downloading", "unpacking", "ready", "restarting", "failed"].indexOf(st) >= 0
-                        label: app.releaseTag ? "Release " + app.releaseTag : "A test build"
-                        sub: st === "checking" ? "Checking..." : st === "none" ? "No newer version found."  // also what a check that couldn't reach GitHub ends in
-                            : st === "downloading" || st === "unpacking" ? "A newer version is being downloaded."
-                            : st === "ready" || st === "restarting" ? "A newer version is ready."
-                            : offered ? "A newer version is out." : ""
+                        label: app.releaseTag ? "Release " + app.version : "A test build"
+                        sub: st === "checking" ? "Checking..." : st === "none" ? "Up to date."  // also what a check that couldn't reach GitHub ends in
+                            : st === "downloading" || st === "unpacking" ? "The update is downloading."
+                            : st === "ready" || st === "restarting" ? "The update is ready."
+                            : offered ? "An update is out." : ""
                         Pill { text: "Show"; accessibleName: "Show the update on the Build page"; tone: "cyan"; visible: updatesRow.offered; onClicked: win.page = "build" }
                         Pill { text: "Check for updates"; enabled: app.updateState !== "checking"; onClicked: app.checkUpdate() }
                     }
@@ -1077,6 +1088,7 @@ ApplicationWindow {
                     ArtEntry { label: "GamePad start screen..."; chosen: app.padArtText; onPicked: { artMenu.visible = false; app.choosePadArt() } }
                     ArtEntry { label: "This game's sound..."; chosen: app.gameSoundText; onPicked: { artMenu.visible = false; app.chooseGameSound() } }
                     ArtEntry { label: "GamePad bezel..."; chosen: app.bezelText; onPicked: { artMenu.visible = false; app.chooseBezel() } }
+                    ArtEntry { label: "Restore the default art"; visible: app.artOwn; onPicked: { artMenu.visible = false; app.findArt() } }
                     ArtEntry { label: "Remove the bezel"; danger: true; visible: app.hasBezel; onPicked: { artMenu.visible = false; app.removeBezel() } }
                     ArtEntry { label: "Remove the game's sound"; danger: true; visible: app.hasGameSound; onPicked: { artMenu.visible = false; app.removeGameSound() } }
                     ArtEntry { label: "Remove the GamePad picture"; danger: true; visible: app.hasPadArt; onPicked: { artMenu.visible = false; app.removePadArt() } }

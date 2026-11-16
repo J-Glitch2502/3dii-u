@@ -154,6 +154,21 @@ def make_icon(path):
     os.remove(png)
 
 
+def version_resource(path, version):
+    """the exe's Details tab (product, publisher, version): an unsigned exe with none is what antivirus guesses flag (a tester's
+    Defender quarantined 1.0.2's)"""
+    from PyInstaller.utils.win32 import versioninfo as v
+    import credits
+    nums = tuple(([int(n) for n in version.split('.') if n.isdigit()] + [0] * 4)[:4])
+    strings = {'CompanyName': '3Dii U', 'FileDescription': NAME, 'FileVersion': version, 'InternalName': NAME, 'LegalCopyright': credits.LICENCE,
+               'OriginalFilename': NAME + '.exe', 'ProductName': NAME, 'ProductVersion': version}
+    info = v.VSVersionInfo(ffi=v.FixedFileInfo(filevers=nums, prodvers=nums),
+                           kids=[v.StringFileInfo([v.StringTable('040904B0', [v.StringStruct(k, s) for k, s in strings.items()])]),
+                                 v.VarFileInfo([v.VarStruct('Translation', [1033, 1200])])])
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(str(info))
+
+
 def unconfirmed(compat, games):
     """the games compat.json calls Complete that have no confirmed shader list under games (shaderlogs.py --confirm): built without it, such a
     game could lose shaders the build it was confirmed with had"""
@@ -185,8 +200,10 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     ico = os.path.join(WORK, 'icon.ico')
     make_icon(ico)
+    details = os.path.join(WORK, 'version.txt')
+    version_resource(details, gui.VERSION)
     args = [os.path.join(HERE, 'app.py'), '--name', NAME, '--windowed', '--onedir', '--noconfirm', '--clean', '--distpath', OUT,
-            '--workpath', WORK, '--specpath', WORK, '--icon', ico, '--paths', HERE,
+            '--workpath', WORK, '--specpath', WORK, '--icon', ico, '--version-file', details, '--paths', HERE,
             '--add-data', f'{os.path.join(HERE, "ui")}{os.pathsep}ui',
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "faq.json")}{os.pathsep}.',

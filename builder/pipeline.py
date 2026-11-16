@@ -11,6 +11,7 @@ Lines starting with @ are for the app: @stage <name>, @progress <0-100>, @done <
 
 It builds with tools/win/build3ds.py, in folders of its own (builder_work/, build_win_builder/), so it never touches the nine ports' builds."""
 import argparse
+import errno
 import filecmp
 import io
 import json
@@ -34,7 +35,11 @@ import shaderlogs  # noqa: E402
 import user_files  # noqa: E402
 
 WORK = os.environ.get('THREEDII_WORK') or ROOT  # the standalone app's engine may be read-only: then it builds in a folder of the user's
-WORK_GAMES = os.path.join(WORK, 'builder_work')
+# Where games are built: each game's work while it builds and the compiled code kept between builds, gigabytes of files the build makes
+# again as it needs them. A folder the player chose (a drive with room: a tester's C: had none), or the work folder.
+BUILD = os.environ.get('THREEDII_BUILD') or WORK
+BUILD_FILES = ('builder_work', 'build_win_builder', 'objcache')  # what it holds, all of it: build3ds puts objcache beside build_win_builder
+WORK_GAMES = os.path.join(BUILD, 'builder_work')
 ARCHIVES = os.path.join(WORK, 'system_archives') if WORK != ROOT else os.path.join(ROOT, 'games', 'system_archives')
 STAGES = [('Reading your game', 2), ('Decrypting', 8), ('Unpacking', 7), ('Finding the game\'s code', 2), ('Recompiling', 48), ('Shaders', 14),
           ('Making the title', 2), ('Packing the WUP', 10), ('Copying', 7)]
@@ -161,6 +166,25 @@ def copy_to(source, target_dir):
     return target
 
 
+def card_error(e):
+    """what to tell the player when the SD card refuses a write (a tester's card was locked: Windows says WinError 19)"""
+    if getattr(e, 'winerror', None) == 19 or e.errno == errno.EROFS:
+        return 'The SD card is locked. Slide the little switch on its side up, away from "Lock", then put the card back in.'
+    return f'The SD card couldn\'t be written to: {e.strerror or e}'
+
+
+def check_card(card):
+    """a build that ends on the SD card finds out it can't write there first, not after minutes of building"""
+    probe = os.path.join(card.rstrip('\\/') + os.sep, 'install', '.3diiu_check')
+    try:
+        os.makedirs(os.path.dirname(probe), exist_ok=True)
+        with open(probe, 'wb') as f:
+            f.write(b'3Dii U')
+        os.remove(probe)
+    except OSError as e:
+        fail(card_error(e))
+
+
 PROGRESS = Progress()
 
 
@@ -193,6 +217,7 @@ def main():
     ap.add_argument('--pad-art', help="a picture of its own for the GamePad's start-up screen, shown as it is; the TV's otherwise")
     ap.add_argument('--boot-sound', help="the game's own start-up sound, a .btsnd (tools/make_boot_sound.py); the one for every game otherwise")
     ap.add_argument('--save', help="a 3DS save to pack in, which the game takes on the console (saves.py): Checkpoint's, JKSM's or an emulator's folder")
+    ap.add_argument('--no-menu', action='store_true', help='no options menu in the game: clicking the left stick does nothing (content/no_menu)')
     ap.add_argument('--art-style', choices=('picture', 'console'), default='console',
                     help='the start-up screens: laid out as the Virtual Console shows a game, or --art as it is')
     ap.add_argument('--tdb', help="a folder for GameTDB's list of 3DS games, where the Virtual Console's screens find the year a game came out")
@@ -212,6 +237,8 @@ def main():
     problem = None if os.environ.get('THREEDII_MEASURE', '') not in ('', 'console') else user_files.check_otp(a.otp)
     if problem:
         fail(problem)
+    if a.card:
+        check_card(a.card)
 
     PROGRESS.stage('Reading your game')
     decrypt.use_keys(a.keys)
@@ -314,7 +341,7 @@ def main():
     b3 = importlib.util.module_from_spec(spec)
     sys.modules['build3ds'] = b3
     spec.loader.exec_module(b3)
-    b3.WORK = os.path.join(WORK, 'build_win_builder').replace('\\', '/')
+    b3.WORK = os.path.join(BUILD, 'build_win_builder').replace('\\', '/')
     prepare_logs = b3.prepare_logs
 
     def with_vertex_programs(g, shadergen):  # the standalone app's logs name vertex programs by fingerprint: this dump's own dvlb.bin has their code
@@ -401,6 +428,8 @@ def main():
             saves.pack(a.save, os.path.join(out, 'title', 'content'))
         except (saves.SaveError, OSError) as e:
             fail(f"The 3DS save couldn't be packed in: {e}")
+    if a.no_menu:  # the game looks for it as it starts (frontend_wiiu.cpp)
+        open(os.path.join(out, 'title', 'content', 'no_menu'), 'wb').close()
 
     if b3.MEASURE and not b3.MEASURE_CONSOLE:  # the checks' own kind of build, for Cemu (build3ds.py): packed only when asked by name
         print('a measuring build: not packed', flush=True)
@@ -423,11 +452,14 @@ def main():
     if a.card:
         PROGRESS.stage('Copying')
         install = os.path.join(a.card.rstrip('\\/') + os.sep, 'install')
-        os.makedirs(install, exist_ok=True)
-        size = sum(os.path.getsize(os.path.join(wup, f)) for f in os.listdir(wup))
-        if shutil.disk_usage(install).free < size + (64 << 20):
-            fail(f'The SD card needs {size >> 20} MB free for this game.')
-        where = copy_to(wup, install)
+        try:
+            os.makedirs(install, exist_ok=True)
+            size = sum(os.path.getsize(os.path.join(wup, f)) for f in os.listdir(wup))
+            if shutil.disk_usage(install).free < size + (64 << 20):
+                fail(f'The SD card needs {size >> 20} MB free for this game.')
+            where = copy_to(wup, install)
+        except OSError as e:  # the WUP stays in the work folder, as with a folder build
+            fail(card_error(e) + f' The game is built: it is in {wup}.')  # one line: the window reads @error lines
         shutil.rmtree(wup, ignore_errors=True)
     if not a.keep:  # the runtime's objects stay: every game shares them
         shutil.rmtree(game_dir, ignore_errors=True)

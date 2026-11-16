@@ -113,12 +113,21 @@ class Content:
         return TYPE_HASHED if self.hashed else TYPE_PLAIN
 
 
+def files_under(folder):
+    """the files under a folder as paths relative to it, '/' between parts, in the file table's order: sorted, each subfolder's in its place"""
+    out = []
+    for n in sorted(os.listdir(folder)):
+        p = os.path.join(folder, n)
+        out += [f'{n}/{f}' for f in files_under(p)] if os.path.isdir(p) else [n]
+    return out
+
+
 def assign_contents(title, group, parent_id):
-    tree = {d: sorted(os.listdir(os.path.join(title, d))) for d in ('code', 'content', 'meta')}
+    tree = {d: files_under(os.path.join(title, d)) for d in ('code', 'content', 'meta')}
     for d, names in tree.items():
         assert names, f'{d} must not be empty'
-        for n in names:
-            assert os.path.isfile(os.path.join(title, d, n)), f'subfolders are not supported yet: {d}/{n}'
+        # content may have folders (a 3DS save packed into a build is content/save_import); code's and meta's files each have a rule below
+        assert d == 'content' or all('/' not in n for n in names), f'{d} takes no subfolders: {names}'
     fst = Content(0, False, 0, 0, FLAGS_CODE)
     contents = [fst]
 
@@ -173,6 +182,23 @@ def build_contents(title, contents, title_key, out_dir):
 
 
 # ---- the file table
+def nested(paths):
+    """'a/b' paths as folders, {name: its folder, or None for a file}, in the paths' order"""
+    top = {}
+    for p in paths:
+        *folders, leaf = p.split('/')
+        node = top
+        for f in folders:
+            node = node.setdefault(f, {})
+        node[leaf] = None
+    return top
+
+
+def entries_in(folder):
+    """the file table entries a folder's contents take, its subfolders' with theirs"""
+    return sum(1 + (entries_in(sub) if sub is not None else 0) for sub in folder.values())
+
+
 def build_fst(contents, tree, offsets):
     strings = bytearray()
 
@@ -185,19 +211,34 @@ def build_fst(contents, tree, offsets):
     root_name = name('')
     assert root_name == 0
     index = 1
-    for d in ('code', 'content', 'meta'):
-        # A folder's content is the last rule that matched in it, as NUSPacker leaves it.
-        owner = max((c for c in contents if any(f[0] == d for f in c.files)), key=lambda c: c.id)
-        entry_at = index
-        following = index + 1 + len(tree[d])
-        entries.append(struct.pack('>I', 0x01000000 | name(d)) + struct.pack('>IIHH', 0, following, owner.flags, owner.id))
+
+    def folder_entry(n, parent, folder, owner):
+        """a folder's entry: its parent folder's entry, and the entry after everything in it"""
+        nonlocal index
+        entries.append(struct.pack('>I', 0x01000000 | name(n)) + struct.pack('>IIHH', parent, index + 1 + entries_in(folder), owner.flags, owner.id))
         index += 1
-        for n in tree[d]:
-            c, off, size = offsets[(d, n)]
-            assert off % FST_ALIGN_FILE == 0
-            entries.append(struct.pack('>I', name(n)) + struct.pack('>IIHH', off >> 5, size, c.flags, c.id))
-            index += 1
-        assert entry_at < index
+
+    def put(d, prefix, folder, parent, owner):
+        nonlocal index
+        for n, sub in folder.items():
+            if sub is None:
+                c, off, size = offsets[(d, prefix + n)]
+                assert off % FST_ALIGN_FILE == 0
+                entries.append(struct.pack('>I', name(n)) + struct.pack('>IIHH', off >> 5, size, c.flags, c.id))
+                index += 1
+            else:
+                at = index
+                folder_entry(n, parent, sub, owner)
+                put(d, prefix + n + '/', sub, at, owner)
+
+    for d in ('code', 'content', 'meta'):
+        # A folder's content is the last rule that matched in it, as NUSPacker leaves it; a subfolder takes its top folder's.
+        owner = max((c for c in contents if any(f[0] == d for f in c.files)), key=lambda c: c.id)
+        top = nested(tree[d])
+        at = index
+        folder_entry(d, 0, top, owner)
+        put(d, '', top, at, owner)
+        assert at < index
     root = b'\x01' + bytes(7) + struct.pack('>I', index) + bytes(4)
 
     headers = bytearray()
@@ -326,16 +367,19 @@ def verify(out_dir, title, tree, common_key, title_id):
     total = struct.unpack('>I', fst[base + 8:base + 12])[0]
     strings = fst[base + total * 0x10:]
     name_at = lambda off: strings[off:strings.index(b'\0', off)].decode()
-    held, folder, end = {}, None, 0
+    held, inside = {}, []  # inside: (entry, path, end) of each folder the entry at hand is in, outermost first
     for i in range(1, total):
         w, a, b, flags, cid = struct.unpack('>IIIHH', fst[base + i * 0x10:base + i * 0x10 + 0x10])
         nm = name_at(w & 0xFFFFFF)
+        while inside and inside[-1][2] <= i:
+            inside.pop()
         if w >> 24 == 1:
-            assert a == 0 and b <= total and i < b, f'folder {nm} links'
-            folder, end = nm, b
+            assert a == (inside[-1][0] if inside else 0) and i < b <= (inside[-1][2] if inside else total), f'folder {nm} links'
+            inside.append((i, f'{inside[-1][1]}/{nm}' if inside else nm, b))
         else:
-            assert i < end and folder, f'{nm} is outside any folder'
-            held.setdefault(cid, []).append((a << 5, b, folder, nm))
+            assert inside, f'{nm} is outside any folder'
+            top, _, sub = inside[-1][1].partition('/')
+            held.setdefault(cid, []).append((a << 5, b, top, f'{sub}/{nm}' if sub else nm))
     found = {(d, n) for files in held.values() for _, _, d, n in files}
     want = {(d, n) for d, names in tree.items() for n in names}
     assert found == want and sum(map(len, held.values())) == len(want), found ^ want

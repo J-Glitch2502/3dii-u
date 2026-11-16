@@ -79,6 +79,7 @@ void input_override(u32 &buttons, bool &touch, u16 &tx, u16 &ty);
 // the options menu (click the left stick)
 void menu_input(u32 pressed);
 bool menu_open();
+void menu_disable();  // a game built with the Builder's "In-game menu: Off" (content/no_menu): the click does nothing
 int game_speed();  // percent
 bool menu_wants_quit();
 void menu_quit_now();  // as choosing Quit there: a test route's "KEY quit", so a run in Cemu ends the way a player ends one

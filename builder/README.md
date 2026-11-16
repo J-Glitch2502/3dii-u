@@ -2,6 +2,8 @@
 
 Turns your own 3DS game dumps into games for your Wii U. Pick a game, say whether to add its update, DLC and a mod, press **Build It!**, and the game lands on your SD card ready for WUP Installer GX2.
 
+UI and art design by syntcity.
+
 No game data and no keys come with the builder. Everything it builds from is yours: your dumps, your 3DS's keys if the dumps are encrypted, and your Wii U's `otp.bin`.
 
 ## Using it

@@ -87,10 +87,10 @@ ApplicationWindow {
                 Label {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
-                    text: app.updateState === "available" ? "A newer Builder is out: " + app.updateTitle
-                        : app.updateState === "downloading" ? "Downloading the newer Builder... " + app.updateProgress + "%"
-                        : app.updateState === "unpacking" ? "Unpacking the newer Builder..."
-                        : app.updateState === "ready" ? "The newer Builder is ready. It opens the next time you start the Builder."
+                    text: app.updateState === "available" ? "An update is out: " + app.updateTitle
+                        : app.updateState === "downloading" ? "Downloading the update... " + app.updateProgress + "%"
+                        : app.updateState === "unpacking" ? "Unpacking the update..."
+                        : app.updateState === "ready" ? "The update is ready. It opens the next time you start the Builder."
                         : "The update stopped: " + app.updateMessage
                 }
                 Button { text: "Update"; visible: app.updateState === "available"; onClicked: app.startUpdate() }
@@ -170,7 +170,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     wrapMode: Text.WordWrap
                     opacity: 0.85
-                    text: "A mod is one made for Luma on a 3DS: a .zip or a folder with luma/titles/<title id>/ in it. Plugins (.3gx) can't be built in."
+                    text: "Mods made for Luma on a 3DS work: a .zip or a folder with luma/titles/<title id>/ inside. Plugins (.3gx) aren't supported."
                 }
                 Item { Layout.fillHeight: true }
             }
@@ -202,6 +202,12 @@ ApplicationWindow {
                     onChoose: app.hasGame ? app.chooseBezel() : app.chooseGame()
                     onRemove: app.removeBezel()
                 }
+                Button { text: "Restore the default art"; visible: app.artOwn; enabled: !win.busy; Layout.preferredWidth: 220; onClicked: app.findArt() }
+                RowLayout {
+                    Label { text: "In-game menu:" }
+                    RadioButton { text: "On"; checked: app.gameMenu; onClicked: app.setGameMenu(true) }
+                    RadioButton { text: "Off"; checked: !app.gameMenu; onClicked: app.setGameMenu(false) }
+                }
                 RowLayout {
                     Label { text: "Start-up screens:" }
                     RadioButton { text: "Art on its own"; checked: app.artStyle === "picture"; onClicked: app.setArtStyle("picture") }
@@ -209,7 +215,7 @@ ApplicationWindow {
                 }
                 RowLayout {
                     spacing: 6
-                    Button { text: app.artKeySet ? "Change SteamGridDB key..." : "SteamGridDB key..."; Layout.preferredWidth: 220; onClicked: app.setArtKey() }
+                    Button { text: "SteamGridDB key..."; Layout.preferredWidth: 220; onClicked: app.setArtKey() }
                     Label {
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
@@ -244,6 +250,7 @@ ApplicationWindow {
                     Button { text: "Look again"; enabled: !win.busy; onClicked: app.refreshCards() }
                 }
                 PathRow { visible: app.target === "folder"; label: "Folder..."; text: app.destText; onChoose: app.chooseFolder() }
+                PathRow { label: "Build folder..."; text: app.buildText; removable: app.buildCustom; onChoose: app.chooseBuild(); onRemove: app.defaultBuild() }
                 RowLayout {
                     spacing: 6
                     Button {

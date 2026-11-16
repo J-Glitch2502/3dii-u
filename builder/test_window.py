@@ -89,15 +89,15 @@ try:
     settle('the card menu')
     assert not win.findChild(QObject, 'pages').property('enabled'), 'Tab reaches the pages behind the card menu'
     menu.setProperty('visible', False)
-    state.set(hasGame=True, hasArt=True, hasIconArt=True, hasBezel=True, hasPadArt=True, hasGameSound=True, artText='A picture.png', iconText='An icon.png',
-              bezelText='A bezel.png', padArtText='A GamePad picture.png', gameSoundText='Its own')  # every line of the art menu
+    state.set(hasGame=True, hasArt=True, artOwn=True, hasIconArt=True, hasBezel=True, hasPadArt=True, hasGameSound=True, artText='A picture.png', iconText='An icon.png',
+              bezelText='A bezel.png', padArtText='A GamePad picture.png', gameSoundText=gui.CUSTOM)  # every line of the art menu
     menu = win.findChild(QObject, 'artMenu')
     art_pill = next(p for p in items(QQuickWindow.contentItem(win)) if p.objectName() == 'pill' and p.property('accessibleName') == 'Art and icon')
     QMetaObject.invokeMethod(menu, 'openAt', Q_ARG('QVariant', art_pill))  # as the pill does: under it, its first line focused
     settle('the art menu')
     assert menu.property('visible') and not win.findChild(QObject, 'pages').property('enabled'), 'Tab reaches the pages behind the art menu'
     menu.setProperty('visible', False)
-    state.set(hasGame=False, hasArt=False, hasIconArt=False, hasBezel=False, hasPadArt=False, hasGameSound=False, artText=gui.NO_ART, iconText=gui.NO_ART,
+    state.set(hasGame=False, hasArt=False, artOwn=False, hasIconArt=False, hasBezel=False, hasPadArt=False, hasGameSound=False, artText=gui.NO_ART, iconText=gui.NO_ART,
               bezelText=gui.NO_BEZEL, padArtText=gui.NO_PAD_ART, gameSoundText=gui.NO_GAME_SOUND)
     stages = ['Reading', 'Recompiling', 'Packing']
     for view in ('building', 'done', 'failed', 'form'):
@@ -375,10 +375,10 @@ try:
     gui.QFileDialog.getOpenFileName = lambda *a, **k: (next(chosen), '')
     state.set_art(None, remember=False)
     state.chooseIcon()
-    assert state.icon_art == art and state.art is None and state.hasIconArt and (state.iconText, state.artText) == (os.path.basename(art), gui.NO_ART)
+    assert state.icon_art == art and state.art is None and state.hasIconArt and (state.iconText, state.artText) == (gui.CUSTOM, gui.NO_ART)
     assert title not in state.st['art'], 'an icon picked with no art marked the art as removed on purpose'
     state.chooseArt()
-    assert state.art == cover and state.icon_art == art and (state.artText, state.iconText) == (gui.FROM_TDB, os.path.basename(art))
+    assert state.art == cover and state.icon_art == art and (state.artText, state.iconText) == (gui.FROM_TDB, gui.CUSTOM)
     state.removeIcon()
     assert state.icon_art is None and state.art == cover and not state.hasIconArt and state.iconText == gui.NO_ICON_ART
     state.set_art(banner, square)  # SteamGridDB's banner and icon: art the player chooses now replaces both
@@ -388,17 +388,28 @@ try:
     assert (state.art, state.icon_art) == (banner, own_icon), 'fetched art took the place of the icon the player picked'
     state.set_art(banner, square)
     state.chooseArt()  # art
-    assert (state.art, state.icon_art) == (art, None) and state.artText == os.path.basename(art), "a fetched icon stayed beside the player's art"
+    assert (state.art, state.icon_art) == (art, None) and state.artText == gui.CUSTOM, "a fetched icon stayed beside the player's art"
+    # the default art again: the player's pictures forgotten for the game, its art looked up again; offered after a removal too
+    asked_again.clear()
+    state.fetch_cover = lambda *a: asked_again.set()
+    assert state.artOwn
+    state.findArt()
+    assert asked_again.wait(5) and (state.art, state.icon_art) == (None, None) and title not in state.st['art'] and not state.artOwn
+    state.cover_ready(title, banner, square)
+    assert (state.art, state.icon_art) == (banner, square) and not state.artOwn, 'the fetched art was offered as the default again'
+    state.removeArt()
+    assert state.artOwn, 'art removed on purpose had no way back'
+    state.fetch_cover = fetch_cover
 
     # the GamePad's bezel: chosen, kept for the game, removed
     gui.QFileDialog.getOpenFileName = lambda *a, **k: (cover, '')
     state.chooseBezel()
-    assert state.bezel == cover and state.hasBezel and state.bezelText == os.path.basename(cover) and json.load(open(settings))['pad_bezel'][title] == cover
+    assert state.bezel == cover and state.hasBezel and state.bezelText == gui.CUSTOM and json.load(open(settings))['pad_bezel'][title] == cover
     state.removeBezel()
     assert state.bezel is None and not state.hasBezel and state.bezelText == gui.NO_BEZEL and title not in json.load(open(settings))['pad_bezel']
     # the GamePad's start-up picture and the game's start-up sound: chosen, kept for the game, removed (the sound's file with it)
     state.choosePadArt()
-    assert state.pad_art == cover and state.hasPadArt and state.padArtText == os.path.basename(cover) and json.load(open(settings))['pad_art'][title] == cover
+    assert state.pad_art == cover and state.hasPadArt and state.padArtText == gui.CUSTOM and json.load(open(settings))['pad_art'][title] == cover
     state.removePadArt()
     assert state.pad_art is None and not state.hasPadArt and state.padArtText == gui.NO_PAD_ART and title not in json.load(open(settings))['pad_art']
     import wave
@@ -413,7 +424,7 @@ try:
     state.chooseGameSound()
     kept = json.load(open(settings))['boot_sound'][title]
     assert kept == os.path.join(gui.GAME_SOUNDS, title + '.btsnd'), ('the game\'s sound went somewhere else, the sound for every game, say', kept)
-    assert state.game_sound == kept and os.path.isfile(kept) and state.hasGameSound and state.gameSoundText == 'Its own', kept
+    assert state.game_sound == kept and os.path.isfile(kept) and state.hasGameSound and state.gameSoundText == gui.CUSTOM, kept
     state.removeGameSound()
     assert state.game_sound is None and not state.hasGameSound and not os.path.exists(kept) and title not in json.load(open(settings))['boot_sound']
     assert state.gameSoundText == gui.NO_GAME_SOUND
@@ -431,6 +442,63 @@ try:
     assert state.save_in is None and not state.hasSave and state.dialog
     state.answer(True)  # the message closed
     state.game = None
+
+    # One folder of the 3DS's files (boot9.bin beside 0004009b and 000400db, as a tester kept them) fills both rows, from either Folder button.
+    # The archives' import itself is faked (test_system_archives.py checks it): only which folders are taken is looked at here.
+    three = os.path.join(base, '3DS files')
+    for d in ('0004009b', '000400db'):
+        os.makedirs(os.path.join(three, d))
+    open(os.path.join(three, 'boot9.bin'), 'wb').write(bytes(65536))
+    kept_env, kept_keys = os.environ.get('BOOT9_PATH'), state.st['keys']
+    real_import, real_have = gui.dumps.import_system_archives, gui.dumps.have_system_archives
+    imported = []
+    gui.dumps.import_system_archives = lambda folder, out, work: imported.append(folder) or ['0004009b00010202']
+    gui.dumps.have_system_archives = lambda folder: bool(imported)
+    for button in (state.chooseSystem, state.chooseKeys):
+        imported.clear()
+        state.st['keys'], state.st['system'] = os.path.join(base, 'no keys'), ''
+        gui.QFileDialog.getExistingDirectory = lambda *a, **k: three
+        button()
+        assert state.st['keys'] == three and imported == [three] and state.st['system'] == three, (button.__name__, state.st['keys'], imported)
+        assert not state.dialog, button.__name__
+    gui.dumps.import_system_archives, gui.dumps.have_system_archives = real_import, real_have
+    state.st['keys'] = kept_keys
+    if kept_env is None:
+        os.environ.pop('BOOT9_PATH', None)
+    else:
+        os.environ['BOOT9_PATH'] = kept_env
+
+    # the in-game menu (click the left stick), on or left out of the games it builds, kept in the settings
+    state.setGameMenu(False)
+    assert state.st['game_menu'] is False and not state.gameMenu and json.load(open(settings))['game_menu'] is False
+    state.setGameMenu(True)
+    assert state.gameMenu and json.load(open(settings))['game_menu'] is True
+
+    # The build folder (a tester's C: had no room): builds go to the one chosen, the old one's build files are offered for deletion and go only on
+    # a yes, and Default comes back to the work folder. Nothing outside the build files is touched.
+    kept_build, kept_work = os.environ.get('THREEDII_BUILD'), os.environ.get('THREEDII_WORK')
+    work, roomy = os.path.join(base, 'work'), os.path.join(base, 'roomy')
+    os.makedirs(os.path.join(work, 'builder_work'))
+    os.makedirs(os.path.join(work, 'system_archives'))
+    open(os.path.join(work, 'builder_work', 'big.bin'), 'wb').write(bytes(2 << 20))
+    os.environ['THREEDII_WORK'] = os.environ['THREEDII_BUILD'] = work
+    gui.QFileDialog.getExistingDirectory = lambda *a, **k: roomy
+    state.chooseBuild()
+    assert state.st['build_folder'] == os.path.normpath(roomy) and os.environ['THREEDII_BUILD'] == os.path.normpath(roomy)
+    assert state.buildCustom and 'GB free' in state.buildText and 'Delete' in state.dialog['yes']
+    state.answer(False)  # Keep
+    assert os.path.isfile(os.path.join(work, 'builder_work', 'big.bin'))
+    state.defaultBuild()
+    assert not state.st['build_folder'] and os.environ['THREEDII_BUILD'] == work and not state.buildCustom and not state.dialog  # roomy has none
+    state.chooseBuild()
+    state.answer(True)  # Delete
+    assert not os.path.exists(os.path.join(work, 'builder_work')) and os.path.isdir(os.path.join(work, 'system_archives'))
+    state.defaultBuild()
+    for k, v in (('THREEDII_BUILD', kept_build), ('THREEDII_WORK', kept_work)):
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
     # the simple window (ui/Simple.qml): asked for, kept in the settings, and it loads cleanly with every app.<name> it uses on App, a
     # question shown in it and answered; it comes back to the modern one the same way

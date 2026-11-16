@@ -3,6 +3,7 @@
 Double-click "3Dii U Builder.pyw", or run the standalone app make_app.py builds. The window is gui.py and ui/Main.qml; the build is pipeline.py.
 The standalone app is one program for all of it: run with --pipeline it's the build, and given a .py file it runs that script, the way the build
 runs a few of the repository's tools with sys.executable."""
+import json
 import os
 import runpy
 import sys
@@ -38,9 +39,9 @@ def short_path(engine, work):
                 return link
             os.rmdir(link)  # a junction to where the app was before, or to nothing now: rmdir takes the link, never what it pointed to
         os.makedirs(work, exist_ok=True)
-        import subprocess
-        made = subprocess.run(['cmd', '/c', 'mklink', '/J', link, engine], capture_output=True, creationflags=0x08000000).returncode == 0
-        return link if made else engine
+        import _winapi
+        _winapi.CreateJunction(engine, link)  # not cmd's mklink: a hidden cmd.exe is one of the things antivirus guesses weigh
+        return link
     except OSError:
         return engine
 
@@ -65,13 +66,24 @@ def fresh_cache(engine, work):
         pass
 
 
+def chosen_build():
+    """the folder the player chose for building games (the window's settings, gui.py's settings_file), if it is still there"""
+    try:
+        with open(os.path.join(os.environ.get('APPDATA') or HERE, '3Dii U Builder', 'settings.json'), encoding='utf-8') as f:
+            p = json.load(f).get('build_folder') or ''
+        return p if os.path.isdir(p) else ''
+    except (OSError, ValueError, AttributeError):
+        return ''
+
+
 def use_engine(root):
     """With its own engine the app brings its toolchain too, and builds in a folder of the user's: its own folder may be read-only."""
     if root and os.path.basename(root) == 'engine':
         base = os.environ.get('LOCALAPPDATA') or os.path.join(os.path.expanduser('~'), '.local', 'share')
         work = os.environ.setdefault('THREEDII_WORK', os.path.join(base, '3Dii U Builder'))
+        build = os.environ.setdefault('THREEDII_BUILD', chosen_build() or work)  # the big build files, pipeline.BUILD
         if 'THREEDII_ROOT' not in os.environ:  # once, in the window: the builds it starts inherit the cache as it left it
-            fresh_cache(root, work)
+            fresh_cache(root, build)
         root = short_path(root, work)
         os.environ.setdefault('THREEDII_DEVKITPRO', os.path.join(root, 'devkitpro').replace('\\', '/'))
         os.environ.setdefault('THREEDII_SHADERGEN', os.path.join(root, 'bin', 'shadergen.exe'))

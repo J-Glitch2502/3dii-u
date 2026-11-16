@@ -425,7 +425,9 @@ static std::string archive_dir(u32 id, const LowPath &p) {
         snprintf(b, sizeof b, "/system/%08x%08x", p.word(1), p.word(0));
         return g_save_base + b;
     }
-    case 9: return g_save_base + "/sdmc";
+    case 9:  // SDMC
+    case 10: // SDMCWriteOnly
+        return g_save_base + "/sdmc";
     }
     return "";
 }
@@ -769,7 +771,7 @@ struct FsUser : Service {
                 LOG("[fs] OpenArchive: unsupported archive %x path %s\n", id, p.str().c_str());
                 return ERR_NOT_FOUND;
             }
-            if (id == 9) fsys::create_directories(a.host);
+            if (id == 9 || id == 10) fsys::create_directories(a.host);
             if (id == 7 && p.word(1) == 0xF000000B && !fsys::exists(a.host)) create_gamecoin(a.host);
             if (id == 7 && p.word(1) == 0xF000000B) sync_mii_db(a.host);
             if (!fsys::exists(a.host)) {
@@ -790,6 +792,7 @@ struct FsUser : Service {
     }
 
     u32 open_file(Archive *a, const LowPath &p, u32 flags, ObjPtr *out) {
+        if (a->id == 10 && (flags & 1)) return fs_err(700, 7, 28);
         auto fs = std::make_shared<FileSession>();
         if (a->id == 0x2345678A) {
             std::string host = a->host;
@@ -989,6 +992,7 @@ struct FsUser : Service {
         case 0x080B: {  // OpenDirectory(archive u64, type, size, desc, ptr)
             Archive *a = arch(ipc[1], ipc[2]);
             if (!a || a->romfs) { ipc.result(ERR_ARCHIVE); break; }
+            if (a->id == 10) { ipc.result(ERR_UNSUPPORTED, 1, 2); ipc.handles(2, {nullptr}, true); break; }
             std::string path = a->host + sanitize(read_path(ipc[3], ipc[4], ipc[6]).str());
             if (!fsys::is_directory(path)) { VLOG("[fs] OpenDirectory %s: not found\n", path.c_str()); ipc.result(ERR_PATH_NOT_FOUND, 1, 2); ipc.handles(2, {nullptr}, true); break; }
             SAVE_SETTLE(path, false);  // the sizes it lists come from storage

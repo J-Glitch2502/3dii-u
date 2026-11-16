@@ -41,4 +41,14 @@ with tempfile.TemporaryDirectory() as tmp:
     assert uf.bundled(clean) == []
     put(clean, 'engine/deep/SeedDB.bin', b'x')
     assert [os.path.basename(p) for p in uf.bundled(clean)] == ['SeedDB.bin']
+
+    # the SD card a build goes onto, checked before it starts: a locked card (Windows' error 19) is said in plain words
+    import pipeline  # noqa: E402
+    locked = OSError(None, 'The media is write protected', 'D:\\3dii-u', 19)
+    assert 'locked' in pipeline.card_error(locked), pipeline.card_error(locked)
+    assert "couldn't be written to: Access is denied" in pipeline.card_error(OSError(13, 'Access is denied'))
+    card = os.path.join(tmp, 'card')
+    os.makedirs(card)
+    pipeline.check_card(card)
+    assert os.listdir(os.path.join(card, 'install')) == [], 'the check left its file on the card'
 print('user files: ok')

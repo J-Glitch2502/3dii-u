@@ -642,7 +642,9 @@ static u32 svc_control_memory(CPU *c) {
             if (!a) return RES_OUT_OF_MEMORY;
         } else {
             a = addr0;
-            if (a < mem::HEAP_BASE || a + size > mem::STACK_TOP - 0x04000000) {
+            // a game in a larger memory mode (loader.cpp) can commit past the standard 64 MB heap
+            const u32 heap_end = mem::HEAP_BASE + std::max(0x04000000u, g_game.app_memory);
+            if (a < mem::HEAP_BASE || a > heap_end || size > heap_end - a) {
                 LOG("[svc] ControlMemory: bad heap address %08x\n", a);
                 return RES_INVALID_ADDRESS;
             }

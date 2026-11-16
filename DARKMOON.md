@@ -286,6 +286,20 @@ How the conflicts went:
 
 Every runtime source compiles for the console (`-fsyntax-only` with the measuring build's flags). Not built, not run in Cemu or on a console.
 
+## Nov 16: main merged again; Josiah took the DSP fix and several Dark Moon pieces into main
+
+PR #7 (the DSP fix) is merged. Main also has its own ports of: the top screen put together in its LCD buffer and on the GPU
+(`linear_copy_on_gpu`, `show_lcd_from_memory` with the flicker fix, `memory_writes`), stale screen buffers (by swaps, not transfers),
+`note_downscaled` (it shrinks the depth buffers too), `metal_guest_read` by `drawn`. Where main has a piece, main's is the one kept
+now and ours is gone, so later merges don't collide; ours-only extras were put back into main's (`gt_mark`, the `lineargpu` switch).
+New in main beside that: targets unused for 1800 presents are freed (`forget_unused`), an FPS counter (options menu, ninth line),
+the menu on the TV too. Dark Moon's FRAME LIMIT is now a tenth line (rows 33 apart).
+
+Still ours only: the vertex cache, the fills, GPU pass timing, `tv_to_720`, native geometry shaders, the frame limit, `O2_GAMES`,
+`THREEDII_MEASURE=console`, the vertex worker on core 0.
+
+Compiles for the console (syntax only). Not built or run yet: the Nov 15 merge ran fine on the console, this one is untested.
+
 ## Next step
 
 1. **The console's GPU is now what holds it back** (profile of Nov 11, late, mansion, build 98237c6): tex 2.5 us a draw (was 44),

@@ -120,6 +120,7 @@ void frontend_live_text(const std::string &) {}
 // itself, as if the system had said so: what a game does as it closes then runs in a check too.
 static volatile bool route_quit;
 void frontend_live_key(const std::string &key) {  // a route's "KEY <name>"
+    if (key == "menu") wiiu::menu_input(VPAD_BUTTON_STICK_L);  // as a click of the left stick: opens the options menu, or closes it
     if (key != "quit") return;
     if (wiiu::debug_flag("cemu")) route_quit = true;
     else wiiu::menu_quit_now();
@@ -852,6 +853,8 @@ int main(int argc, char **argv) {
     std::filesystem::create_directories(kernel::save_root(), no_save);
     if (!wiiu::test_run())  // services/fs.cpp's folder for the game's save (archive_dir)
         wiiu::save_from_content(std::string(CONTENT_DIR) + "/save_import", kernel::save_root() + "/savedata", kernel::save_root() + "/save_imported");
+    struct stat no_menu;
+    if (stat((std::string(CONTENT_DIR) + "/no_menu").c_str(), &no_menu) == 0) wiiu::menu_disable();  // built with "In-game menu: Off"
     rt_log_open(wiiu::data_dir() + "/log.txt");
     if (FILE *f = fopen((wiiu::data_dir() + "/logsync").c_str(), "rb")) {  // debug aid: each line to the card as it's logged (core.cpp)
         fclose(f);
@@ -881,6 +884,7 @@ int main(int argc, char **argv) {
     }
     LOG("[wiiu] guest memory at %p\n", g_mem);
     settings_load();
+    if (wiiu::debug_flag("showfps")) g_settings.show_fps = true;  // a test run's picture of the counter, as the menu's FPS COUNTER: ON gives it
     // the Wii U's language: a game takes it when its region has it, until the player picks another in the options menu (services/cfg.cpp)
     if (const UCHandle uc = UCOpen(); uc >= 0) {
         u32 language = 0;

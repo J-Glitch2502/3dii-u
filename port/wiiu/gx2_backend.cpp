@@ -624,12 +624,13 @@ struct Surface {
     bool gpu_newer = false, guest_newer = false, written_since_flush = false;
     bool first_use = true;                             // nothing has drawn into it yet: see upload_target
     bool gpu_chain = false;                            // made by gx2_texture_copy, or from one: the transfers that make its mipmaps stay on the GPU too
-    u64 drawn = 0;                                     // when the GPU last wrote it (gpu_writes): of targets sharing memory, the latest holds what's there
-    bool linear = false;                               // its memory holds the picture row by row, not in tiles: a display transfer's linear output (gpu_copy_transfer)
     bool copy = false;                                 // a texture a transfer or a copy made on the GPU, its bytes not in guest memory (gpu_copy_transfer, gx2_texture_copy): whatever the game says it wrote there is newer
     // What of its memory the game has written since the GPU last made it newer (metal_guest_read). shortcut: one span, so bytes between two
     // writes or in a copy's gaps count as written; track rows (as Tex::dirty_rows) once a game needs it
     u32 written_lo = 0, written_hi = 0;
+    u64 drawn = 0;                                     // when the GPU last wrote it (gpu_writes): of targets sharing memory, the latest holds what's there
+    u64 last_use = 0;                                  // use_counter when it was last drawn into, sampled, copied or shown (forget_unused)
+    bool linear = false;                               // its memory holds the picture row by row, not in tiles: a display transfer's linear output (gpu_copy_transfer)
     bool shared_depth = false, clear_pending = false;  // see share_depth_block
     // For a target the game's own code may read (cpu_reads): the list being run has drawn to it; a draw to some other kind of target has sampled
     // the picture it holds; and the same of the picture it held before this list drew to it. See gx2_finish_list.
@@ -642,6 +643,8 @@ struct Surface {
     u32 image_size() { return depth ? db.surface.imageSize : cb.surface.imageSize; }
 };
 std::vector<std::unique_ptr<Surface>> surfaces;
+u64 use_counter;  // presents so far: when a texture or a target was last used
+inline void used(Surface &s) { s.last_use = use_counter; }
 Surface *cur_color, *cur_depth;
 // A colour target in memory the game's code reads as it likes, and smaller than a screen: a picture the game may have drawn to pick up itself,
 // as Miitopia does a Mii's face (gx2_finish_list). A whole screen it asks for with a transfer.
@@ -739,13 +742,6 @@ int start_resolution = 720;  // settings.ini's resolution as this start took it:
 
 // The screens' render targets are drawn larger: the top screen for the size above, the bottom one 1:1 on the GamePad. The game
 // renders some of them twice as wide and scales them down (cheap antialiasing), so the two axes scale differently.
-// targets their transfers scale down, drawn at the smaller size (note_downscaled, below)
-bool half_ss = true;
-struct HalfKey {
-    u32 addr, w, h;
-    float sx, sy;
-};
-std::vector<HalfKey> half_keys;
 
 // vw, vh: the viewport of the draw a target is made for, when there is one
 void rt_scale(u32 w, u32 h, float &sx, float &sy, u32 vw = 0, u32 vh = 0) {
@@ -770,6 +766,14 @@ void rt_scale(u32 w, u32 h, float &sx, float &sy, u32 vw = 0, u32 vh = 0) {
     }
 }
 
+// targets their display transfers scale down, drawn at the size they're used (note_downscaled): by address and size, for a target made again
+bool half_ss = true;
+struct HalfKey {
+    u32 addr, w, h;
+    float sx, sy;
+};
+std::vector<HalfKey> half_keys;
+
 // scale_as: a copy of that surface's picture (gx2_texture_copy and its mipmaps), made at its scale so what the game draws from it stays as sharp.
 // first: the draw a colour target is made for. with: the colour target a depth buffer is bound with, whose scale it has to have: a game uses one
 // depth buffer's memory with targets this draws at different scales.
@@ -777,6 +781,7 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
     for (auto &s : surfaces)
         if (s->addr == addr && s->w == w && s->h == h && s->depth == depth && (!with || (s->base_sx == with->base_sx && s->base_sy == with->base_sy))) {
             s->fmt = fmt;
+            used(*s);
             return s.get();
         }
     auto s = std::make_unique<Surface>();
@@ -792,7 +797,7 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         s->sx = with->base_sx;
         s->sy = with->base_sy;
     } else rt_scale(w, h, s->sx, s->sy, first ? (u32)lroundf(2 * first->vp_hw) : 0, first ? (u32)lroundf(2 * first->vp_hh) : 0);
-    if (!depth && !scale_as && half_ss)  // one its transfer scales down (note_downscaled)
+    if (!depth && !scale_as && half_ss)
         for (const HalfKey &k : half_keys)
             if (k.addr == addr && k.w == w && k.h == h && k.sx <= s->sx && k.sy <= s->sy) s->sx = k.sx, s->sy = k.sy;
     s->base_sx = s->sx;
@@ -850,6 +855,7 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         GX2InitTextureRegs(&s->tex);
     }
     s->guest_newer = true;
+    used(*s);
     LOG("[gx2] new %s surface %08x %ux%u fmt %u, %ux%u, %u KB in %s\n", depth ? "depth" : "color", addr, w, h, fmt, s->sw, s->sh,
         s->image_size() >> 10, s->mem1 ? "MEM1" : "MEM2");
     wiiu::note("new %s surface %08x %ux%u, %u KB in %s", depth ? "depth" : "color", addr, w, h, s->image_size() >> 10, s->mem1 ? "MEM1" : "MEM2");
@@ -902,37 +908,16 @@ void set_surface_scale(Surface &s, u32 level) {
     apply_scale(s);
 }
 
-// A target the game draws at twice the size it uses, and scales down with a display transfer (its own antialiasing): Luigi's Mansion: Dark
-// Moon draws each half of its top screen 256 wide for 128 columns of the LCD, twice a frame. At the screens' scale that was 768x1248 for a
-// strip the TV shows as 369x1198, 2.2 times the pixels, and its draws took 54 ms of GPU a frame on the title screen and in the rain
-// (a console, 2026-11-13). Such a target is drawn at the scale its transfer's destination has for what it holds instead, so the transfer
-// copies one to one (gpu_copy_transfer finds them; smaller only, in the memory it has). The game's antialiasing in that direction goes;
-// the picture is still three times a 3DS's. Kept by address and size, for a target made again. "set halfss 0" draws them as before.
+// a surface at another base scale, in the memory it has (bind_targets: a depth buffer after its colour)
 void set_base_scale(Surface &s, float bsx, float bsy) {
     if (s.base_sx == bsx && s.base_sy == bsy) return;
     s.base_sx = bsx;
     s.base_sy = bsy;
     apply_scale(s);
 }
-void note_downscaled(Surface &src, const Surface &dst, u32 scaling) {
-    if (!half_ss || !scaling || src.depth) return;
-    const float nx = dst.base_sx / 2, ny = std::min(src.base_sy, scaling == 2 ? dst.base_sy / 2 : dst.base_sy);
-    if (nx < 1 || ny < 1 || src.base_sx < nx * 1.2f) return;
-    if (kMeasure) LOG("[gx2] target %08x %ux%u is scaled down by its transfer: drawn at %.2fx%.2f, not %.2fx%.2f\n", src.addr, src.w, src.h, nx, ny, src.base_sx, src.base_sy);
-    bool known = false;
-    for (HalfKey &k : half_keys)
-        if (k.addr == src.addr && k.w == src.w && k.h == src.h) {
-            k.sx = nx, k.sy = ny;
-            known = true;
-        }
-    if (!known && half_keys.size() < 16) half_keys.push_back({src.addr, src.w, src.h, nx, ny});
-    set_base_scale(src, nx, ny);
-}
 inline void take_dyn_level(Surface &s) {
     if ((s.dyn_level != dyn_level || s.dyn_f != dyn_factor(dyn_level)) && dyn_scaled(s)) set_surface_scale(s, dyn_level);
 }
-
-u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
 
 // Switches for trying a change on a console while it plays ("set <name> 0|1" over the network, gfx_set): each of these on by default
 bool use_vtx_cache = true, fill_inside = true, linear_on_gpu = true;
@@ -1039,12 +1024,49 @@ const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 k
     return buf;
 }
 
+// A target the game draws at twice the size it uses and scales down with a display transfer (its own antialiasing): Luigi's Mansion 2 draws
+// each half of its top screen 256 wide for 128 columns of the LCD, twice a frame. At the screens' scale that is 768x1248 for a strip the TV
+// shows as 369x1200, 2.2 times the pixels, and those draws took 54 of the GPU's 64 ms a frame on the title screen and in the rain on a
+// console (Senne's measure). Such a target is drawn from its next frame at the scale its transfer's destination has, so the transfer copies
+// one to one; the game's antialiasing that way goes, the picture is still three times a 3DS's. Its depth buffers (its size, its old scale)
+// shrink with it, in their own memory: bind_targets would otherwise make one of the new scale beside the old, and the fast memory the old
+// one kept sent Luigi's Mansion 2's next target to slow memory. Kept by address and size for a target made again (get_surface). "set halfss
+// 0" stops it.
+void note_downscaled(Surface &src, const Surface &dst, u32 scaling) {
+    if (!half_ss || !scaling || src.depth) return;
+    const float nx = dst.base_sx / 2, ny = std::min(src.base_sy, scaling == 2 ? dst.base_sy / 2 : dst.base_sy);
+    if (nx < 1 || ny < 1 || src.base_sx < nx * 1.2f) return;
+    if (kMeasure) LOG("[gx2] target %08x %ux%u is scaled down by its transfer: drawn at %.2fx%.2f, not %.2fx%.2f\n", src.addr, src.w, src.h, nx, ny,
+                      src.base_sx, src.base_sy);
+    bool known = false;
+    for (HalfKey &k : half_keys)
+        if (k.addr == src.addr && k.w == src.w && k.h == src.h) {
+            k.sx = nx, k.sy = ny;
+            known = true;
+        }
+    if (!known && half_keys.size() < 16) half_keys.push_back({src.addr, src.w, src.h, nx, ny});
+    for (auto &d : surfaces)
+        if (d->depth && d->w == src.w && d->h == src.h && d->base_sx == src.base_sx && d->base_sy == src.base_sy) {
+            d->base_sx = nx;
+            d->base_sy = ny;
+            apply_scale(*d);
+        }
+    src.base_sx = nx;
+    src.base_sy = ny;
+    apply_scale(src);
+}
+
+u64 gpu_writes;  // a count of the GPU's writes into targets, for Surface::drawn
+
 // A surface at addr that match accepts. Targets of different sizes can share an address (get_surface tells them apart by size), so the first
 // one there isn't always the one meant: a stale target used to stand in front of the one a texture read.
 template <class Match>
 Surface *find_surface(u32 addr, bool depth, Match match) {
     for (auto &s : surfaces)
-        if (s->addr == addr && s->depth == depth && match(*s)) return s.get();
+        if (s->addr == addr && s->depth == depth && match(*s)) {
+            used(*s);
+            return s.get();
+        }
     return nullptr;
 }
 Surface *find_surface(u32 addr, bool depth) {
@@ -1117,6 +1139,9 @@ struct Tex {
     u32 dirty_rows[4];  // a bit per tile row (up to 1024 rows of texels) that definite writes touched since the last upload
     u32 lag_rows[4];    // the tile rows the spare image lacks (see replace_image)
     u64 last_use;
+    u64 next_turn;      // when it is hashed in turn next (get_texture)
+    bool unflushed;     // it changed with no notice: hashed at its first use every flip, until TURN_QUIET flips pass with no change
+    u64 changed_at;     // when it last did
     u32 mem;
     GX2Texture t;
     bool changed_before;  // see replace_image
@@ -1129,9 +1154,14 @@ struct Tex {
 std::vector<std::unique_ptr<Tex>> textures;
 std::unordered_map<u64, Tex *> tex_index;
 inline u64 tex_key(u32 addr, u32 w, u32 h, u32 fmt, u32 levels) { return (u64)addr << 32 | w << 20 | h << 8 | fmt << 4 | levels; }
-u64 use_counter;
 u64 tex_memory;
 constexpr u64 TEX_MEMORY_LIMIT = 128ull << 20;
+// A game may write a texture with the CPU and never flush it, as a 3DS's small cache puts the bytes in memory within a frame anyway: Animal
+// Crossing's design canvas, Brain Age's handwriting. So small textures are hashed in turn, up to TURN_BYTES a flip (one up to TURN_LARGEST
+// when it's the flip's first), each at most every TURN_FLIPS; one found changed with no notice is hashed at its first use every flip, until
+// it stays the same for TURN_QUIET flips.
+constexpr u32 TURN_BYTES = 32 << 10, TURN_LARGEST = 64 << 10, TURN_FLIPS = 30, TURN_QUIET = 300;
+u32 turn_budget = TURN_BYTES;
 
 constexpr u8 k_fmt_bits[16] = {32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8, 8, 8};
 
@@ -1484,6 +1514,16 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
             if (logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
             e.maybe_dirty = true;
         }
+        bool turn = false;
+        if (e.unflushed && use_counter - e.changed_at > TURN_QUIET) e.unflushed = false;
+        if (e.last_use != use_counter && !e.dirty && !e.maybe_dirty
+            && (e.unflushed || (e.bytes <= TURN_LARGEST && use_counter >= e.next_turn && (e.bytes <= turn_budget || turn_budget == TURN_BYTES)))) {
+            if (!e.unflushed) {
+                turn_budget -= std::min(turn_budget, e.bytes);
+                e.next_turn = use_counter + TURN_FLIPS;
+            }
+            turn = e.maybe_dirty = true;  // checked below as after a flush
+        }
         e.last_use = use_counter;
         if (e.heap_flushes != heap_flushes) {
             e.heap_flushes = heap_flushes;
@@ -1518,6 +1558,10 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
             // A stale hash (the last upload took a definite write's word for it) with the same sample: the image is current, only the hash is
             // unknown, so it's taken now. Uploading instead redid NSMB2's whole 1 MB atlas after nearly every partial update.
             if (changed || (!e.hash_stale && hh != e.hash)) {
+                if (turn) {
+                    e.unflushed = true;
+                    e.changed_at = use_counter;
+                }
                 // the GPU may be reading the old contents
                 if (gxt()) LOG("[gxt] reupload %08x %ux%u fmt %u, %u bytes, dirty %d\n", addr, w, h, fmt, e.bytes, e.dirty);
                 last_reupload = {addr, w, h, fmt, levels, e.dirty};
@@ -1556,6 +1600,7 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
     e.dirty = e.maybe_dirty = e.hash_stale = false;
     e.row_bytes = w / 8 * (64 * k_fmt_bits[fmt & 15] / 8);
     e.last_use = use_counter;
+    e.next_turn = use_counter + TURN_FLIPS;
     memset(&e.t, 0, sizeof e.t);
     GX2Surface &f = e.t.surface;
     e.gpu = gpu_decoded(w, h, fmt, levels);
@@ -2187,6 +2232,7 @@ void set_fragment(const DrawState &ds, bool uber) {
         }
         Surface *drawn = nullptr;  // a picture the game drew, sampled where it lies
         GX2Texture *tex = get_texture(t.face_addr[0], t.w, t.h, t.fmt, t.levels, &drawn);
+        if (drawn) used(*drawn);
         if (drawn && !cpu_reads(*cur_color)) drawn->sampled = true;
         if (!tex) tex = &black_tex;
         GX2SetPixelTexture(tex, k);
@@ -2921,15 +2967,22 @@ static void guest_wrote(Surface &s, u32 paddr, u32 size) {
     s.guest_newer = true;
 }
 
-// CPU or DMA writes the game told us about. Nothing needs the CPU's cache flushed here: what the GPU reads in place is flushed at the draw, and on a
-// real CPU flushing a whole heap, as some games ask for after every file, would take tens of milliseconds.
-// What the game's texture copies and display transfers put into guest memory since the last VBlank (gpu/transfer.cpp): a top screen the game put together
-// in its LCD buffer itself shows from there (show_lcd_from_memory). Fills don't count: a game may clear an LCD buffer that a transfer fills later.
+// The game's last texture copies and display transfers through guest memory (gpu/transfer.cpp), numbered: a top screen the game puts together
+// in its LCD buffer itself is shown from there (show_lcd_from_memory). Copies under 4 KB are a few tiles, never a screen's rows, and fills
+// don't count: a game may clear an LCD buffer that a transfer fills later.
 struct MemoryWrite {
     u32 pa, size, seq;
 };
-MemoryWrite lcd_writes[16];
-u32 lcd_write_seq;
+MemoryWrite memory_writes[16];
+u32 memory_write_seq;
+void gx2_copied_to_memory(u32 paddr, u32 size) {
+    if (size < 4096) return;
+    memory_write_seq++;
+    memory_writes[memory_write_seq % 16] = {paddr, size, memory_write_seq};
+}
+
+// CPU or DMA writes the game told us about. Nothing needs the CPU's cache flushed here: what the GPU reads in place is flushed at the draw, and on a
+// real CPU flushing a whole heap, as some games ask for after every file, would take tens of milliseconds.
 // A geometry shader the CPU runs, once per program and entry, for the next build (tools/pica_to_c.py makes C of it): a "GS  " record among the
 // misses, as a "VS  " one but with no tail. tools/misses_to_log.py puts these in a .gsl file of their own.
 void gx2_note_gs(u32 entry, const ShaderSetup &s) {
@@ -2945,12 +2998,6 @@ void gx2_note_gs(u32 entry, const ShaderSetup &s) {
         miss_put(&w, 4);
     }
 }
-void gx2_copied_to_memory(u32 paddr, u32 size) {
-    if (size < 4096) return;
-    lcd_write_seq++;
-    lcd_writes[lcd_write_seq % 16] = {paddr, size, lcd_write_seq};
-}
-
 void metal_guest_written(u32 paddr, u32 size, bool definite) {
     st_flushes++;
     vtx_invalidate(paddr, size);
@@ -3041,20 +3088,18 @@ void write_back(Surface &s) {
 }
 }  // namespace
 
-// A target the game has written over since the GPU last drew into it (texture copies, transfers through memory, fills) isn't read back where
-// those writes cover the read: memory holds the newer picture there. Luigi's Mansion 2 puts its top screen together at 18000000, where its
-// targets are.
+// Of the targets a read covers, the one the GPU wrote last holds what the memory would: Luigi's Mansion 2 draws its bottom screen (240x320) and
+// each part of its top screen (256x416, 128x416) at 18000000. Not read back where the game has written over it since the GPU drew it (texture
+// copies, transfers through memory, fills): memory holds the newer picture there.
 void metal_guest_read(u32 paddr, u32 size) {
-    // Of the targets there, the one the GPU wrote last holds what the memory would: Luigi's Mansion: Dark Moon draws its bottom screen (240x320) and each half
-    // of its top screen (256x416, then 128x416) at 0x18000000, and the top screen's texture copies to its LCD buffer read the bottom screen back, so the TV showed black.
-    Surface *best = nullptr;
-    for (auto &s : surfaces) {
-        if (s->depth || !s->gpu_newer || s->addr >= paddr + size || paddr >= s->addr + s->bytes()) continue;
-        const u32 lo = std::max(paddr, s->addr), hi = std::min(paddr + size, s->addr + s->bytes());  // the read, of this surface's bytes
-        const bool memory_newer = s->guest_newer && s->written_lo <= lo && hi <= s->written_hi;
-        if (!memory_newer && (!best || s->drawn > best->drawn)) best = s.get();
-    }
-    if (best) write_back(*best);
+    Surface *last = nullptr;
+    for (auto &s : surfaces)
+        if (!s->depth && s->gpu_newer && s->addr < paddr + size && paddr < s->addr + s->bytes() && (!last || s->drawn > last->drawn)) last = s.get();
+    if (!last) return;
+    const u32 lo = std::max(paddr, last->addr), hi = std::min(paddr + size, last->addr + last->bytes());  // the read, of this surface's bytes
+    if (last->guest_newer && last->written_lo <= lo && hi <= last->written_hi) return;
+    used(*last);
+    write_back(*last);
 }
 void metal_guest_prewrite(u32, u32) {}
 
@@ -3341,6 +3386,29 @@ void to_screen(GX2ColorBuffer *from, GX2ScanTarget target) {
     GX2CopyColorBufferToScanBuffer(to.surface.image ? &to : from, target);
 }
 
+// Render targets a game made and stopped using (a course or a scene left behind) are freed. Kept for good, Mario Kart 7 had 88 after three
+// races where it began with 21, each holding its GPU memory (fast memory filled, and later targets went to slow memory), and every walk of the
+// list took longer: games slowed the longer they were played. One unused for kForgetAfter presents goes, what the GPU drew there that memory
+// lacks written back first, so nothing the game may still read is lost. One a present, as a write back waits for the GPU.
+void forget_unused() {
+    constexpr u64 kForgetAfter = 1800;  // presents: half a minute at 60, a minute at 30
+    for (auto it = surfaces.begin(); it != surfaces.end(); ++it) {
+        Surface &s = **it;
+        if (s.last_use + kForgetAfter > use_counter || &s == cur_color || &s == cur_depth || s.in_list || s.shared_depth) continue;
+        if (!s.depth && s.gpu_newer && !s.guest_newer) write_back(s);
+        if (void *image = s.image()) {
+            if (!s.mem1) free(image);
+            else if (GfxHeapFreeMEM1) GfxHeapFreeMEM1(image);
+        }
+        surfaces.erase(it);
+        state_sent_valid = false;
+        state_lost = true;
+        return;
+    }
+}
+
+void draw_fps();  // the frame rate counter (below, beside the text it draws)
+
 void present() {
     const OSTime tp = prof_now();
     gt_mark(GT_PRESENT, 0);
@@ -3376,6 +3444,7 @@ void present() {
         ps_seen.clear();
         ps_last_ds = nullptr;
     }
+    if (g_settings.show_fps) draw_fps();
     to_screen(tv_cb, GX2_SCAN_TARGET_TV);
     to_screen(drc_cb, GX2_SCAN_TARGET_DRC);
     restore_context();
@@ -3385,6 +3454,8 @@ void present() {
     GX2SetDRCEnable(TRUE);
     st_flips++;
     use_counter++;
+    turn_budget = TURN_BYTES;
+    forget_unused();
     ring_next_segment();
     gt_flip(cur_color ? cur_color->addr : 0);
     dyn_res_update();
@@ -3553,6 +3624,40 @@ void draw_text(u32 w, u32 h, const char *text, float x, float y, float scale) {
         draw_rect(w, h, x, y, x + 5 * scale, y + 7 * scale, g2 * cu, 0, g2 * cu + 5.0f / (n * 6), 7.0f / 8);
     }
 }
+// The frame rate counter, the menu's FPS COUNTER: frames shown in the last second, white on black in the top left of the TV and the GamePad
+void draw_fps() {
+    static OSTime since;
+    static u64 flips_then;
+    static u32 fps;
+    const OSTime now = OSGetSystemTime();
+    if (!since || OSTicksToMilliseconds(now - since) >= 1000) {
+        if (since) fps = (u32)((st_flips - flips_then) * 1000 / OSTicksToMilliseconds(now - since));
+        since = now;
+        flips_then = st_flips;
+    }
+    char text[16];
+    snprintf(text, sizeof text, "%u FPS", fps);
+    const float wide = 6 * 3 * strlen(text);
+    for (GX2ColorBuffer *cb : {tv_cb, drc_cb}) {
+        GX2SetColorBuffer(cb, GX2_RENDER_TARGET_0);
+        cur_color = nullptr;
+        begin_blit();
+        GX2SetViewport(0, 0, (float)cb->surface.width, (float)cb->surface.height, 0, 1);
+        GX2SetScissor(0, 0, cb->surface.width, cb->surface.height);
+        GX2SetPixelTexture(&black_tex, 0);
+        GX2SetPixelSampler(&blit_sampler, 0);
+        set_blit_colors(0, 0, 0, 0.02f, 0.02f, 0.02f);
+        draw_rect(854, 480, 6, 6, 18 + wide, 35, 0, 0, 1, 1);
+        GX2SetPixelTexture(&font_tex, 0);
+        GX2SetPixelSampler(&lut_sampler, 0);
+        GX2SetColorControl(GX2_LOGIC_OP_COPY, 1, FALSE, TRUE);
+        GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA, GX2_BLEND_COMBINE_MODE_ADD, FALSE, GX2_BLEND_MODE_ONE, GX2_BLEND_MODE_ZERO, GX2_BLEND_COMBINE_MODE_ADD);
+        set_blit_colors(1, 1, 1, 0, 0, 0);
+        draw_text(854, 480, text, 12, 10, 3);
+        GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
+    }
+    state_lost = true;
+}
 }  // namespace
 
 void metal_display_transfer(u32, u32, u32, u32, u32) {}
@@ -3588,15 +3693,16 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
             (x->sy > 1 || x->gpu_chain || (own_size && x->gpu_newer)))
             src = x.get();
     if (!src) return false;
+    used(*src);
     const bool own_size_copy = own_size && src->sy <= 1 && !src->gpu_chain;
     if (sy <= 1 && !src->gpu_chain && !own_size_copy) return false;
     Surface *dst = get_surface(out_paddr, out_w, out_h, cbuf_to_pixfmt((flags >> 12) & 7), false, src->gpu_chain ? src : nullptr);
     if (dst == src) return false;
     dst->gpu_chain |= src->gpu_chain;
-    // Neither bit 1 (linear in) nor bit 5 (left tiled): the picture lands in memory row by row, for whatever reads its bytes. Paper Mario's goes on to another
-    // transfer here on the GPU; Luigi's Mansion: Dark Moon's top screen halves go to texture copies into its LCD buffer, which read them back, and tiled they came out black.
-    dst->linear = !(flags & 0x22);
     dst->copy = own_size_copy;
+    // Neither bit 1 (linear in) nor bit 5 (left tiled): the picture lands in memory row by row, for whatever reads its bytes. Paper Mario's goes on to another
+    // transfer here on the GPU; Luigi's Mansion 2's top screen halves go to texture copies into its LCD buffer, which read them back, and tiled they came out black.
+    dst->linear = !(flags & 0x22);
     take_dyn_level(*dst);
     static u32 notes;
     if (gxt()) LOG("[gxt] gpu copy %08x -> %08x, %08x %08x flags %08x\n", in_paddr, out_paddr, in_dims, out_dims, flags);
@@ -3633,7 +3739,7 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
 // The top screen's LCD buffers lately (show_lcd_from_memory notes them at each VBlank), and how their rows are laid out
 u32 recent_top[4], recent_top_stride, recent_top_bpp, recent_top_fmt;
 
-// Luigi's Mansion: Dark Moon puts its top screen together with the copy engine, from linear pictures its transfers make (gpu_copy_transfer): each third
+// Luigi's Mansion 2 puts its top screen together with the copy engine, from linear pictures its transfers make (gpu_copy_transfer): each third
 // of the screen is drawn, transferred to a linear picture and copied a row at a time, a few columns over or into its columns of the LCD buffer. Through guest
 // memory that was read backs every frame, each waiting for the GPU, and in Cemu, which reads nothing back, a black screen. A copy of whole rows out of a linear
 // surface is drawn on the GPU instead, into a linear surface at the destination: one already there whose rows it fits, or the top screen's LCD buffer (whole
@@ -3644,10 +3750,12 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
     const u32 in_w = (in_width_gap & 0xffff) * 16, in_gap = (in_width_gap >> 16) * 16;
     const u32 out_w = (out_width_gap & 0xffff) * 16, out_gap = (out_width_gap >> 16) * 16;
     if (!in_w || in_w != out_w || size % in_w) return false;
+    // what the GPU wrote there last, if that is a linear picture the game hasn't written over since
     Surface *src = nullptr;
     for (auto &s : surfaces)
-        if (!s->depth && s->linear && s->addr <= in_paddr && in_paddr < s->addr + s->bytes() && (!src || s->drawn > src->drawn)) src = s.get();
-    if (!src) return false;
+        if (!s->depth && s->addr <= in_paddr && in_paddr < s->addr + s->bytes() && (!src || s->drawn > src->drawn)) src = s.get();
+    if (!src || !src->linear || src->guest_newer) return false;
+    used(*src);
     const u32 bpp = pixel_bytes(cbuf_to_pixfmt(src->fmt)), src_stride = src->w * bpp, rows = size / in_w;
     const u32 in_off = in_paddr - src->addr;
     if (in_w + in_gap != src_stride && !(in_gap == 0 && in_w == src_stride)) return false;
@@ -3660,6 +3768,7 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
     Surface *dst = nullptr;
     u32 base = out_paddr, height = rows;
     u32 lcd = 0;
+    // a copy starting up to 33 rows before an LCD buffer is that buffer's: Luigi's Mansion 2's start 16 before it, its pictures being 416 rows
     if (recent_top_stride == out_stride && recent_top_bpp == bpp)
         for (u32 pa : recent_top)
             if (pa && out_paddr < pa + 400 * out_stride && out_paddr + rows * out_stride > pa && pa - out_paddr <= 33 * out_stride) lcd = pa;
@@ -3669,8 +3778,8 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
         height = back + 400;
     } else {
         for (auto &s : surfaces)
-            if (!s->depth && s->linear && s.get() != src && s->w * bpp == out_stride && s->addr <= out_paddr && out_paddr + (rows - 1) * out_stride < s->addr + s->bytes() &&
-                (!dst || s->drawn > dst->drawn))
+            if (!s->depth && s->linear && s.get() != src && s->w * bpp == out_stride && s->addr <= out_paddr &&
+                out_paddr + (rows - 1) * out_stride < s->addr + s->bytes() && (!dst || s->drawn > dst->drawn))
                 dst = s.get();
         if (dst) {
             base = dst->addr;
@@ -3682,9 +3791,10 @@ static bool linear_copy_on_gpu(u32 in_paddr, u32 out_paddr, u32 size, u32 in_wid
     const u32 first_col = (off % out_stride) / bpp;
     if (!dst) dst = get_surface(base, out_stride / bpp, height, lcd ? recent_top_fmt : src->fmt, false, src);
     if (dst == src || first_col + cols > dst->w) return false;
+    used(*dst);
     take_dyn_level(*dst);
     static u32 notes;
-    if (kMeasure && notes++ < 4) wiiu::note("copying rows on the GPU: %08x into %08x, %u columns from %u", in_paddr, base, cols, first_col);
+    if (notes++ < 4) wiiu::note("copying rows on the GPU: %08x into %08x, %u columns from %u", in_paddr, base, cols, first_col);
     st_gpu_copies++;
     gx2_flush_cpu_batch();
     if (dst->first_use) {
@@ -3739,6 +3849,7 @@ static bool tile_run_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_ga
     for (auto &x : surfaces)
         if (!x->depth && x->gpu_newer && !x->guest_newer && x->sy > 1 && in_paddr >= x->addr && in_paddr + size <= x->addr + x->bytes()) src = x.get();
     if (!src || src->w % 8) return false;
+    used(*src);
     const u32 tile = src->bytes() / (src->w * src->h) * 64, per_row = src->w / 8, offset = in_paddr - src->addr;
     if (offset % tile || size % (tile * per_row)) return false;
     const u32 first = offset / tile, q = first / per_row, m = first % per_row, w = src->w, h = size / (tile * per_row) * 8;
@@ -3781,6 +3892,7 @@ static bool tile_run_copy(u32 in_paddr, u32 out_paddr, u32 size, u32 in_width_ga
     dst->gpu_newer = true;
     dst->guest_newer = false;
     dst->written_since_flush = true;
+    dst->drawn = ++gpu_writes;
     return true;
 }
 
@@ -3874,9 +3986,9 @@ static void upload_target(Surface &s) {
 // (the user, 2026-11-08: "the bottom screen flashing in and out with the top showing on it briefly").
 // The picture's height rules out the other LCD whatever the addresses say: the top's are 400 rows (NSMB2's 416), the bottom's 320. A Link Between Worlds' second
 // top buffer is 18300000 too, and its top kept flashing onto the GamePad on a console (2026-11-09).
-// A buffer its screen stopped showing more than 8 swaps ago says nothing of where the picture starts: Luigi's Mansion 2's top LCD was at
-// 18300000 only at start-up, and its 416-row pictures still go there, to be texture-copied to FCRAM 16 rows before the LCD it shows now.
-// Such a picture is taken from its last 400 rows, where a screen sits in a taller target (NSMB2's 416).
+// A buffer its screen stopped showing more than 8 swaps ago is no screen's any more (a game turns over two or three buffers): Luigi's Mansion 2's
+// top LCD is at 18300000 only at start-up, then each half of its top screen is transferred there and put together in its LCD buffers in FCRAM
+// (show_lcd_from_memory). Taken as a screen's, the first half went to the TV as the whole top screen, twice its height.
 static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
     struct Seen {
         u32 pa, when, swaps;  // swaps: its screen's buffer changes so far, when it last showed this one
@@ -3898,23 +4010,16 @@ static int screen_of(u32 paddr, u32 size, u32 rows, u32 &skip) {
     }
     int found = -1;
     u32 best = 0;
-    bool stale = false;
     const bool bottom_rows = rows <= 320;
-    // A buffer an LCD hasn't shown for a while is no screen's any more. Luigi's Mansion: Dark Moon shows "Preparing to start game" from VRAM at 0x18300000,
-    // later draws each half of its top screen there and puts the halves together in its LCD buffers in FCRAM: remembered for good, the first half went to the
-    // TV as the whole top screen, stretched to twice its height. Games that take turns between buffers show each of them every frame or two.
-    constexpr u32 kForgetAfter = 240;  // transfers: a few seconds, at the most a game makes
     for (int s = 0; s < 3; s++) {
         if ((s == 1) != bottom_rows) continue;  // only the screens of the picture's height
         for (const Seen &x : seen[s])
-            if (x.pa && clock - x.when <= kForgetAfter && x.pa >= paddr && x.pa - paddr < size && x.when >= best) {  // a tie goes to the later screen, as before
+            if (x.pa && swaps[s] - x.swaps <= 8 && x.pa >= paddr && x.pa - paddr < size && x.when >= best) {  // a tie goes to the later screen
                 found = s;
                 best = x.when;
                 skip = x.pa - paddr;
-                stale = swaps[s] - x.swaps > 8;  // a game turns over two or three buffers
             }
     }
-    if (stale) skip = rows > 400 ? size / rows * (rows - 400) : 0;
     return found;
 }
 
@@ -4048,6 +4153,7 @@ bool metal_defer_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims
         first_row = off / row_bytes;
     }
     if (!s) return false;
+    used(*s);
     gx2_flush_cpu_batch();
     flush_surface(*s);
     // memory rows run top down, surface rows bottom up; a surface read as a taller texture has its window at the top of that texture
@@ -4323,7 +4429,7 @@ void gfx_vblank() { vblank_pending = true; }
 // ---- options menu state; the input thread changes it, the GPU thread draws it
 // A game that's held to a frame rate (cap_game) has a line to let it run free, between the volume and quitting: its cutscenes are timed for
 // that rate, the rest of it may look better without (the user, 2026-11-14)
-static int menu_items() { return cap_game ? 9 : 8; }
+static int menu_items() { return cap_game ? 10 : 9; }
 static volatile bool menu_is_open;
 static volatile int menu_item, menu_speed = 100, menu_volume = 100;
 static volatile bool menu_quit;
@@ -4358,14 +4464,16 @@ static void next_resolution() {
     wiiu::settings_due = true;
 }
 
+static bool menu_allowed = true;
 bool menu_open() { return menu_is_open; }
+void menu_disable() { menu_allowed = false; }
 int game_speed() { return menu_speed; }
 bool menu_wants_quit() { return menu_quit; }
 void menu_quit_now() { menu_quit = true; }
 
 void menu_input(u32 pressed) {
     if (!menu_is_open) {
-        if (pressed & VPAD_BUTTON_STICK_L) {
+        if (menu_allowed && (pressed & VPAD_BUTTON_STICK_L)) {
             menu_item = 0;
             menu_is_open = true;
         }
@@ -4388,20 +4496,26 @@ void menu_input(u32 pressed) {
     if (menu_item == 4 && dir) next_tv_layout(dir);
     if (menu_item == 5 && dir) next_pad_layout(dir);
     if (menu_item == 6 && dir) next_resolution();
-    if (count == 9 && menu_item == 7 && (dir || (pressed & VPAD_BUTTON_A))) cap_fps = cap_fps ? 0 : cap_game;
+    if (menu_item == 7 && (dir || (pressed & VPAD_BUTTON_A))) {  // the frame rate counter (draw_fps), kept in settings.ini
+        g_settings.show_fps = !g_settings.show_fps;
+        wiiu::settings_due = true;
+    }
+    if (count == 10 && menu_item == 8 && (dir || (pressed & VPAD_BUTTON_A))) cap_fps = cap_fps ? 0 : cap_game;
     if (pressed & VPAD_BUTTON_A) {
         if (menu_item == 0) menu_is_open = false;
         if (menu_item == count - 1) menu_quit = true;
     }
 }
 
-static void draw_menu() {
-    const u32 w = drc_cb->surface.width, h = drc_cb->surface.height;
-    GX2SetColorBuffer(drc_cb, GX2_RENDER_TARGET_0);
+// The options menu on one picture: laid out in the GamePad's 854x480 and scaled to the buffer, the TV's being 16:9 too. It goes on both: on
+// the GamePad alone, a player looking at the TV saw nothing (the user, 2026-11-15).
+static void draw_menu_on(GX2ColorBuffer *cb) {
+    const u32 w = 854, h = 480;
+    GX2SetColorBuffer(cb, GX2_RENDER_TARGET_0);
     cur_color = nullptr;
     begin_blit();
-    GX2SetViewport(0, 0, (float)w, (float)h, 0, 1);
-    GX2SetScissor(0, 0, w, h);
+    GX2SetViewport(0, 0, (float)cb->surface.width, (float)cb->surface.height, 0, 1);
+    GX2SetScissor(0, 0, cb->surface.width, cb->surface.height);
     GX2SetPixelTexture(&black_tex, 0);
     GX2SetPixelSampler(&blit_sampler, 0);
     set_blit_colors(0, 0, 0, 0.98f, 0.9f, 0.62f);
@@ -4409,9 +4523,9 @@ static void draw_menu() {
     set_blit_colors(0, 0, 0, 0.42f, 0.27f, 0.08f);
     draw_rect(w, h, 127, 60, 727, 104, 0, 0, 1, 1);
     const int count = menu_items();
-    const float rowh = count == 9 ? 36 : 40, top = 118;  // a ninth line (the frame limit): closer together, in the same box
+    const float rowh = count == 10 ? 33 : 36, top = 114;  // a tenth line (the frame limit): closer together, in the same box
     set_blit_colors(0, 0, 0, 1.0f, 0.45f, 0.0f);
-    draw_rect(w, h, 145, top + menu_item * rowh - 4, 709, top + menu_item * rowh + rowh - 2, 0, 0, 1, 1);
+    draw_rect(w, h, 145, top + menu_item * rowh - 4, 709, top + menu_item * rowh + (count == 10 ? 32 : 38), 0, 0, 1, 1);
     GX2SetPixelTexture(&font_tex, 0);
     GX2SetPixelSampler(&lut_sampler, 0);
     GX2SetColorControl(GX2_LOGIC_OP_COPY, 1, FALSE, TRUE);
@@ -4433,7 +4547,8 @@ static void draw_menu() {
     snprintf(res, sizeof res, "RESOLUTION: %dP", g_settings.resolution);
     if (cap_fps) snprintf(cap, sizeof cap, "FRAME LIMIT: %u", (unsigned)cap_fps);
     else snprintf(cap, sizeof cap, "FRAME LIMIT: OFF");
-    const char *items[9] = {"BACK TO THE GAME", line, vol, lang, tv, pad, res, count == 9 ? cap : "QUIT TO WII U MENU", "QUIT TO WII U MENU"};
+    const char *items[10] = {"BACK TO THE GAME", line, vol, lang, tv, pad, res, g_settings.show_fps ? "FPS COUNTER: ON" : "FPS COUNTER: OFF",
+                             count == 10 ? cap : "QUIT TO WII U MENU", "QUIT TO WII U MENU"};
     for (int i = 0; i < count; i++) {
         draw_text(w, h, items[i], 165, top + i * rowh + 4, 4);
     }
@@ -4443,7 +4558,12 @@ static void draw_menu() {
     if (menu_item == 5 && pad_layout == 1) hint = "TOUCH IS OFF WHILE THE GAMEPAD SHOWS THE TOP";
     if (menu_item == 6 && g_settings.resolution != start_resolution) hint = "RESOLUTION CHANGES WHEN THE GAME NEXT STARTS";  // targets keep their size
     draw_text(w, h, hint, 165, 446, 2);
-    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, drc_cb->surface.image, drc_cb->surface.imageSize);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
+}
+static void draw_menu() {
+    draw_menu_on(drc_cb);
+    draw_menu_on(tv_cb);
+    tv_layout_shown = -1;  // once it closes, the TV is cleared before the game's next picture: the panel stood over the gaps between screens
     state_lost = true;
 }
 
@@ -4592,11 +4712,16 @@ static void draw_keyboard() {
     state_lost = true;
 }
 
-// The top screen as its LCD buffer holds it in guest memory, when no display transfer brought it this frame but the GPU's commands wrote into that buffer:
-// Luigi's Mansion: Dark Moon draws its top screen in two halves and puts them side by side in the LCD buffer with two texture copies. A 3DS's LCD just shows
-// the buffer, so this does too: 240x400, read as a render target's texture is (its last memory row the texture's first), so show_screen takes it as one.
-// A game writes the buffer the LCD doesn't show and swaps to it later, often after the next VBlank: what's shown is whichever buffer the LCD shows now,
-// as last written, each time that changes.
+// The report is asked for by the frontend's thread and written by this one, between frames: the counters it prints and starts over are this
+// thread's, and read from the other they came out torn (a count taken mid-draw, a reset that lost what was added meanwhile).
+static std::atomic<bool> report_due;
+static std::atomic<float> report_draws_per_flip;
+static void write_report();
+
+// The top screen as its LCD buffer holds it, for a game that brings it by no display transfer: Luigi's Mansion 2 draws its top screen in parts and
+// puts them together in the LCD buffer with texture copies. A 3DS's LCD just shows the buffer, so this does too: 240x400, read as a render target's
+// texture is (its last memory row the texture's first), so show_screen takes it as one. A game writes the buffer the LCD doesn't show and swaps to
+// it later, often after the next VBlank: what's shown is whichever buffer the LCD shows now, as last written, each time that changes.
 static void show_lcd_from_memory() {
     gt_mark(GT_LCD, 0);
     static u32 shown_pa, shown_seq;
@@ -4612,40 +4737,45 @@ static void show_lcd_from_memory() {
     recent_top_stride = stride;
     recent_top_bpp = bpp;
     recent_top_fmt = cbuf_to_pixfmt(fmt);  // the display format as a colour buffer's (the table is its own inverse)
-    // What the LCD buffer holds counts only if it was written after the last picture a display transfer brought: a game whose top screen comes
-    // by transfers at thirty a second (New Super Mario Bros. 2, Tomodachi Life) once wrote into its LCD buffer, and at every VBlank without a
-    // transfer the TV then showed that memory, black, between the game's pictures: the whole TV flickered (Senne's console, 2026-11-14).
-    static u32 transfer_seq;
+    // Not for a game that brought its top screen by transfer within the last second, and only what was written after its last such picture: at
+    // thirty a second there's a VBlank without a transfer between two pictures, and New Super Mario Bros. 2 and Tomodachi Life had once written
+    // into their LCD buffers: that memory, black, showed between their pictures, and the whole TV flickered.
+    static u32 transfer_seq, quiet;  // quiet: VBlanks since a transfer last brought the top screen
     static u64 transfer_drawn;
-    const bool by_transfer = top_shown;
-    top_shown = false;
-    if (by_transfer) {
+    if (top_shown) {
+        top_shown = false;
         shown_pa = 0;
-        transfer_seq = lcd_write_seq;
+        transfer_seq = memory_write_seq;
         transfer_drawn = gpu_writes;
+        quiet = 0;
+        return;
+    }
+    if (quiet < 60) {
+        quiet++;
         return;
     }
     const u8 *src = pa ? pptr(pa) : nullptr;
     if (!src || stride < 240 * bpp) return;
-    // put together on the GPU (linear_copy_on_gpu): shown from there, never read back
+    // put together on the GPU (linear_copy_on_gpu): shown from there, never read back, unless the game has written over it since
     Surface *lcd = nullptr;
     for (auto &s : surfaces)
-        if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride && (!lcd || s->drawn > lcd->drawn)) lcd = s.get();
-    if (lcd) {
-        if (lcd->drawn <= transfer_drawn) return;
-        if (pa == shown_pa && lcd->drawn == shown_drawn) return;
+        if (!s->depth && s->linear && s->addr <= pa && pa + size <= s->addr + s->w * bpp * s->h && s->w * bpp == stride &&
+            (!lcd || s->drawn > lcd->drawn))
+            lcd = s.get();
+    if (lcd && !lcd->guest_newer) {
+        used(*lcd);
+        if (lcd->drawn <= transfer_drawn || (pa == shown_pa && lcd->drawn == shown_drawn)) return;
         shown_pa = pa;
         shown_drawn = lcd->drawn;
         flush_surface(*lcd);
         const float h = (float)lcd->tex_h, first_row = (float)((pa - lcd->addr) / stride);
-        static u32 told;
-        if (kMeasure && told++ % 300 == 0) LOG("[gx2] top screen from the LCD buffer put together on the GPU, %08x, from row %u of %08x\n", pa, (u32)first_row, lcd->addr);
+        if (gxt()) LOG("[gxt] top screen from the LCD buffer put together on the GPU, %08x, from row %u of %08x\n", pa, (u32)first_row, lcd->addr);
         show_screen(0, &lcd->tex, false, (h - first_row - 400) / h, (h - first_row) / h, 240.0f / lcd->w);
         top_shown = false;
         return;
     }
     u32 latest = 0;
-    for (const MemoryWrite &w : lcd_writes)
+    for (const MemoryWrite &w : memory_writes)
         if (w.seq && w.pa < pa + size && pa < w.pa + w.size) latest = std::max(latest, w.seq);
     if (!latest || latest <= transfer_seq || (pa == shown_pa && latest == shown_seq)) return;
     shown_pa = pa;
@@ -4690,21 +4820,10 @@ static void show_lcd_from_memory() {
     }
     DCFlushRange(out, t.surface.imageSize);
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, out, t.surface.imageSize);
-    static u32 notes;
-    if (kMeasure && notes++ % 100 == 0) {
-        u32 lit = 0;
-        for (u32 i = 0; i < size; i += 4) lit += src[i] != 0;
-        LOG("[gx2] top screen from its LCD buffer %08x, format %u, stride %u: %u of %u samples not black\n", pa, fmt, stride, lit, size / 4);
-    }
+    if (gxt()) LOG("[gxt] top screen from its LCD buffer in memory %08x, format %u, stride %u\n", pa, fmt, stride);
     show_screen(0, &t, false);
     top_shown = false;
 }
-
-// The report is asked for by the frontend's thread and written by this one, between frames: the counters it prints and starts over are this
-// thread's, and read from the other they came out torn (a count taken mid-draw, a reset that lost what was added meanwhile).
-static std::atomic<bool> report_due;
-static std::atomic<float> report_draws_per_flip;
-static void write_report();
 
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {

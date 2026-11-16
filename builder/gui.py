@@ -37,12 +37,14 @@ NO_WINDOW = 0x08000000 if WIN else 0  # the build's compilers would each open a 
 DUMPS = '3DS games (*.3ds *.cci *.cia *.cxi *.app);;All files (*.*)'
 DUMP_EXTS = ('.3ds', '.cci', '.cia', '.cxi', '.app')
 STAGE_OF = {n: i for i, (n, _) in enumerate(pipeline.STAGES)}
-NO_ART = "The game's own icon"
-NO_ICON_ART = 'The same as the art'  # the Wii U Menu icon without a picture of its own
+# What the art lines show of each choice: a word or two, so the Art menu's right column fits them whole
+NO_ART = "Game's icon"
+NO_ICON_ART = 'Same as art'  # the Wii U Menu icon without a picture of its own
 NO_BEZEL = 'Black'  # the GamePad beside the screens without a picture
-NO_PAD_ART = 'The same as the TV'  # the GamePad's start-up screen without a picture of its own
-NO_SAVE = 'None: the game starts a save of its own'  # no 3DS save packed in
-NO_GAME_SOUND = 'The one for all games'  # a game without a start-up sound of its own: the one for every game, if there is one
+NO_PAD_ART = 'Same as TV'  # the GamePad's start-up screen without a picture of its own
+NO_SAVE = 'None'  # no 3DS save packed in
+NO_GAME_SOUND = 'Default'  # a game without a start-up sound of its own: the one for every game, if there is one
+CUSTOM = 'Custom'  # a picture or sound the player chose
 BOOT_SOUND = os.path.join(os.path.dirname(pipeline.ARCHIVES), 'boot_sound.btsnd')  # where every build picks it up (tools/make_game_title.py)
 GAME_SOUNDS = os.path.join(os.path.dirname(BOOT_SOUND), 'boot_sounds')  # a game's own, <title id>.btsnd
 LIBRARY_MAX = 40  # games the Games page remembers
@@ -50,12 +52,14 @@ LIBRARY_MAX = 40  # games the Games page remembers
 # Testers asked what the system files were and how to get seeddb.bin (Nov 9 and 10).
 HELP = {
     'keys': ('3DS keys',
-             'Two files from your own 3DS that unlock encrypted game dumps: boot9.bin and seeddb.bin. Decrypted dumps don\'t need them.\n\n'
-             'Both come from GodMode9 on a 3DS with custom firmware (boot9strap):\n'
+             'Press "Folder" and choose the folder with boot9.bin from your own 3DS (and seeddb.bin, if you have it). Only encrypted game '
+             'dumps need them.\n\n'
+             'Get them with GodMode9 on a 3DS with custom firmware:\n'
              '•  boot9.bin: open [M:] MEMORY VIRTUAL, highlight boot9.bin and press Y. Open [0:] SDCARD, press Y again and choose Copy.\n'
-             '•  seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card. It holds the seeds of '
-             'the games installed on that 3DS, which newer eShop games need.\n\n'
-             'On the PC, put both in one folder, .3ds in your user folder by default, or press "Folder" and choose where they are.'),
+             '•  seeddb.bin: press HOME, choose More..., then Build support files. It lands in gm9/out on the SD card. Some eShop games '
+             'need it.\n\n'
+             'One folder can hold everything from your 3DS: boot9.bin, seeddb.bin, and the 0004009b and 000400db folders. Choose it here or '
+             'under 3DS system files, and the builder takes all of it.'),
     'otp': ('Wii U otp.bin',
             'A small file (exactly 1024 bytes) from your own Wii U. The game is packed with a key from it so your console installs it. The '
             'builder never shows or stores that key.\n\n'
@@ -63,17 +67,15 @@ HELP = {
             'made a NAND backup when setting up Aroma, otp.bin is in that backup.\n\n'
             'On the PC, press "File" and choose it. Keep it private: it is unique to your console.'),
     'system': ('3DS system files',
-               'A few small files every 3DS keeps in its own memory: the system font many games write their text in, the parts (faces, '
-               'eyes, hair) Miis are drawn from, and the list of bad words games check typed names against. Games load them from the console, '
-               'so a game dump doesn\'t have them. The builder puts them in each game it makes and won\'t build a game without the ones it '
-               'reads: Mii games stop without the Mii parts, and Tomodachi Life without the word list.\n\n'
-               'They come from your own 3DS, either way:\n'
-               '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n'
-               '•  GodMode9 on your 3DS: [1:] SYSNAND CTRNAND > title holds them in two folders, 0004009b (the font and the Mii parts) and '
-               '000400db (the word list). Highlight 0004009b and press Y, open [0:] SDCARD, press Y again and choose Copy (not Move); then '
-               'copy 000400db the same way, next to it. Back on the PC, press "Folder" here and choose that 0004009b folder on the SD '
-               'card. Copied this way they are encrypted, so the builder needs your 3DS keys to read them.\n\n'
-               'The builder copies them once and keeps them for every game after.'),
+               'Press "Folder" and choose the folder with the 0004009b and 000400db folders from your own 3DS, or Azahar\'s user folder. '
+               'They hold the 3DS font, the parts Miis are drawn from, and the word list games check names against. Games need them, and a '
+               'game dump doesn\'t have them.\n\n'
+               'Get them one of two ways:\n'
+               '•  GodMode9 on your 3DS: open [1:] SYSNAND CTRNAND, then title. Highlight 0004009b, press Y, open [0:] SDCARD, press Y '
+               'again and choose Copy (not Move). Copy 000400db the same way, next to it.\n'
+               '•  Azahar: File > Set Up System Files, with the Artic Setup Tool running on your 3DS. The builder then finds them by itself.\n\n'
+               'Copied with GodMode9 they are encrypted: put your boot9.bin in the same folder, and the builder opens them with it. It keeps '
+               'them for every game after.'),
 }
 
 
@@ -87,7 +89,7 @@ def covers_folder():
     return os.path.join(os.path.dirname(settings_file()), 'covers')
 
 
-FROM_SGDB, FROM_TDB = 'From SteamGridDB', 'From GameTDB'
+FROM_SGDB, FROM_TDB = 'SteamGridDB', 'GameTDB'
 
 
 def picked(path):
@@ -96,9 +98,9 @@ def picked(path):
 
 
 def source(path):
-    """a picture's line in the window: where it was fetched from, or its file's name"""
+    """a picture's line in the window: where it was fetched from, or that the player chose it"""
     if picked(path):
-        return os.path.basename(path)
+        return CUSTOM
     return FROM_SGDB if os.path.basename(path).startswith('sgdb_') else FROM_TDB
 
 
@@ -257,15 +259,17 @@ class App(QObject):
     note, meta, icon = _p(str, 'note'), _p(str, 'meta'), _p(str, 'icon')
     updateText, hasUpdate, dlcText, hasDlc = _p(str, 'updateText'), _p(bool, 'hasUpdate'), _p(str, 'dlcText'), _p(bool, 'hasDlc')
     modText, hasMod = _p(str, 'modText'), _p(bool, 'hasMod')
-    artText, hasArt, artUrl = _p(str, 'artText'), _p(bool, 'hasArt'), _p(str, 'artUrl')
+    artText, hasArt, artUrl, artOwn = _p(str, 'artText'), _p(bool, 'hasArt'), _p(str, 'artUrl'), _p(bool, 'artOwn')
     iconText, hasIconArt, iconArtUrl, tileUrl = _p(str, 'iconText'), _p(bool, 'hasIconArt'), _p(str, 'iconArtUrl'), _p(str, 'tileUrl')
     bezelText, hasBezel = _p(str, 'bezelText'), _p(bool, 'hasBezel')
     padArtText, hasPadArt, gameSoundText, hasGameSound = _p(str, 'padArtText'), _p(bool, 'hasPadArt'), _p(str, 'gameSoundText'), _p(bool, 'hasGameSound')
     saveText, hasSave = _p(str, 'saveText'), _p(bool, 'hasSave')
     artKeySet, soundSet, artStyle = _p(bool, 'artKeySet'), _p(bool, 'soundSet'), _p(str, 'artStyle')
+    gameMenu = _p(bool, 'gameMenu')  # the options menu in the games it builds (click the left stick)
     library = _p('QVariantList', 'library')
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
+    buildText, buildCustom = _p(str, 'buildText'), _p(bool, 'buildCustom')
     target, destText, cards = _p(str, 'target'), _p(str, 'destText'), _p('QVariantList', 'cards')
     building, view = _p(bool, 'building'), _p(str, 'view')
     stages, stage, failed, progress, detail = _p('QVariantList', 'stages'), _p(int, 'stage'), _p(bool, 'failed'), _p(float, 'progress'), _p(str, 'detail')
@@ -300,7 +304,7 @@ class App(QObject):
         theme_mode = self.st.get('theme')
         self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
-                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', iconText=NO_ART, hasIconArt=False, iconArtUrl='', tileUrl='', bezelText=NO_BEZEL, hasBezel=False, padArtText=NO_PAD_ART, hasPadArt=False, gameSoundText=NO_GAME_SOUND, hasGameSound=False, saveText=NO_SAVE, hasSave=False, artKeySet=bool(self.st.get('sgdb_key')), soundSet=os.path.isfile(BOOT_SOUND), artStyle=self.st.get('art_style', 'console'), library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
+                       updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', artOwn=False, iconText=NO_ART, hasIconArt=False, iconArtUrl='', tileUrl='', bezelText=NO_BEZEL, hasBezel=False, padArtText=NO_PAD_ART, hasPadArt=False, gameSoundText=NO_GAME_SOUND, hasGameSound=False, saveText=NO_SAVE, hasSave=False, artKeySet=bool(self.st.get('sgdb_key')), soundSet=os.path.isfile(BOOT_SOUND), artStyle=self.st.get('art_style', 'console'), gameMenu=self.st.get('game_menu', True) is not False, library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
                        otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], building=False, view='form', stages=[],
                        stage=-1, failed=False, progress=0.0, detail='', log='', resultText='', where='', dialog=None, version=VERSION,
                        rootOk=bool(pipeline.ROOT) and os.path.isfile(os.path.join(pipeline.ROOT, 'tools', 'win', 'build3ds.py')),
@@ -308,7 +312,7 @@ class App(QObject):
                        others=compat.get('_cemu', []),  # shown only: they build as untested games, by their own code
                        faq=faq, themeMode=theme_mode if theme_mode in ('system', 'light', 'dark') else 'system', dark=False,
                        updateState='', updateTitle='', updateNotes='', updateProgress=0, updateMessage='', releaseTag=updater.own_tag(),
-                       updateSetAside=False)
+                       updateSetAside=False, buildText='', buildCustom=False)
         self.release, self.update_job, self.check_job, self.update_stop, self.shown, self.ask_again = None, None, None, threading.Event(), False, False
         self.set(updateSetAside=self.set_aside(updater.failed_tags()))
         ready = updater.activated()  # a version downloaded before (Later, or a start with Shift held) is ready without a check
@@ -326,6 +330,7 @@ class App(QObject):
         self.timer.timeout.connect(self.poll)
         self.refresh_cards()
         self.refresh_files()
+        self.refresh_build()
 
     def set(self, **kw):
         self._s.update(kw)
@@ -364,7 +369,7 @@ class App(QObject):
 
     @Slot()
     def about(self):
-        self.tell(f'About {APP}', credits.about())
+        self.tell(f'About {APP}', credits.about(self._s['releaseTag']))
 
     @Slot(str)
     def setLayout(self, name):
@@ -374,6 +379,13 @@ class App(QObject):
         self.st['layout'] = name
         save_settings(self.st)
         self.layoutWanted.emit(name)
+
+    @Slot(bool)
+    def setGameMenu(self, on):
+        """whether the games it builds have the options menu (click the left stick): some players asked to leave it out"""
+        self.st['game_menu'] = bool(on)
+        save_settings(self.st)
+        self.set(gameMenu=bool(on))
 
     @Slot(str)
     def setArtStyle(self, style):
@@ -570,7 +582,7 @@ class App(QObject):
         if how == 'zip':
             path = QFileDialog.getOpenFileName(None, f'Choose the mod for {self._s["gameName"]}', start, 'Mods (*.zip);;All files (*.*)')[0]
         else:
-            path = QFileDialog.getExistingDirectory(None, f'The mod\'s folder for {self._s["gameName"]}', start)
+            path = QFileDialog.getExistingDirectory(None, f'Choose the mod folder for {self._s["gameName"]}', start)
         if not path:
             return
         try:
@@ -595,13 +607,13 @@ class App(QObject):
 
     @Slot()
     def chooseArt(self):
-        path = self.ask_picture(f'A picture for {self._s["gameName"]}: its cover art, say')
+        path = self.ask_picture(f'Choose start-up art for {self._s["gameName"]}')
         if path:
             self.set_art(path, self.icon_art if picked(self.icon_art) else None)  # an icon the player picked stays, a fetched one goes with the old art
 
     @Slot()
     def chooseIcon(self):
-        path = self.ask_picture(f'A square picture for the Wii U Menu icon of {self._s["gameName"]}')
+        path = self.ask_picture(f'Choose a Wii U Menu icon for {self._s["gameName"]}')
         if path:
             self.set_art(self.art, path)
 
@@ -614,8 +626,14 @@ class App(QObject):
         self.set_art(self.art, None)
 
     @Slot()
+    def findArt(self):
+        """the game's fetched art and icon again (fetch_cover), in place of pictures the player chose or removed"""
+        self.set_art(None, None)  # the game's choice forgotten, so its art is looked for again
+        threading.Thread(target=self.fetch_cover, args=(self.game, self._s['gameName']), daemon=True).start()
+
+    @Slot()
     def chooseBezel(self):
-        path = self.ask_picture(f'A bezel or overlay for the GamePad beside the screens of {self._s["gameName"]}: any picture, scaled to fill it')
+        path = self.ask_picture(f'Choose a GamePad bezel for {self._s["gameName"]}')
         if path:
             self.set_bezel(path)
 
@@ -628,7 +646,7 @@ class App(QObject):
         self.bezel = path
         if self.game and remember:
             self.keep_for_game('pad_bezel', path)
-        self.set(bezelText=os.path.basename(path) if path else NO_BEZEL, hasBezel=bool(path))
+        self.set(bezelText=CUSTOM if path else NO_BEZEL, hasBezel=bool(path))
 
     def keep_for_game(self, key, path):
         """a path chosen for the open game (settings[key][title id]), or forgotten with None"""
@@ -641,7 +659,7 @@ class App(QObject):
 
     @Slot()
     def choosePadArt(self):
-        path = self.ask_picture(f'A picture for the GamePad while {self._s["gameName"]} starts, shown as it is')
+        path = self.ask_picture(f'Choose a GamePad start-up picture for {self._s["gameName"]}')
         if path:
             self.set_pad_art(path)
 
@@ -654,12 +672,12 @@ class App(QObject):
         self.pad_art = path
         if self.game and remember:
             self.keep_for_game('pad_art', path)
-        self.set(padArtText=os.path.basename(path) if path else NO_PAD_ART, hasPadArt=bool(path))
+        self.set(padArtText=CUSTOM if path else NO_PAD_ART, hasPadArt=bool(path))
 
     @Slot()
     def chooseGameSound(self):
         sound = os.path.join(GAME_SOUNDS, f'{self.game.title_id:016x}.btsnd')
-        if self.ask_sound(f'A sound to play while {self._s["gameName"]} starts', sound):
+        if self.ask_sound(f'Choose a start-up sound for {self._s["gameName"]}', sound):
             self.set_game_sound(sound)
 
     @Slot()
@@ -676,12 +694,12 @@ class App(QObject):
         self.game_sound = path
         if self.game and remember:
             self.keep_for_game('boot_sound', path)
-        self.set(gameSoundText='Its own' if path else NO_GAME_SOUND, hasGameSound=bool(path))
+        self.set(gameSoundText=CUSTOM if path else NO_GAME_SOUND, hasGameSound=bool(path))
 
     @Slot()
     def bringSave(self):
         """a 3DS save to pack into the game's build, which the game takes in on the console (saves.py)"""
-        chosen = QFileDialog.getExistingDirectory(None, f"The folder with the save of {self._s['gameName']}: Checkpoint's, JKSM's or an emulator's",
+        chosen = QFileDialog.getExistingDirectory(None, f"Choose the folder with your 3DS save of {self._s['gameName']}",
                                                   self.st.get('save_folder', ''))
         if not chosen:
             return
@@ -748,7 +766,8 @@ class App(QObject):
                 icons.pop(title, None)
             save_settings(self.st)
         url = lambda p: QUrl.fromLocalFile(p).toString() if p else ''  # noqa: E731
-        self.set(artText=source(path) if path else NO_ART, hasArt=bool(path or icon), artUrl=url(path),
+        own = bool(self.game) and (picked(path) or picked(icon) or self.st.get('art', {}).get(f'{self.game.title_id:016x}') == '')  # findArt undoes it
+        self.set(artText=source(path) if path else NO_ART, hasArt=bool(path or icon), artUrl=url(path), artOwn=own,
                  iconText=source(icon) if icon else NO_ICON_ART if path else NO_ART, hasIconArt=bool(icon), iconArtUrl=url(icon),
                  tileUrl=url(icon or path))  # the Build page's tile: a square icon fills it best
         if remember:
@@ -756,8 +775,8 @@ class App(QObject):
 
     @Slot()
     def setArtKey(self):
-        key, ok = QInputDialog.getText(None, 'SteamGridDB', 'Your SteamGridDB API key: the long code on steamgriddb.com under Preferences, API.\n'
-                                       "It stays on this PC, in the builder's settings. Leave it empty to stop asking SteamGridDB.")
+        key, ok = QInputDialog.getText(None, 'SteamGridDB', 'Paste your SteamGridDB API key (on steamgriddb.com, under Preferences > API).\n'
+                                       'It is only saved on this PC. Leave it empty to stop using SteamGridDB.')
         if not ok:
             return
         self.st['sgdb_key'] = key.strip()
@@ -788,7 +807,7 @@ class App(QObject):
 
     @Slot()
     def chooseSound(self):
-        if self.ask_sound('A sound to play while your games start', BOOT_SOUND):
+        if self.ask_sound('Choose a start-up sound for all games', BOOT_SOUND):
             self.set(soundSet=True)
 
     @Slot()
@@ -821,20 +840,21 @@ class App(QObject):
 
     @Slot()
     def chooseKeys(self):
-        p = QFileDialog.getExistingDirectory(None, 'The folder with your 3DS keys (boot9.bin, seeddb.bin)', self.st['keys'])
+        p = QFileDialog.getExistingDirectory(None, 'Choose the folder with your boot9.bin', self.st['keys'])
         if p:
             if not decrypt.have_keys(p):
                 self.tell('No keys there', 'There\'s no boot9.bin in that folder.', 'warn')
             self.st['keys'] = p
             decrypt.use_keys(p)
-            if self.st.get('system') and not dumps.have_system_archives(pipeline.ARCHIVES):
-                self.import_system(self.st['system'])  # a 3DS's own copy, chosen before the keys that open it
+            # the system files, chosen before the keys that open them, or beside boot9.bin in one folder of the 3DS's files
+            for folder in (self.st.get('system'), p):
+                if folder and not dumps.have_system_archives(pipeline.ARCHIVES) and dumps.nand_titles(folder):
+                    self.import_system(folder)
             self.refresh_files()
 
     @Slot()
     def chooseSystem(self):
-        p = QFileDialog.getExistingDirectory(None, 'Your 3DS system files: Azahar\'s user folder, or the 0004009b folder GodMode9 copied off your 3DS',
-                                             self.st.get('system', ''))
+        p = QFileDialog.getExistingDirectory(None, 'Choose the folder with 0004009b and 000400db, or Azahar\'s user folder', self.st.get('system', ''))
         if p:
             if not self.import_system(p):
                 if not self.system_locked:
@@ -843,9 +863,9 @@ class App(QObject):
                     self.tell('Those files didn\'t open', f'That is the right folder, but its files couldn\'t be decrypted with the boot9.bin in '
                               f'{self.st["keys"]}. They open with the keys of the same 3DS they were copied from.', 'warn')
                 else:
-                    self.tell('Those files need your 3DS keys', 'That is the right folder. A 3DS keeps these files encrypted, and they open with '
-                              'boot9.bin from your own 3DS.\n\nPress "Folder" next to 3DS keys and choose the folder with your boot9.bin: the '
-                              'builder then reads the system files from here by itself.', 'warn')
+                    self.tell('Those files need your boot9.bin', 'That is the right folder, but a 3DS keeps these files encrypted, and they '
+                              'open with boot9.bin from your own 3DS.\n\nPut boot9.bin in this folder and choose it again, or press "Folder" '
+                              'next to 3DS keys and choose the folder boot9.bin is in.', 'warn')
             self.refresh_files()
 
     @Slot(str)
@@ -853,7 +873,16 @@ class App(QObject):
         self.tell(*HELP[what])
 
     def import_system(self, folder):
-        """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games"""
+        """the system archives from a folder into the ones every build takes (pipeline.ARCHIVES), once: they stay for the next games. A
+        boot9.bin there, or beside the 0004009b folder chosen, is taken for the keys when the builder has none: a tester kept all of the
+        3DS's files in one folder and chose it for the system files only"""
+        if not decrypt.have_keys(self.st['keys']):
+            for keys in (folder, os.path.dirname(os.path.normpath(folder))):
+                if decrypt.have_keys(keys):
+                    self.st['keys'] = keys
+                    decrypt.use_keys(keys)
+                    save_settings(self.st)
+                    break
         tmp = tempfile.mkdtemp(prefix='3diiu_sys_')  # for contents that need decrypting first
         self.system_locked = False  # the folder has them, as a 3DS keeps them, and they didn't decrypt: two testers were told "none there"
         try:
@@ -884,7 +913,7 @@ class App(QObject):
 
     @Slot()
     def chooseOtp(self):
-        p = QFileDialog.getOpenFileName(None, 'Your Wii U\'s otp.bin', os.path.dirname(self.st.get('otp', '')), 'otp.bin (otp.bin);;All files (*.*)')[0]
+        p = QFileDialog.getOpenFileName(None, 'Choose your Wii U\'s otp.bin', os.path.dirname(self.st.get('otp', '')), 'otp.bin (otp.bin);;All files (*.*)')[0]
         if p:
             self.st['otp'] = p
             self.refresh_files()
@@ -897,10 +926,62 @@ class App(QObject):
 
     @Slot()
     def chooseFolder(self):
-        p = QFileDialog.getExistingDirectory(None, 'Where the WUP goes', self.st.get('folder', ''))
+        p = QFileDialog.getExistingDirectory(None, 'Choose where to save the game', self.st.get('folder', ''))
         if p:
             self.st['folder'] = p
             self.setTarget('folder')
+
+    # ---- where games are built (pipeline.BUILD): gigabytes of build files, on a drive the player chooses
+    def build_folder(self):
+        return os.environ.get('THREEDII_BUILD') or pipeline.BUILD
+
+    def refresh_build(self):
+        folder = self.build_folder()
+        try:
+            free = f'{shutil.disk_usage(folder).free / 2 ** 30:.0f} GB free'
+        except OSError:
+            free = 'not there yet'
+        self.set(buildText=f'{short(folder, 60)}  ·  {free}', buildCustom=bool(self.st.get('build_folder')))
+
+    @Slot()
+    def chooseBuild(self):
+        p = QFileDialog.getExistingDirectory(None, 'Choose a folder for building games', self.build_folder())
+        if p:
+            self.set_build(os.path.normpath(p))
+
+    @Slot()
+    def defaultBuild(self):
+        self.set_build('')
+
+    def set_build(self, chosen):
+        """Builds go to the chosen folder from the next one on ('' for the usual one). The old folder's build files are only a cache, so
+        deleting them is offered: the point was room on that drive."""
+        if self._s['building']:
+            return
+        old, new = self.build_folder(), chosen or os.environ.get('THREEDII_WORK') or pipeline.WORK
+        try:
+            os.makedirs(new, exist_ok=True)
+            probe = os.path.join(new, '.3diiu_check')
+            open(probe, 'wb').close()
+            os.remove(probe)
+        except OSError as e:
+            self.tell('That folder can\'t be used', f'The builder can\'t write there: {e.strerror or e}', 'warn')
+            return
+        self.st['build_folder'] = chosen
+        save_settings(self.st)
+        os.environ['THREEDII_BUILD'] = new
+        self.refresh_build()
+        if os.path.normcase(os.path.abspath(old)) != os.path.normcase(os.path.abspath(new)):
+            stale = [os.path.join(old, n) for n in pipeline.BUILD_FILES if os.path.isdir(os.path.join(old, n))]
+            size = sum(os.path.getsize(os.path.join(d, f)) for s in stale for d, _, fs in os.walk(s) for f in fs)
+            if size >> 20:
+                self.run_flow(self.drop_build_files(stale, size))
+
+    def drop_build_files(self, folders, size):
+        if (yield dict(title='Delete the old build files?', message=f'{size / 2 ** 30:.1f} GB in {os.path.dirname(folders[0])}. The builder makes '
+                       'them again as it needs them.', yes='Delete', no='Keep', tone='ask')):
+            for f in folders:
+                shutil.rmtree(f, ignore_errors=True)
 
     @Slot(str)
     def pickCard(self, path):
@@ -929,9 +1010,10 @@ class App(QObject):
         have = decrypt.have_keys(keys)
         system = dumps.have_system_archives(pipeline.ARCHIVES)
         source = short(self.st['system'], 26) if self.st.get('system') else ''
-        self.set(sysOk=system, sysText=(source or 'Found') if system else 'Not found yet')  # short: the row has its pills beside it
+        # short, and what to choose while there's nothing: the row has its pills beside it
+        self.set(sysOk=system, sysText=(source or 'Found') if system else 'Folder with 0004009b')
         self.set(keysOk=have, keysNeeded=needed and not have,
-                 keysText=short(keys, 26) if have else 'Not found yet' if needed else 'Only for encrypted dumps',
+                 keysText=short(keys, 26) if have else 'Folder with boot9.bin' if needed else 'Only for encrypted dumps',
                  otpOk=otp_ok(otp), otpText=short(otp, 26) if otp_ok(otp) else 'Not found yet', destText=dest)
 
     # ---- updates (updater.py): every call that reaches the network or the disk runs on a worker, which reports through updateEvent
@@ -1111,6 +1193,8 @@ class App(QObject):
             argv += ['--boot-sound', self.game_sound]
         if self.save_in:
             argv += ['--save', self.save_in]
+        if not self._s['gameMenu']:
+            argv += ['--no-menu']
         self.log_lines, self.result, self.cancelled = [], None, False
         stages = [n for n, _ in pipeline.STAGES if n != 'Copying' or self._s['target'] == 'card']
         self.set(building=True, view='building', stages=stages, stage=0, failed=False, progress=0.0, detail='Starting...', log='')
