@@ -43,6 +43,7 @@
 #include "gpu_iface.h"
 #include "kernel.h"
 #include "loader.h"
+#include "miisel.h"
 #include "service.h"
 #include "services/services.h"
 #include "settings.h"
@@ -302,7 +303,9 @@ static int hid_thread(int, void *) {
     bool touch = false;
     u16 tx = 0, ty = 0;
     for (;;) {
-        u32 presses = 0;  // the GamePad's way, from either, for the options menu
+        u32 presses = 0;  // the GamePad's way, from either, for the options menu and the Mii picker
+        bool tap = false;  // a touch on the GamePad began, at tap_x, tap_y (its pixels)
+        u16 tap_x = 0, tap_y = 0;
         const bool z_too = !kernel::extra_pad_connected();
         VPADReadError err = VPAD_READ_SUCCESS;
         VPADRead(VPAD_CHAN_0, &st, 1, &err);
@@ -336,6 +339,9 @@ static int hid_thread(int, void *) {
                 wiiu::touch_to_bottom(px, py, touch, tx, ty);
             }
             wiiu::keyboard_input(st.trigger, down && !touch_was, px, py);
+            tap = down && !touch_was;
+            tap_x = px;
+            tap_y = py;
             touch_was = down;
         }
         buttons = map_buttons(pad_held, z_too);
@@ -374,16 +380,23 @@ static int hid_thread(int, void *) {
         }
         cx = (s16)(sx * 156.0f);
         cy = (s16)(sy * 156.0f);
+        const bool menu_was = wiiu::menu_open();  // the press that closes the menu isn't one for what's under it
         wiiu::menu_input(presses);
         if (!leaving && wiiu::menu_wants_quit()) {
             leaving = true;
             SYSLaunchMenu();
         }
+        const bool to_picker = !menu_was && !wiiu::menu_open();
+        wiiu::mii_picker_input(to_picker ? presses : 0, to_picker && tap, tap_x, tap_y);
         if (autoplay || kernel::g_live_path || wiiu::test_run()) {
             tick++;
             if (tick % 500 == 0 && wiiu::keyboard_open()) {
                 wiiu::keyboard_input(0, true, 107 + 64 * 8 + 10, 150 + 62 * 4 + 10);  // OK, with what's typed
                 if (wiiu::keyboard_open()) wiiu::keyboard_input(0, true, 107 + 10, 150 + 62 * 2 + 10);  // or type something first
+            }
+            if (tick % 500 == 0 && wiiu::mii_picker_open()) {
+                wiiu::mii_picker_input(VPAD_BUTTON_A, false, 0, 0);                                // the Mii the cursor starts on
+                if (wiiu::mii_picker_open()) wiiu::mii_picker_input(VPAD_BUTTON_B, false, 0, 0);  // or none can be picked: cancel
             }
         }
         if (autoplay) {
@@ -398,7 +411,7 @@ static int hid_thread(int, void *) {
             }
         }
         wiiu::input_override(buttons, touch, tx, ty);
-        if (wiiu::menu_open()) kernel::hid_extra_pad(0, 0, false, false, false);
+        if (wiiu::menu_open() || wiiu::mii_picker_open()) kernel::hid_extra_pad(0, 0, false, false, false);
         else kernel::hid_extra_pad(rx, ry, zl, zr, r);
         kernel::hid_update(buttons, cx, cy, touch, tx, ty);
         if (kMeasure) {
@@ -592,7 +605,7 @@ static int watchdog_thread(int, void *) {
         asked = asking;
         if (++seconds >= 41 && !drawn && (quiet >= 30 || seconds >= 180) && !wiiu::net_connected()) report_stuck("The game got stuck starting up.");
         const u64 lists = kernel::gx_stats.cmdlists;
-        if (lists != last || gpu_pause || wiiu::menu_open() || wiiu::keyboard_open()) {
+        if (lists != last || gpu_pause || wiiu::menu_open() || wiiu::keyboard_open() || wiiu::mii_picker_open()) {
             if (lists && !drawn) {
                 drawn = true;
                 stage("the game is drawing");
@@ -663,6 +676,50 @@ static void let_card_catch_up() {
     want_log_sync = true;
     const u32 ms = wiiu::save_pending() ? 30000 : 3000;
     for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(ms); card_passes == seen && OSGetSystemTime() < until;) OSSleepTicks(OSMillisecondsToTicks(5));
+}
+
+// The picture of its Mii's face the console keeps with an account, for the Mii picker (gx2_backend.cpp): taken if it is a TGA file,
+// true colour, plain or run-length packed, which is what the 3DS's account service is known to hand out (3dbrew, ACTU:GetMiiImage).
+// What a Wii U hands out hasn't been seen yet, so the log says what came, and anything else leaves that Mii without a picture.
+static void take_mii_face(size_t host, const u8 *d, size_t n, const char *whose) {
+    char head[3 * 16 + 1] = "";
+    for (size_t i = 0; i < 16 && i < n; i++) snprintf(head + 3 * i, 4, "%02x ", d[i]);
+    const u32 w = n >= 18 ? d[12] | d[13] << 8 : 0, h = n >= 18 ? d[14] | d[15] << 8 : 0, bytes = n >= 18 ? d[16] / 8 : 0;
+    const bool tga = n >= 18 && d[1] == 0 && (d[2] == 2 || d[2] == 10) && (bytes == 3 || bytes == 4) && w && h && w <= 512 && h <= 512;
+    LOG("[wiiu] %s Mii picture: %u bytes, starts %s: %s\n", whose, (u32)n, head, tga ? "a TGA picture" : "not a picture this reads");
+    if (!tga) return;
+    kernel::HostMiiFace f;
+    f.w = w;
+    f.h = h;
+    f.rgba.assign((size_t)w * h * 4, 0);
+    const bool top_first = d[17] & 0x20;
+    size_t at = 18 + d[0], px = 0;
+    const auto put = [&](const u8 *p) {  // the file's pixels are blue, green, red and, with four bytes, alpha
+        const size_t x = px % w, y = px / w;
+        u8 *o = &f.rgba[((top_first ? y : h - 1 - y) * w + x) * 4];
+        o[0] = p[2], o[1] = p[1], o[2] = p[0], o[3] = bytes == 4 ? p[3] : 255;
+        px++;
+    };
+    while (px < (size_t)w * h && at < n) {
+        if (d[2] == 2) {
+            if (at + bytes > n) break;
+            put(d + at);
+            at += bytes;
+            continue;
+        }
+        const u32 count = (d[at] & 0x7F) + 1;
+        const bool run = d[at] & 0x80;
+        at++;
+        for (u32 i = 0; i < count && px < (size_t)w * h; i++) {
+            if (at + bytes > n) return;
+            put(d + at);
+            if (!run) at += bytes;
+        }
+        if (run) at += bytes;
+    }
+    if (px < (size_t)w * h) return;  // cut short: no picture rather than half of one
+    if (kernel::g_host_mii_faces.size() <= host) kernel::g_host_mii_faces.resize(host + 1);
+    kernel::g_host_mii_faces[host] = std::move(f);
 }
 
 // Whether what a database slot held, as a 3DS game would read it, is a Mii: a name of printable characters, an author's name of them, the
@@ -914,6 +971,9 @@ int main(int argc, char **argv) {
     }
     // The console's Miis, one per account: the game finds them in Mii Maker and as the player's Mii (services/misc.cpp, fs.cpp). On since
     // the user's yes on 2026-11-08 ("Yes, next build"); a `nowiimiis` flag turns it off, and the games then get the stand-in Mii as before.
+    // A game that opens the 3DS's Mii Selector gets a picker of those Miis on the GamePad (gx2_backend.cpp); a `nomiipicker` flag turns it
+    // off, and the game is then handed the player's Mii without asking, as before there was a picker.
+    miisel::host_picker = !wiiu::debug_flag("nomiipicker");
     if (!wiiu::debug_flag("nowiimiis") && nn::act::Initialize().IsSuccess()) {
         const nn::act::SlotNo me = nn::act::GetSlotNo();
         for (nn::act::SlotNo s = 1; s <= 12; s++) {
@@ -926,6 +986,19 @@ int main(int argc, char **argv) {
                 s == me ? ", the current account" : "");
             if (s == me) kernel::g_host_my_mii = (int)kernel::g_host_miis.size();
             kernel::g_host_miis.push_back(m);
+            // its face, as the console drew it: the first of the account's pictures it will give (their kinds aren't documented)
+            static u8 picture[1 << 19];
+            char whose[24];
+            snprintf(whose, sizeof whose, "account %u's", s);
+            bool got = false;
+            for (int kind = 0; kind < 9 && !got; kind++) {
+                size_t size = 0;
+                if (nn::act::GetMiiImageEx(&size, picture, sizeof picture, kind, s).IsFailure() || !size || size > sizeof picture) continue;
+                got = true;
+                LOG("[wiiu] account %u's Mii picture is kind %d\n", s, kind);
+                take_mii_face(kernel::g_host_miis.size() - 1, picture, size, whose);
+            }
+            if (!got) LOG("[wiiu] account %u has no Mii picture to give\n", s);
         }
         nn::act::Finalize();
     }
@@ -937,6 +1010,13 @@ int main(int argc, char **argv) {
             kernel::g_host_my_mii = (int)kernel::g_host_miis.size();
             kernel::g_host_miis.push_back(m);
             LOG("[wiiu] test Mii from test_mii.bin\n");
+            // and a picture of its face, as an account's has: "test_mii_face.tga"
+            if (FILE *p = fopen((wiiu::data_dir() + "/test_mii_face.tga").c_str(), "rb")) {
+                static u8 picture[1 << 19];
+                const size_t size = fread(picture, 1, sizeof picture, p);
+                fclose(p);
+                take_mii_face(kernel::g_host_miis.size() - 1, picture, size, "the test");
+            }
         }
         fclose(f);
     }

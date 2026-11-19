@@ -20,6 +20,7 @@ namespace kernel {
 
 std::vector<std::array<u8, 0x60>> g_host_miis;
 int g_host_my_mii = -1;
+std::vector<HostMiiFace> g_host_mii_faces;
 
 u16 mii_crc16(const u8 *p, size_t n) {
     u16 c = 0;
@@ -62,6 +63,7 @@ bool mii_3ds(const std::array<u8, 0x60> &h, std::array<u8, 0x60> &m) {
 namespace {
 struct ConsoleMiis {
     std::vector<std::array<u8, 0x60>> list;
+    std::vector<int> host;  // each one's number in g_host_miis
     int mine = -1;  // the current account's
     ConsoleMiis() {
         for (size_t i = 0; i < g_host_miis.size(); i++) {
@@ -70,16 +72,40 @@ struct ConsoleMiis {
             size_t at = 0;
             while (at < list.size() && memcmp(&list[at][0x0C], &m[0x0C], 10)) at++;  // the same Mii: its id and the console that made it
             if ((int)i == g_host_my_mii) mine = (int)at;
-            if (at == list.size()) list.push_back(m);
+            if (at == list.size()) {
+                list.push_back(m);
+                host.push_back((int)i);
+            }
         }
     }
 };
 }  // namespace
 
-const std::vector<std::array<u8, 0x60>> &console_miis(int *mine) {
+static const ConsoleMiis &the_console_miis() {
     static const ConsoleMiis miis;
+    return miis;
+}
+
+const std::vector<std::array<u8, 0x60>> &console_miis(int *mine) {
+    const ConsoleMiis &miis = the_console_miis();
     if (mine) *mine = miis.mine;
     return miis.list;
+}
+
+int console_mii_host(u32 n) {
+    const ConsoleMiis &miis = the_console_miis();
+    return n < miis.host.size() ? miis.host[n] : -1;
+}
+
+// The nth of the console's Miis as a game is handed it (the friends service, the Mii Selector): naming the place it has in Mii Maker's
+// database (fs.cpp), where the game finds the same Mii, and checksummed again
+std::array<u8, 0x60> placed_mii(u32 n) {
+    std::array<u8, 0x60> mii = console_miis(nullptr)[n];
+    if (const int place = mii_maker_place(n); place >= 0) mii[0x02] = (u8)(place / 10 | place % 10 << 4);
+    const u16 crc = mii_crc16(mii.data(), 0x5E);
+    mii[0x5E] = (u8)(crc >> 8);
+    mii[0x5F] = (u8)crc;
+    return mii;
 }
 
 // The player's Mii: the current account's (the console's first, if that account has none a game can take), naming the place it has in
@@ -89,13 +115,7 @@ std::array<u8, 0x60> player_mii() {
     int mine;
     const auto &miis = console_miis(&mine);
     if (!miis.empty()) {
-        const u32 n = mine < 0 ? 0 : (u32)mine;
-        std::array<u8, 0x60> mii = miis[n];
-        if (const int place = mii_maker_place(n); place >= 0) mii[0x02] = (u8)(place / 10 | place % 10 << 4);
-        const u16 crc = mii_crc16(mii.data(), 0x5E);
-        mii[0x5E] = (u8)(crc >> 8);
-        mii[0x5F] = (u8)crc;
-        return mii;
+        return placed_mii(mine < 0 ? 0 : (u32)mine);
     }
     std::array<u8, 0x60> m{};
     auto be32 = [&](size_t o, u32 v) { m[o] = (u8)(v >> 24); m[o + 1] = (u8)(v >> 16); m[o + 2] = (u8)(v >> 8); m[o + 3] = (u8)v; };

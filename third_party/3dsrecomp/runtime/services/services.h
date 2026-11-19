@@ -11,9 +11,18 @@ namespace kernel {
 // Games see them in Mii Maker's database (fs.cpp), as the player's Mii (frd:u) and in the Mii Selector (apt.cpp).
 extern std::vector<std::array<u8, 0x60>> g_host_miis;
 extern int g_host_my_mii;  // the current account's, or -1
+// A host Mii's face as a picture, where the host has one (the Wii U keeps one with each account): RGBA, rows from the top. Numbered as
+// g_host_miis, and empty (or absent) for a Mii without one. The Mii Selector's picker shows it.
+struct HostMiiFace {
+    u32 w = 0, h = 0;
+    std::vector<u8> rgba;
+};
+extern std::vector<HostMiiFace> g_host_mii_faces;
+int console_mii_host(u32 n);  // the nth of console_miis(): its number in g_host_miis
 bool mii_3ds(const std::array<u8, 0x60> &host, std::array<u8, 0x60> &out);  // false: not a usable Mii
 const std::vector<std::array<u8, 0x60>> &console_miis(int *mine);  // the ones a game can take, each once; mine: the current account's number among them, or -1
 int mii_maker_place(u32 n);            // where the nth of console_miis() lies in the game's Mii Maker database (fs.cpp), or -1: no place was free
+std::array<u8, 0x60> placed_mii(u32 n);  // the nth of console_miis() as a game is handed it: naming its place there, with its checksum
 std::array<u8, 0x60> player_mii();     // the current account's Mii, or a stand-in "Mario" when it has no usable one
 u16 mii_crc16(const u8 *p, size_t n);  // CRC-16/XMODEM, as Mii data and Mii Maker's database use
 void register_apt();

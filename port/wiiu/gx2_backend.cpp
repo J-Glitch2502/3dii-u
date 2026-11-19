@@ -9,6 +9,7 @@
 #include <coreinit/memexpheap.h>
 #include <coreinit/memfrmheap.h>
 #include <coreinit/memheap.h>
+#include <coreinit/memory.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <gfd.h>
@@ -30,6 +31,11 @@
 #include <malloc.h>
 #include <vpad/input.h>
 #include <whb/gfx.h>
+
+// the console's own font, for the Mii picker (mp_text): one header, public domain or MIT (THIRD_PARTY_LICENSES.md)
+#define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
+#include "stb_truetype.h"
 
 #include <algorithm>
 #include <array>
@@ -54,6 +60,7 @@
 #include "settings.h"
 #include "shader_compile.h"
 #include "shadergen.h"
+#include "miisel.h"
 #include "swkbd.h"
 #include "vertex_arrays.h"
 #include "wiiu.h"
@@ -4715,6 +4722,399 @@ static void draw_keyboard() {
     state_lost = true;
 }
 
+// ---- the Mii Selector a game asks for (miisel.h), on the GamePad, laid out as the Wii U's own Mii pickers are: large white tiles on
+// light green, five to a row and two rows to a page, the one the cursor is on in light blue. A tile shows the console's picture of an
+// account's Mii (head and shoulders) or, for a Mii without one, a figure in its favourite colour, and the name under it. The D-pad
+// and A, or a touch on a tile and another to pick it; B goes back where the game lets the player. A Mii the game's list leaves out
+// is greyed and can't be picked, as on a 3DS.
+static constexpr int MP_COLS = 5, MP_ROWS = 2, MP_PAGE = MP_COLS * MP_ROWS;
+static constexpr float MP_GX = 45, MP_GY = 62, MP_TW = 140, MP_TH = 148, MP_W = MP_TW + 16, MP_H = MP_TH + 14, MP_BY = 408, MP_BH = 54;
+static constexpr float MP_CANCEL[2] = {24, 184}, MP_PREV[2] = {296, 372}, MP_NEXT[2] = {482, 558}, MP_OK[2] = {670, 830};
+static volatile bool mp_active;
+static volatile int mp_sel;
+static miisel::Request mp_req;
+
+static void mp_choose(int n) {
+    if (n < 0 || n >= (int)mp_req.miis.size() || !mp_req.miis[(size_t)n].selectable) return;
+    mp_active = false;
+    miisel::finish(n, true);
+}
+
+static void mp_cancel() {
+    if (!mp_req.can_cancel) return;
+    mp_active = false;
+    miisel::finish(-1, false);
+}
+
+bool mii_picker_open() { return mp_active; }
+
+// the nth Mii, or with -1 a cancel: the network console's "mii", for a test from the PC
+void mii_picker_pick(int n) {
+    if (!mp_active) return;
+    if (n < 0) mp_cancel();
+    else mp_choose(n);
+}
+
+void mii_picker_input(u32 pressed, bool touch_began, u16 x, u16 y) {
+    if (!mp_active) {
+        if (miisel::pending(&mp_req)) {
+            mp_sel = std::clamp(mp_req.initial, 0, std::max((int)mp_req.miis.size() - 1, 0));
+            mp_active = true;
+        }
+        return;
+    }
+    const int n = (int)mp_req.miis.size();
+    int sel = mp_sel;
+    if (touch_began) {
+        const int c = (int)((x - MP_GX) / MP_W), r = (int)((y - MP_GY) / MP_H);
+        if (x >= MP_GX && c < MP_COLS && y >= MP_GY && r < MP_ROWS) {
+            const int t = sel / MP_PAGE * MP_PAGE + r * MP_COLS + c;
+            if (t < n && t == sel) return mp_choose(t);
+            if (t < n) sel = t;
+        } else if (y >= MP_BY) {
+            if (x >= MP_CANCEL[0] && x < MP_CANCEL[1]) return mp_cancel();
+            if (x >= MP_OK[0] && x < MP_OK[1]) return mp_choose(sel);
+            if (x >= MP_PREV[0] && x < MP_PREV[1]) pressed |= VPAD_BUTTON_L;
+            if (x >= MP_NEXT[0] && x < MP_NEXT[1]) pressed |= VPAD_BUTTON_R;
+        }
+    }
+    if ((pressed & VPAD_BUTTON_LEFT) && sel > 0) sel--;
+    if ((pressed & VPAD_BUTTON_RIGHT) && sel < n - 1) sel++;
+    if ((pressed & VPAD_BUTTON_UP) && sel >= MP_COLS) sel -= MP_COLS;
+    if ((pressed & VPAD_BUTTON_DOWN) && sel / MP_COLS < (n - 1) / MP_COLS) sel = std::min(sel + MP_COLS, n - 1);
+    if ((pressed & VPAD_BUTTON_L) && sel >= MP_PAGE) sel -= MP_PAGE;
+    if ((pressed & VPAD_BUTTON_R) && sel / MP_PAGE < (n - 1) / MP_PAGE) sel = std::min(sel + MP_PAGE, n - 1);
+    mp_sel = sel;
+    if (pressed & VPAD_BUTTON_A) return mp_choose(sel);
+    if (pressed & VPAD_BUTTON_B) mp_cancel();
+}
+
+// a texture of the picker's own, from RGBA rows (the GPU thread)
+static GX2Texture *mp_texture(u32 w, u32 h, const u8 *rgba) {
+    GX2Texture *t = new GX2Texture;
+    memset(t, 0, sizeof *t);
+    GX2Surface &f = t->surface;
+    f.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+    f.width = w;
+    f.height = h;
+    f.depth = f.mipLevels = 1;
+    f.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+    f.aa = GX2_AA_MODE1X;
+    f.use = GX2_SURFACE_USE_TEXTURE;
+    f.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+    t->viewNumMips = t->viewNumSlices = 1;
+    t->compMap = 0x00010203;
+    GX2CalcSurfaceSizeAndAlignment(&f);
+    GX2InitTextureRegs(t);
+    f.image = memalign(f.alignment, f.imageSize);
+    memset(f.image, 0, f.imageSize);
+    for (u32 y = 0; y < h; y++) memcpy((u8 *)f.image + (size_t)y * f.pitch * 4, rgba + (size_t)y * w * 4, (size_t)w * 4);
+    GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, f.image, f.imageSize);
+    return t;
+}
+
+// A Mii's face as a texture, made the first time a tile shows it: the console's own picture of an account's Mii
+static GX2Texture *mp_face(int id) {
+    static std::map<int, GX2Texture *> made;
+    if (id < 0 || (size_t)id >= kernel::g_host_mii_faces.size()) return nullptr;
+    if (const auto it = made.find(id); it != made.end()) return it->second;
+    const kernel::HostMiiFace &face = kernel::g_host_mii_faces[(size_t)id];
+    GX2Texture *t = face.w && face.rgba.size() == (size_t)face.w * face.h * 4 ? mp_texture(face.w, face.h, face.rgba.data()) : nullptr;
+    made[id] = t;
+    return t;
+}
+
+// a white disc, soft at its rim, whose quarters round a rectangle's corners and whose middle fills the rest
+static GX2Texture *mp_disc() {
+    static GX2Texture *t;
+    if (t) return t;
+    constexpr int N = 32;
+    std::vector<u8> px(N * N * 4, 255);
+    for (int y = 0; y < N; y++)
+        for (int x = 0; x < N; x++) {
+            const float d = sqrtf((x - 15.5f) * (x - 15.5f) + (y - 15.5f) * (y - 15.5f));
+            px[(size_t)(y * N + x) * 4 + 3] = (u8)(std::clamp(16.0f - d, 0.0f, 1.0f) * 255);
+        }
+    return t = mp_texture(N, N, px.data());
+}
+
+// the background's two greens, one above the other: the sampler blends between them
+static GX2Texture *mp_backdrop() {
+    static GX2Texture *t;
+    if (t) return t;
+    static const u8 px[4 * 4] = {140, 214, 150, 255, 140, 214, 150, 255, 226, 243, 220, 255, 226, 243, 220, 255};
+    return t = mp_texture(2, 2, px);
+}
+
+// Text in the console's own font, the one the Wii U Menu is set in: the console hands a game the font's file (OSGetSharedData) and
+// stb_truetype draws its letters, each once, into a texture the tiles' names and the buttons' words are drawn from. A letter the
+// font lacks is a question mark. Without the font (mp_font_ok false) the picker falls back on the options menu's small one.
+struct MpGlyph {
+    u16 x = 0, y = 0, w = 0, h = 0;  // where it lies in the texture
+    s16 ox = 0, oy = 0;              // from the pen on the baseline to its top left corner
+    float advance = 0;
+};
+static constexpr u32 MP_ATLAS = 512;
+static stbtt_fontinfo mp_font;
+static GX2Texture *mp_atlas;
+static u32 mp_atlas_x = 1, mp_atlas_y = 1, mp_atlas_row;
+static bool mp_atlas_changed;
+static std::map<u32, MpGlyph> mp_glyphs;  // by letter and size
+
+static bool mp_font_ok() {
+    static int state;  // 1: there, -1: the console gave none
+    if (!state) {
+        void *file = nullptr;
+        uint32_t size = 0;
+        state = OSGetSharedData(OS_SHAREDDATATYPE_FONT_STANDARD, 0, &file, &size) && file && size
+                    && stbtt_InitFont(&mp_font, (const unsigned char *)file, stbtt_GetFontOffsetForIndex((const unsigned char *)file, 0)) ? 1 : -1;
+        LOG("[gx2] the console's font for the Mii picker: %s (%u bytes)\n", state > 0 ? "found" : "none, the small one is used", (u32)size);
+        if (state > 0) {
+            std::vector<u8> empty(MP_ATLAS * MP_ATLAS * 4, 0);
+            mp_atlas = mp_texture(MP_ATLAS, MP_ATLAS, empty.data());
+        }
+    }
+    return state > 0;
+}
+
+static std::vector<u32> mp_letters(const std::string &s) {
+    std::vector<u32> o;
+    for (size_t i = 0; i < s.size();) {
+        const u8 b = (u8)s[i];
+        const int more = b < 0x80 ? 0 : b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0;
+        u32 c = more == 0 ? b : b & (0x3F >> more);
+        for (int k = 1; k <= more && i + k < s.size(); k++) c = c << 6 | ((u8)s[i + k] & 0x3F);
+        i += more + 1;
+        o.push_back(c);
+    }
+    return o;
+}
+
+static const MpGlyph &mp_glyph(u32 letter, int px) {
+    const u32 key = letter | (u32)px << 24;
+    if (const auto it = mp_glyphs.find(key); it != mp_glyphs.end()) return it->second;
+    int index = stbtt_FindGlyphIndex(&mp_font, (int)letter);
+    if (!index && letter != '?') return mp_glyphs[key] = mp_glyph('?', px);
+    const float scale = stbtt_ScaleForPixelHeight(&mp_font, (float)px);
+    MpGlyph g;
+    int advance = 0, bearing = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    stbtt_GetGlyphHMetrics(&mp_font, index, &advance, &bearing);
+    stbtt_GetGlyphBitmapBox(&mp_font, index, scale, scale, &x0, &y0, &x1, &y1);
+    g.advance = advance * scale;
+    const u32 gw = (u32)std::max(x1 - x0, 0), gh = (u32)std::max(y1 - y0, 0);
+    if (gw && gh) {
+        if (mp_atlas_x + gw + 1 > MP_ATLAS) {
+            mp_atlas_x = 1;
+            mp_atlas_y += mp_atlas_row + 1;
+            mp_atlas_row = 0;
+        }
+        if (mp_atlas_y + gh + 1 <= MP_ATLAS) {  // a full texture leaves the letter out
+            std::vector<u8> cover(gw * gh);
+            stbtt_MakeGlyphBitmap(&mp_font, cover.data(), (int)gw, (int)gh, (int)gw, scale, scale, index);
+            GX2Surface &f = mp_atlas->surface;
+            for (u32 y = 0; y < gh; y++) {
+                u8 *row = (u8 *)f.image + ((size_t)(mp_atlas_y + y) * f.pitch + mp_atlas_x) * 4;
+                for (u32 x = 0; x < gw; x++) row[4 * x] = row[4 * x + 1] = row[4 * x + 2] = 255, row[4 * x + 3] = cover[y * gw + x];
+            }
+            g.x = (u16)mp_atlas_x, g.y = (u16)mp_atlas_y, g.w = (u16)gw, g.h = (u16)gh;
+            g.ox = (s16)x0, g.oy = (s16)y0;
+            mp_atlas_x += gw + 1;
+            mp_atlas_row = std::max(mp_atlas_row, gh);
+            mp_atlas_changed = true;
+        }
+    }
+    return mp_glyphs[key] = g;
+}
+
+static float mp_text_width(const std::string &s, int px) {
+    float wide = 0;
+    for (u32 c : mp_letters(s)) wide += mp_glyph(c, px).advance;
+    return wide;
+}
+
+// a line with its top at y, px high, no wider than fit (squeezed if it is); the colour is the blit's tint, set before
+static void mp_text(u32 w, u32 h, const std::string &s, float x, float y, int px, float fit = 0) {
+    const std::vector<u32> letters = mp_letters(s);
+    float wide = 0;
+    for (u32 c : letters) wide += mp_glyph(c, px).advance;
+    if (mp_atlas_changed) {
+        GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, mp_atlas->surface.image, mp_atlas->surface.imageSize);
+        mp_atlas_changed = false;
+    }
+    const float squeeze = fit > 0 && wide > fit ? fit / wide : 1;
+    int ascent = 0, descent = 0, gap = 0;
+    stbtt_GetFontVMetrics(&mp_font, &ascent, &descent, &gap);
+    const float base = y + ascent * stbtt_ScaleForPixelHeight(&mp_font, (float)px);
+    GX2SetPixelTexture(mp_atlas, 0);
+    GX2SetPixelSampler(&blit_sampler, 0);
+    for (u32 c : letters) {
+        const MpGlyph &g = mp_glyph(c, px);
+        if (g.w) {
+            const float gx = floorf(x + g.ox * squeeze + 0.5f), gy = floorf(base + g.oy + 0.5f);
+            draw_rect(w, h, gx, gy, gx + g.w * squeeze, gy + g.h, (float)g.x / MP_ATLAS, (float)g.y / MP_ATLAS, (float)(g.x + g.w) / MP_ATLAS,
+                      (float)(g.y + g.h) / MP_ATLAS);
+        }
+        x += g.advance * squeeze;
+    }
+}
+
+// The picker fills the GamePad's screen and a game only its middle, the 3DS's bottom screen: once the picker has gone, the strips beside
+// that are made black again, as they were (its picture stayed there, either side of the game, 2026-11-15)
+static bool mp_shown;
+static void mp_clear_sides() {
+    const u32 w = drc_cb->surface.width, h = drc_cb->surface.height;
+    const float side = (854 - 640) / 2;
+    GX2SetColorBuffer(drc_cb, GX2_RENDER_TARGET_0);
+    cur_color = nullptr;
+    begin_blit();
+    GX2SetViewport(0, 0, (float)w, (float)h, 0, 1);
+    GX2SetScissor(0, 0, w, h);
+    GX2SetPixelTexture(&black_tex, 0);
+    GX2SetPixelSampler(&blit_sampler, 0);
+    draw_rect(w, h, 0, 0, side, (float)h, 0, 0, 1, 1);
+    draw_rect(w, h, (float)w - side, 0, (float)w, (float)h, 0, 0, 1, 1);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, drc_cb->surface.image, drc_cb->surface.imageSize);
+    state_lost = true;
+}
+
+// a name in the letters the font has: an accented Latin letter as the plain one, anything else it lacks as a question mark
+static std::string mp_plain(const std::string &s, size_t max) {
+    static const char latin1[] = "AAAAAAACEEEEIIIIDNOOOOO?OUUUUY?saaaaaaaceeeeiiiidnooooo?ouuuuy?y";  // U+00C0 to U+00FF
+    std::string o;
+    for (size_t i = 0; i < s.size() && o.size() < max;) {
+        const u8 b = (u8)s[i];
+        const int more = b < 0x80 ? 0 : b >= 0xF0 ? 3 : b >= 0xE0 ? 2 : b >= 0xC0 ? 1 : 0;
+        u32 c = more == 0 ? b : b & (0x3F >> more);
+        for (int k = 1; k <= more && i + k < s.size(); k++) c = c << 6 | ((u8)s[i + k] & 0x3F);
+        i += more + 1;
+        if (c < 0x80 && c >= 0x20 && strchr(k_font_chars, (char)c)) o += (char)c;
+        else if (c >= 0xC0 && c <= 0xFF) o += latin1[c - 0xC0];
+        else o += '?';
+    }
+    return o;
+}
+
+static void draw_mii_picker() {
+    static const float shirts[12][3] = {{0.82f, 0.12f, 0.08f}, {1.0f, 0.43f, 0.1f},   {1.0f, 0.85f, 0.13f},  {0.47f, 0.82f, 0.13f},
+                                        {0.0f, 0.47f, 0.19f},  {0.04f, 0.28f, 0.7f},  {0.24f, 0.67f, 0.87f}, {0.96f, 0.35f, 0.49f},
+                                        {0.45f, 0.16f, 0.68f}, {0.28f, 0.22f, 0.09f}, {0.86f, 0.86f, 0.86f}, {0.09f, 0.09f, 0.08f}};
+    const u32 w = drc_cb->surface.width, h = drc_cb->surface.height;
+    const int n = (int)mp_req.miis.size(), sel = mp_sel, page = sel / MP_PAGE, pages = std::max((n + MP_PAGE - 1) / MP_PAGE, 1);
+    const int from = page * MP_PAGE, to = std::min(from + MP_PAGE, n);
+    const bool can_pick = sel < n && mp_req.miis[(size_t)sel].selectable;
+    GX2Texture *disc = mp_disc();
+    GX2SetColorBuffer(drc_cb, GX2_RENDER_TARGET_0);
+    cur_color = nullptr;
+    begin_blit();
+    GX2SetViewport(0, 0, (float)w, (float)h, 0, 1);
+    GX2SetScissor(0, 0, w, h);
+    GX2SetPixelSampler(&blit_sampler, 0);
+    GX2SetPixelTexture(mp_backdrop(), 0);
+    set_blit_colors(1, 1, 1, 0, 0, 0);
+    draw_rect(w, h, 0, 0, (float)w, (float)h, 0.5f, 0.25f, 0.5f, 0.75f);
+    GX2SetColorControl(GX2_LOGIC_OP_COPY, 1, FALSE, TRUE);
+    GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA, GX2_BLEND_COMBINE_MODE_ADD, FALSE, GX2_BLEND_MODE_ONE, GX2_BLEND_MODE_ZERO, GX2_BLEND_COMBINE_MODE_ADD);
+    GX2SetPixelTexture(disc, 0);
+    // a rectangle with corners of radius r, in one colour: the disc's quarters at the corners, its middle for the rest
+    const auto round = [&](float x0, float y0, float x1, float y1, float r, float cr, float cg, float cb) {
+        set_blit_colors(cr, cg, cb, 0, 0, 0);
+        draw_rect(w, h, x0, y0, x0 + r, y0 + r, 0, 0, 0.5f, 0.5f);
+        draw_rect(w, h, x1 - r, y0, x1, y0 + r, 0.5f, 0, 1, 0.5f);
+        draw_rect(w, h, x0, y1 - r, x0 + r, y1, 0, 0.5f, 0.5f, 1);
+        draw_rect(w, h, x1 - r, y1 - r, x1, y1, 0.5f, 0.5f, 1, 1);
+        draw_rect(w, h, x0 + r, y0, x1 - r, y1, 0.5f, 0.5f, 0.5f, 0.5f);
+        draw_rect(w, h, x0, y0 + r, x0 + r, y1 - r, 0.5f, 0.5f, 0.5f, 0.5f);
+        draw_rect(w, h, x1 - r, y0 + r, x1, y1 - r, 0.5f, 0.5f, 0.5f, 0.5f);
+    };
+    const auto tile_at = [&](int i, float &x0, float &y0) {
+        x0 = MP_GX + (i - from) % MP_COLS * MP_W;
+        y0 = MP_GY + (i - from) / MP_COLS * MP_H;
+    };
+    for (int i = from; i < to; i++) {
+        const miisel::Entry &e = mp_req.miis[(size_t)i];
+        float x0, y0;
+        tile_at(i, x0, y0);
+        round(x0 + 2, y0 + 4, x0 + MP_TW + 2, y0 + MP_TH + 4, 12, 0.52f, 0.74f, 0.56f);  // its shadow
+        if (i == sel) round(x0, y0, x0 + MP_TW, y0 + MP_TH, 12, 0.62f, 0.83f, 0.97f);
+        else if (e.selectable) round(x0, y0, x0 + MP_TW, y0 + MP_TH, 12, 1, 1, 1);
+        else round(x0, y0, x0 + MP_TW, y0 + MP_TH, 12, 0.8f, 0.83f, 0.8f);
+        if (mp_face(e.face)) continue;
+        const float dim = e.selectable ? 1.0f : 0.5f, grey = e.selectable ? 0.0f : 0.4f;
+        const float *s = shirts[std::clamp(e.color, 0, 11)];
+        round(x0 + 28, y0 + 74, x0 + 112, y0 + 140, 22, s[0] * dim + grey, s[1] * dim + grey, s[2] * dim + grey);  // shoulders, cut off below
+        round(x0 + 43, y0 + 14, x0 + 97, y0 + 68, 27, 0.98f * dim + grey, 0.8f * dim + grey, 0.62f * dim + grey);   // and a head
+    }
+    for (int i = from; i < to; i++) {  // the strip a name stands on, over the figure's lower edge
+        const miisel::Entry &e = mp_req.miis[(size_t)i];
+        if (mp_face(e.face)) continue;
+        float x0, y0;
+        tile_at(i, x0, y0);
+        if (i == sel) round(x0, y0 + 116, x0 + MP_TW, y0 + MP_TH, 12, 0.62f, 0.83f, 0.97f);
+        else if (e.selectable) round(x0, y0 + 116, x0 + MP_TW, y0 + MP_TH, 12, 1, 1, 1);
+        else round(x0, y0 + 116, x0 + MP_TW, y0 + MP_TH, 12, 0.8f, 0.83f, 0.8f);
+    }
+    const auto button = [&](const float *x, bool on) {
+        round(x[0] + 2, MP_BY + 4, x[1] + 2, MP_BY + MP_BH + 4, 20, 0.52f, 0.74f, 0.56f);
+        if (on) round(x[0], MP_BY, x[1], MP_BY + MP_BH, 20, 1, 1, 1);
+        else round(x[0], MP_BY, x[1], MP_BY + MP_BH, 20, 0.8f, 0.83f, 0.8f);
+    };
+    if (mp_req.can_cancel) button(MP_CANCEL, true);
+    if (pages > 1) button(MP_PREV, page > 0);
+    if (pages > 1) button(MP_NEXT, page < pages - 1);
+    button(MP_OK, can_pick);
+    for (int i = from; i < to; i++) {
+        const miisel::Entry &e = mp_req.miis[(size_t)i];
+        GX2Texture *face = mp_face(e.face);
+        if (!face) continue;
+        float x0, y0;
+        tile_at(i, x0, y0);
+        const float dim = e.selectable ? 1.0f : 0.5f;
+        GX2SetPixelTexture(face, 0);
+        set_blit_colors(dim, dim, dim, 0, 0, 0);
+        draw_rect(w, h, x0 + 14, y0 + 6, x0 + 126, y0 + 118, 0, 0, 1, 1);
+        GX2SetPixelTexture(disc, 0);
+        round(x0 + MP_TW - 20, y0 - 6, x0 + MP_TW + 6, y0 + 20, 13, 0.85f, 0.6f, 0.05f);  // an account's Mii: a gold mark on its corner
+        round(x0 + MP_TW - 17, y0 - 3, x0 + MP_TW + 3, y0 + 17, 10, 1.0f, 0.8f, 0.2f);
+    }
+    // the words: in the console's font, or (size 0 to 2) in the small one
+    const bool own_font = mp_font_ok();
+    if (!own_font) {
+        GX2SetPixelTexture(&font_tex, 0);
+        GX2SetPixelSampler(&lut_sampler, 0);
+    }
+    static const int sizes[3] = {22, 26, 34};
+    const auto width = [&](const std::string &t, int size) { return own_font ? mp_text_width(t, sizes[size]) : 6 * (size ? 3.0f : 2.0f) * t.size(); };
+    const auto text = [&](const std::string &t, float x, float y, int size, float fit = 0) {
+        if (own_font) mp_text(w, h, t, x, y, sizes[size], fit);
+        else draw_text(w, h, mp_plain(t, 60).c_str(), x, y + 6, size ? 3 : 2);
+    };
+    const auto centred = [&](const std::string &t, float middle, float y, int size, float fit = 0) {
+        const float wide = width(t, size);
+        text(t, middle - (fit > 0 && own_font ? std::min(wide, fit) : wide) / 2, y, size, fit);
+    };
+    set_blit_colors(0.13f, 0.36f, 0.2f, 0, 0, 0);
+    text(mp_req.title.empty() ? "Select a Mii" : mp_req.title, MP_GX, 12, 2, 764);
+    if (!n) centred("No Mii to choose from", 427, 200, 2);
+    if (pages > 1) {
+        char count[16];
+        snprintf(count, sizeof count, "%d/%d", page + 1, pages);
+        centred(count, 427, MP_BY + 12, 1);
+    }
+    set_blit_colors(0.25f, 0.28f, 0.27f, 0, 0, 0);
+    for (int i = from; i < to; i++) {
+        float x0, y0;
+        tile_at(i, x0, y0);
+        centred(own_font ? mp_req.miis[(size_t)i].name : mp_plain(mp_req.miis[(size_t)i].name, 10), x0 + MP_TW / 2, y0 + 120, 0, MP_TW - 12);
+    }
+    if (mp_req.can_cancel) centred("B  Back", (MP_CANCEL[0] + MP_CANCEL[1]) / 2, MP_BY + 12, 1);
+    if (pages > 1) centred("< L", (MP_PREV[0] + MP_PREV[1]) / 2, MP_BY + 12, 1);
+    if (pages > 1) centred("R >", (MP_NEXT[0] + MP_NEXT[1]) / 2, MP_BY + 12, 1);
+    centred("A  OK", (MP_OK[0] + MP_OK[1]) / 2, MP_BY + 12, 1);
+    mp_shown = true;
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, drc_cb->surface.image, drc_cb->surface.imageSize);
+    state_lost = true;
+}
+
 // The report is asked for by the frontend's thread and written by this one, between frames: the counters it prints and starts over are this
 // thread's, and read from the other they came out torn (a count taken mid-draw, a reset that lost what was added meanwhile).
 static std::atomic<bool> report_due;
@@ -4831,8 +5231,8 @@ static void show_lcd_from_memory() {
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {
     if (!vblank_pending) {
-        // the menu and the keyboard are drawn at a VBlank's look only, so while one is up nothing is shown in between
-        if (!menu_is_open && !kb_active && present_rule.between(quiet)) {
+        // the menu, the keyboard and the Mii picker are drawn at a VBlank's look only, so while one is up nothing is shown in between
+        if (!menu_is_open && !kb_active && !mp_active && present_rule.between(quiet)) {
             screen_fresh = false;
             present();
         }
@@ -4843,11 +5243,19 @@ void gfx_pump(bool quiet) {
     install_compiled();
     if (report_due.exchange(false)) write_report();
     shader_compile_watch();
+    if (mp_shown && !mp_active) {
+        mp_shown = false;
+        mp_clear_sides();
+        screen_fresh = true;
+    }
     if (menu_is_open) {
         draw_menu();
         screen_fresh = true;
     } else if (kb_active) {
         draw_keyboard();
+        screen_fresh = true;
+    } else if (mp_active) {
+        draw_mii_picker();
         screen_fresh = true;
     }
     static u32 swaps_seen[2];  // each screen's swaps (services/gsp.cpp) up to the last VBlank's look
@@ -4857,7 +5265,7 @@ void gfx_pump(bool quiet) {
         if (swaps != swaps_seen[s]) swapped |= 1u << s;
         swaps_seen[s] = swaps;
     }
-    if (present_rule.vblank(screen_fresh, swapped, menu_is_open || kb_active)) {
+    if (present_rule.vblank(screen_fresh, swapped, menu_is_open || kb_active || mp_active)) {
         screen_fresh = false;
         present();
     }
@@ -5053,7 +5461,7 @@ void touch_to_bottom(u16 x, u16 y, bool &touch, u16 &tx, u16 &ty) {
 void input_override(u32 &buttons, bool &touch, u16 &tx, u16 &ty) {
     (void)tx;
     (void)ty;
-    if (menu_is_open || kb_active) {
+    if (menu_is_open || kb_active || mp_active) {
         buttons = 0;
         touch = false;
     }

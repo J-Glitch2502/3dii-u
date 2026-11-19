@@ -40,6 +40,7 @@ How each part reaches you decides what its licence asks of whoever distributes i
 | [PySide6 / Shiboken6](https://wiki.qt.io/Qt_for_Python) | 6.12.0 | The Qt Company Ltd. | LGPL-3.0-only | yes (weak) | app, as separate, replaceable files; builder source |
 | [PyInstaller](https://pyinstaller.org/) bootloader | 6.22.3 | PyInstaller Development Team; Giovanni Bajo; McMillan Enterprises, Inc. | GPL-2.0-or-later with the PyInstaller Bootloader Exception; run-time hooks Apache-2.0 | no (the exception covers bundling) | app (`3Dii U Builder.exe`) |
 | Microsoft Visual C++ and Universal C runtimes | as shipped with Python | Microsoft Corporation | Microsoft's redistribution terms for these runtime files | no | app (`VCRUNTIME140*.dll`, `ucrtbase.dll`, `api-ms-win-*.dll`) |
+| [stb_truetype](https://github.com/nothings/stb) | 1.28 | Sean Barrett and contributors | MIT or public domain (Unlicense), at the user's choice; the text is at the end of the file | no | repository (`port/wiiu/stb_truetype.h`); games: draws the console's own font in the Mii picker |
 | [woomïnstaller](https://github.com/shinyquagsire23/woominstaller)'s boot movie | as in its repository | shinyquagsire23 (Max Thomas) | LGPL-2.1 | yes (weak) | repository (`phase0/title*/meta/bootMovie.h264`); copied into every game's title |
 
 ### Also in the app, unused by the build

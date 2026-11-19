@@ -86,4 +86,8 @@ void menu_quit_now();  // as choosing Quit there: a test route's "KEY quit", so 
 // the game's software keyboard (GamePad pixels)
 void keyboard_input(u32 pressed, bool touch_began, u16 x, u16 y);
 bool keyboard_open();
+// the Mii Selector a game asks for, as a picker of the console's Miis (GamePad pixels)
+void mii_picker_input(u32 pressed, bool touch_began, u16 x, u16 y);
+bool mii_picker_open();
+void mii_picker_pick(int n);  // the nth Mii, or -1: cancel (the network console's "mii")
 }  // namespace wiiu

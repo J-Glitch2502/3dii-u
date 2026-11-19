@@ -266,6 +266,7 @@ bool run_command(int c, char *line) {
     char word[8] = "", path[128] = "", name[16] = "";
     u32 a = 0, b = 0;
     unsigned long long title = 0;
+    int pick = 0;
     sscanf(line, "%7s", word);
     if (!strcmp(word, "ps")) {
         wiiu::log_threads();
@@ -273,6 +274,9 @@ bool run_command(int c, char *line) {
         wiiu::log_status();
     } else if (!strcmp(word, "misses")) {
         return send_misses(c);
+    } else if (sscanf(line, "mii %d", &pick) == 1) {  // in the Mii picker a game opened: the nth Mii (from 0), or -1 to cancel
+        LOG("[net] mii %d\n", pick);
+        wiiu::mii_picker_pick(pick);
     } else if (!strcmp(word, "quit")) {  // to the Wii U Menu, the way HOME's Close goes
         LOG("[net] quit: leaving for the Wii U Menu\n");
         SYSLaunchMenu();

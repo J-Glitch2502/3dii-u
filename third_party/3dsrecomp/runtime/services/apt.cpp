@@ -3,6 +3,7 @@
 #include <deque>
 
 #include "../service.h"
+#include "../miisel.h"
 #include "../swkbd.h"
 #include "services.h"
 
@@ -56,15 +57,6 @@ static void system_applet_receive(u32 id, u32 signal) {
     if (signal != 16) return;  // RequestForSysApplet
     send_parameter({id, 0x300, 3, nullptr, {}});   // Response
     send_parameter({id, 0x300, 10, nullptr, {}});  // WakeupByExit: back to the application
-}
-
-// The Mii selector returns the player's Mii (misc.cpp: the console account's, or a stand-in "Mario")
-static std::vector<u8> mii_selector_result() {
-    std::vector<u8> r(0x84, 0);
-    r[8] = r[9] = r[10] = r[11] = 0xFF;  // a Mii was selected (0), not a guest (0), guest index -1
-    const auto mii = player_mii();
-    memcpy(&r[0x0C], mii.data(), 0x60);
-    return r;
 }
 
 // Software keyboard (SwkbdState, 0x400 bytes). The player types the text in the window (swkbd.h, drawn by
@@ -184,11 +176,93 @@ static bool swkbd_run(u32 id, std::vector<u8> &cfg, ObjPtr mem) {
     return false;
 }
 
+// The Mii Selector (appletEd, 3dbrew's "Mii Selector"): the game passes 0x104 bytes of settings and gets 0x84 bytes back, a return code
+// (0: a Mii was selected, 1: cancelled), whether it is a guest Mii (never, here) and which (-1), and the Mii as Mii Maker's database
+// keeps it, with its checksum. The player picks among the console's Miis that have a place in the game's Mii Maker database (fs.cpp:
+// 100 at most, as on a 3DS, and the game's list of the ones it lets through goes by that place), in a picker the frontend draws
+// (miisel.h). Without a picker, or with nothing to pick from, the game gets the player's Mii at once, as before there was one.
+namespace {
+struct MiiselPending {
+    u32 id = 0;
+    std::vector<u32> miis;  // each entry's number among console_miis()
+};
+std::mutex miisel_m;  // guards the request the frontend reads (the rest is under the kernel lock)
+miisel::Request miisel_req;
+bool miisel_active = false;
+MiiselPending miisel_wait;
+unsigned miisel_serial = 0;
+}  // namespace
+
+static std::vector<u8> mii_selector_result(const std::array<u8, 0x60> *mii) {
+    std::vector<u8> r(0x84, 0);
+    r[0] = mii ? 0 : 1;                  // little-endian, as the games read it (Tomodachi Life takes its low byte)
+    r[8] = r[9] = r[10] = r[11] = 0xFF;  // not a guest (0), guest index -1
+    if (mii) memcpy(&r[0x0C], mii->data(), 0x60);
+    return r;
+}
+
+// true if the applet finished (else it waits for the player: miisel::finish)
+static bool mii_selector_run(u32 id, const std::vector<u8> &cfg, std::vector<u8> &result) {
+    auto rd32 = [&](size_t o) { u32 v; memcpy(&v, &cfg[o], 4); return le32(v); };
+    int mine;
+    const auto &miis = console_miis(&mine);
+    const auto at_once = [&](const char *why) {
+        LOG("[apt] Mii selector: %s, the game gets the player's Mii\n", why);
+        const auto mii = player_mii();
+        result = mii_selector_result(&mii);
+        return true;
+    };
+    if (!miisel::host_picker) return at_once("no picker here");
+    if (cfg.size() < 0x104 || rd32(0x100) != 0x13DE28CF) return at_once("settings it wouldn't take");
+    miisel::Request r;
+    MiiselPending wait{id, {}};
+    std::u16string title;
+    for (size_t i = 0; i < 64; i++) {
+        const char16_t c = (char16_t)(cfg[0x08 + 2 * i] | cfg[0x09 + 2 * i] << 8);
+        if (!c) break;
+        title += c;
+    }
+    r.title = utf8(title);
+    r.can_cancel = cfg[0x00] != 0;
+    const u32 first = rd32(0x90);  // the place in the database the cursor starts on
+    int initial = -1, own = -1, any = -1;
+    for (u32 n = 0; n < miis.size(); n++) {
+        const int place = mii_maker_place(n);
+        if (place < 0 || place >= 100) continue;  // not in the game's database: it couldn't look this one up again
+        miisel::Entry e;
+        std::u16string name;
+        for (size_t i = 0; i < 10; i++) {
+            const char16_t c = (char16_t)(miis[n][0x1A + 2 * i] | miis[n][0x1B + 2 * i] << 8);
+            if (!c) break;
+            name += c;
+        }
+        e.name = utf8(name);
+        e.color = (miis[n][0x18] | miis[n][0x19] << 8) >> 10 & 15;
+        e.selectable = cfg[0x9A + place] != 0;
+        if (const int h = console_mii_host(n); h >= 0 && (size_t)h < g_host_mii_faces.size() && !g_host_mii_faces[(size_t)h].rgba.empty()) e.face = h;
+        const int entry = (int)r.miis.size();
+        if (e.selectable && any < 0) any = entry;
+        if (e.selectable && (u32)place == first) initial = entry;
+        if (e.selectable && (int)n == mine) own = entry;
+        r.miis.push_back(e);
+        wait.miis.push_back(n);
+    }
+    if (any < 0 && !r.can_cancel) return at_once(r.miis.empty() ? "no Mii on the console" : "none the game lets through and no way to cancel");
+    r.initial = initial >= 0 ? initial : own >= 0 ? own : std::max(any, 0);
+    LOG("[apt] Mii selector: waiting for the player (%u Miis, title \"%s\"%s)\n", (u32)r.miis.size(), r.title.c_str(), r.can_cancel ? ", can cancel" : "");
+    miisel_wait = std::move(wait);
+    std::lock_guard<std::mutex> g(miisel_m);
+    r.serial = ++miisel_serial;
+    miisel_req = std::move(r);
+    miisel_active = true;
+    return false;
+}
+
 static void applet_run(u32 id, std::vector<u8> buf, ObjPtr mem = nullptr) {
     u32 kind = id & 0xFF;
     if (kind == 0x02) {
-        LOG("[apt] Mii selector: returning the standard Mii\n");
-        send_parameter({id, 0x300, 10, nullptr, mii_selector_result()});
+        std::vector<u8> result;
+        if (mii_selector_run(id, buf, result)) send_parameter({id, 0x300, 10, nullptr, std::move(result)});  // WakeupByExit
         return;
     }
     if (kind == 0x06 && buf.size() >= 8) {
@@ -225,6 +299,37 @@ void swkbd::finish(const std::string &text, bool ok) {
     run_when_quiescent([w, t, ok] {
         swkbd_result(w->cfg, w->mem, t, ok);
         send_parameter({w->id, 0x300, 10, nullptr, std::move(w->cfg)});  // WakeupByExit
+    });
+    schedule_async();
+}
+
+bool miisel::host_picker = false;
+
+bool miisel::pending(Request *out) {
+    std::lock_guard<std::mutex> g(kernel::miisel_m);
+    if (kernel::miisel_active && out) *out = kernel::miisel_req;
+    return kernel::miisel_active;
+}
+
+void miisel::finish(int index, bool ok) {
+    using namespace kernel;
+    Lock lk(kmutex);
+    {
+        std::lock_guard<std::mutex> g(miisel_m);
+        if (!miisel_active) return;
+        miisel_active = false;
+    }
+    auto w = std::make_shared<MiiselPending>(std::move(miisel_wait));
+    miisel_wait = {};
+    run_when_quiescent([w, index, ok] {
+        if (ok && index >= 0 && (size_t)index < w->miis.size()) {
+            const auto mii = placed_mii(w->miis[(size_t)index]);
+            LOG("[apt] Mii selector: the player picked Mii %d (place %u in Mii Maker)\n", index, (mii[0x02] & 15) * 10 + (mii[0x02] >> 4));
+            send_parameter({w->id, 0x300, 10, nullptr, mii_selector_result(&mii)});  // WakeupByExit
+        } else {
+            LOG("[apt] Mii selector: cancelled\n");
+            send_parameter({w->id, 0x300, 10, nullptr, mii_selector_result(nullptr)});
+        }
     });
     schedule_async();
 }

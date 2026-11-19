@@ -136,6 +136,7 @@ The rest of the backend, in the order of the file's sections:
 - presenting: the top screen is drawn at 1200x720 (800x480 at the menu's 480p) and each screen is scaled to where the TV's and the GamePad's layouts put it (`screen_layouts.h`)
 - the options menu, with its own small font
 - the software keyboard
+- the Mii picker, for a game that opens the Mii Selector
 
 ## The Wii U frontend: `port/wiiu/`
 
@@ -163,7 +164,12 @@ A game that takes Miis gets the Wii U's own. That is a rule for every game: the 
   - A Mii made on a console newer than the 3DS is said to be a 3DS's. Super Mario 3D Land, of 2011, takes no other: it said "You don't have any Mii characters", and a save file lost its face at the next start.
 - They go into the game's own Mii Maker database, 100 at most (`sync_mii_db()` in `services/fs.cpp`), where a game that lists Miis finds them.
   - A Mii stays at the place it had at an earlier start, a new one takes the first free place, and each names the place it lies at. A 3DS keeps a Mii at the place it names, and games find it again by that: 3D Land showed no face on a save file whose Mii named a place where another Mii lay.
-- The current account's Mii is the player's. The friends service and the Mii selector applet hand it out, naming the same place as its copy in the database, where it is placed first and always has a place. The selector answers at once and shows no choice.
+- The current account's Mii is the player's. The friends service hands it out, naming the same place as its copy in the database, where it is placed first and always has a place.
+- A game that opens the 3DS's Mii Selector applet gets a picker on the GamePad (`draw_mii_picker()` in `gx2_backend.cpp`, the request held in `services/apt.cpp`, `miisel.h` between them): the console's Miis that have a place in that database, by name, a page of ten at a time.
+  - It is laid out as the Wii U's own Mii pickers are (large tiles on light green, ten to a page) and fills the GamePad's screen; the strips beside the game's picture are made black again when it closes. Its words are in the console's own font (`OSGetSharedData`, drawn with `stb_truetype.h`), or in the options menu's small one if the console gives none.
+  - The game's own list of the Miis it lets through goes by that place, and one it leaves out is greyed, as on a 3DS. Cancelling is offered only where the game allows it. Guest Miis are not offered.
+  - The game gets back what the applet writes: the return code, and the Mii naming its place. Without a picker (the PC build, the `nomiipicker` flag) or with nothing to pick from, the selector answers at once with the player's Mii, as it did before there was one.
+  - An account's Mii shows the picture of its face the console keeps with the account (`nn::act::GetMiiImageEx`, read at start by `frontend_wiiu.cpp` if it is a TGA file). What a console hands out there is not proven yet: the log says what came. Any other Mii, and an account's whose picture can't be read, shows a figure in the Mii's favourite colour: faces aren't drawn from Mii data.
 - `tools/check_ports.py` gives every run an account Mii and a small Mii Maker database, made up, with Miis in both layouts and a slot that holds none. A run fails if the game's Mii Maker ends up with more or fewer Miis than those. Cemu's own account Mii is a placeholder, so without them a run tested a console with no Mii at all.
 
 ## The PC build: `port/pc/`
