@@ -4,3 +4,7 @@
 *.bin binary
 *.h264 binary
 *.gpg binary
+# Source patches must retain upstream CRLF context exactly to remain applicable.
+tools/wiiu_diagnostics/patches/*.patch -text whitespace=-blank-at-eol,-space-before-tab,-blank-at-eof
+# Unified-diff blank context lines contain a required single space.
+tools/wiiu_diagnostics/experiments/*.patch whitespace=-blank-at-eol

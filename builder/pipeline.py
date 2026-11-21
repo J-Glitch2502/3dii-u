@@ -121,6 +121,19 @@ def console_learned(slug):
     return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
 
 
+LANGUAGES = ('Japanese', 'English', 'French', 'German', 'Italian', 'Spanish',
+             'Simplified Chinese', 'Korean', 'Dutch', 'Portuguese', 'Russian', 'Traditional Chinese')
+
+def language_for_locale(locale):
+    language, *qualifiers = locale.lower().replace('_', '-').split('-')
+    if language == 'zh':
+        traditional = 'hant' in qualifiers or ('hans' not in qualifiers and any(
+            region in qualifiers for region in ('tw', 'hk', 'mo')))
+        return 'Traditional Chinese' if traditional else 'Simplified Chinese'
+    codes = dict(zip(('ja', 'en', 'fr', 'de', 'it', 'es', 'zh', 'ko', 'nl', 'pt', 'ru'), LANGUAGES))
+    return codes.get(language, 'English')
+
+
 def tool(name):
     """one of the repository's tool scripts, loaded by its path: the app carries them as files, not as modules"""
     import importlib.util
@@ -131,12 +144,15 @@ def tool(name):
 
 
 def make_title(game_dir, out, info, art=None, icon_art=None, style='picture', released='', case_scan=False, pad_bezel=None, pad_art=None,
-               boot_sound=None):
+               boot_sound=None, language=None):
     """the title every game gets (tools/make_game_title.py), then the update's and DLC's files beside the game's"""
     tool('make_game_title').make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
                                        info['title_id'], info['name'], info['product'], ARCHIVES, art, icon_art, style, released, case_scan, pad_bezel,
                                        pad_art, boot_sound)
     content = os.path.join(out, 'title', 'content')
+    if language is not None:
+        with open(os.path.join(content, 'language.txt'), 'w', encoding='ascii') as f:
+            f.write(f'{LANGUAGES.index(language)}\n')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')):
             os.link(os.path.join(game_dir, f), os.path.join(content, f))
@@ -224,6 +240,7 @@ def main():
     ap.add_argument('--art-style', choices=('picture', 'console'), default='console',
                     help='the start-up screens: laid out as the Virtual Console shows a game, or --art as it is')
     ap.add_argument('--tdb', help="a folder for GameTDB's list of 3DS games, where the Virtual Console's screens find the year a game came out")
+    ap.add_argument('--language', choices=LANGUAGES, help='3DS system language to report to the game')
     ap.add_argument('--mixed', action='store_true', help='trial: fast code with only the video decoder in safe mode (build3ds.Game.mixed); a game '
                                                          'compat.json marks "mixed" uses this policy for base code; updates/code mods require --mixed')
     ap.add_argument('--cold', action='store_true', help="for the checks: build it as a game nobody has built before, with none of this PC's lists of "
@@ -432,7 +449,7 @@ def main():
         import covers  # only here: the one download a build may make, and only with the Virtual Console's screens chosen
         released = covers.released(game.product, a.tdb)
         case_scan = covers.is_case_scan(a.art, a.tdb)  # the folder is the covers' own
-    make_title(game_dir, out, info, a.art, a.icon_art, a.art_style, released, case_scan, a.pad_bezel, a.pad_art, a.boot_sound)
+    make_title(game_dir, out, info, a.art, a.icon_art, a.art_style, released, case_scan, a.pad_bezel, a.pad_art, a.boot_sound, language=a.language)
     if a.save:
         import saves
         try:

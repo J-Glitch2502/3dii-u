@@ -51,12 +51,31 @@ std::map<std::string, std::shared_ptr<wiiu::SaveFile>> cache;
 u64 cached_bytes;
 constexpr u64 CACHE_FILE_MAX = 16 << 20, CACHE_MAX = 48 << 20;  // bigger files go to storage as the game writes them
 
+int flush_save_quotas(bool now) {
+    if (!flush_quota) return 0;
+    const bool mine = !account_dir.empty() && !g_save_base.compare(0, account_dir.size(), account_dir);
+    wiiu::fs_begin(0xC007);
+    int result = 0;
+    if (!account_dir.empty() && (mine || now) && !wiiu::fsa_direct_flush_quota(account_dir.c_str(), result))
+        result = flush_quota(&client, &block, account_slot, FS_ERROR_FLAG_ALL);
+    if (!mine || now) {
+        int common_result;
+        if (!wiiu::fsa_direct_flush_quota("/vol/save/common", common_result))
+            common_result = flush_quota(&client, &block, COMMON, FS_ERROR_FLAG_ALL);
+        if (!result) result = common_result;
+    }
+    wiiu::fs_end();
+    return result;
+}
+
 // Until it's flushed the journal holds what was written, and refuses more once it's full. wut says so with -1, or with a short count if it got partway.
 long write_retrying(int fd, const void *data, size_t len, u64 at) {
     const long n = pwrite(fd, data, len, (off_t)at);
     if (n == (long)len) return n;
     LOG("[save] wrote %ld of %x bytes at %llx: error %d, flushing\n", n, (u32)len, (unsigned long long)at, errno);
-    wiiu::save_flush(true);
+    // A retry can run inside write_out_all. Flush the journal without
+    // reentering the cache writeback loop while this file is being written.
+    flush_save_quotas(true);
     const long done = std::max(n, 0L), more = pwrite(fd, (const u8 *)data + done, len - done, (off_t)(at + done));
     if (more < 0) LOG("[save] still failing: error %d\n", errno);
     return more < 0 ? n : done + more;
@@ -179,6 +198,7 @@ void save_mount() {
     note("save storage: client %d, init %d, folder %d, player %d %s, flush %s", added, inited, folder, player, account_dir.empty() ? "(saves in common)" : account_dir.c_str(),
          flush_quota ? "yes" : "no");
     fsa_direct_check_writes();
+    if (!account_dir.empty()) fsa_report_save_quota(account_dir.c_str());
 }
 
 const std::string &save_account_dir() { return account_dir; }
@@ -207,15 +227,7 @@ void save_flush(bool now) {
     if (!now && (!dirty || (OSTicksToMilliseconds(t - last_change) < 1000 && OSTicksToSeconds(t - first_change) < 5))) return;
     dirty = false;
     const bool written = write_out_all();
-    const bool mine = !account_dir.empty() && under(g_save_base, account_dir);
-    fs_begin(0xC007);
-    int r = 0;
-    if (!account_dir.empty() && (mine || now)) r = fsa_direct_flush_quota(account_dir.c_str()) ? 0 : flush_quota(&client, &block, account_slot, FS_ERROR_FLAG_ALL);
-    if (!mine || now) {
-        const int c = fsa_direct_flush_quota("/vol/save/common") ? 0 : flush_quota(&client, &block, COMMON, FS_ERROR_FLAG_ALL);
-        if (!r) r = c;
-    }
-    fs_end();
+    const int r = flush_save_quotas(now);
     LOG("[save] flushed: %d, %u ms\n", r, (u32)OSTicksToMilliseconds(OSGetSystemTime() - t));
     if (r < 0 || !written) save_dirty();
 }

@@ -25,6 +25,7 @@ int g_verbose;
 static std::mutex log_mutex;
 static FILE *log_file;
 void (*g_fatal_hook)(const char *msg);
+extern "C" { u32 rt_bulk_copy_enabled = 1; }
 void watch_report();
 
 u64 g_frame;
@@ -377,9 +378,25 @@ static const GuestEntry *dispatch_miss(CPU *c) {
         fclose(f);
     }
     LOG("[lazy] no code at %08x (lr=%08x)\n", addr, c->r[14]);
-    if (addr < mem::CODE_BASE)  // a null (or near-null) function pointer: nothing to recompile
+    if (addr < mem::CODE_BASE) {  // a null (or near-null) function pointer: nothing to recompile
+        // A dispatch failure is a guest fault, so native exception recorders do
+        // not necessarily run. Retain a bounded main-stack sample before the
+        // fatal hook ends the title. Do not follow potentially corrupt pointers
+        // or inspect another thread's stack. ABI-local registers can be stale in
+        // CPU; the saved guest stack words are the evidence for caller analysis.
+        const u32 sp = c->r[13];
+        LOG("[dispatch fault] pc=%08x lr=%08x sp=%08x r0-r3=%08x %08x %08x %08x\n",
+            addr, c->r[14], sp, c->r[0], c->r[1], c->r[2], c->r[3]);
+        if (g_mem && g_game.stack_size && g_game.stack_size <= mem::STACK_TOP &&
+            sp >= mem::STACK_TOP - g_game.stack_size && sp < mem::STACK_TOP) {
+            const u32 bytes = std::min<u32>(256, mem::STACK_TOP - sp);
+            for (u32 offset = 0; offset + 16 <= bytes; offset += 16)
+                LOG("[dispatch stack] %08x %08x %08x %08x %08x\n", sp + offset,
+                    r32(sp + offset), r32(sp + offset + 4), r32(sp + offset + 8), r32(sp + offset + 12));
+        } else LOG("[dispatch stack] skipped: outside the known main stack\n");
         FATAL("jump to %08x (lr=%08x sp=%08x r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x)\n", addr, c->r[14], c->r[13],
               c->r[0], c->r[1], c->r[2], c->r[3], c->r[4]);
+    }
     if (lazy_compile(addr) || ((addr & 1) && lazy_compile(addr & ~1u))) {
         if (auto e = lazy_lookup(addr)) return e;
     }

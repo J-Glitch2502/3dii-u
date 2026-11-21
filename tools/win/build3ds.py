@@ -20,6 +20,7 @@ import argparse
 import ctypes
 import functools
 import glob
+import hashlib
 import json
 import os
 import re
@@ -280,7 +281,7 @@ DECODER_MARGIN = 64 << 10
 
 class Game:
     """How a game builds. Every game follows the same recipe: what differs comes from the game itself (its code, its program id) or from what
-    earlier runs of it learned (functions.txt, shader logs), never from which game it is."""
+    earlier runs of it learned (functions.txt, shader logs)."""
     def __init__(self, name, game_dir=None):
         self.name = name
         self.dir = (game_dir or f'{ROOT}/games/{name}').replace('\\', '/')
@@ -300,9 +301,40 @@ class Game:
         # goes through memory at calls: safe mode. gcc -O2 turns that C into code Cemu's recompiler runs wrong (a compare reused across a jump), so -O1.
         decoder = mobiclip_sites(self.dir)
         safe = len(decoder) >= 8 or coroutine_switches(self.dir) > 0
+        # These executables unwind to translated return sites. Mario Maker's
+        # setjmp and longjmp are in separate functions, so the proximity scan
+        # above does not identify the startup path.
+        safe_code_hashes = {
+            'g_acve': '496841ca1bdd506e82652392d34978f367a1f8a5407d589e6fbd5cc3ef16938c',
+            'g_ajhe': '5c107329883fbe0a2738ff0b200506fe8be6b2a236308f8fdff48c51cc6f8fd5',
+        }
+        if self.name in safe_code_hashes:
+            with open(self.dir + '/code.bin', 'rb') as code:
+                safe |= hashlib.sha256(code.read()).hexdigest() == safe_code_hashes[self.name]
         self.gen, self.mode, self.opt = ('gen_safe', 'safe', ['-O1']) if safe else ('gen_abi', 'abi', [])
         self.gen_dir = f'{self.dir}/{self.gen}'
         self.safe_ranges = []  # with mode 'abi': address ranges generated the safe way (mixed)
+        self.verified_entries = ()
+        # This BAGE executable's two locale conversion tables store their
+        # Thumb callbacks as signed offsets from each table field. Absolute
+        # pointer discovery misses them: startup and name conversion then
+        # dispatch to code that was never generated. Keep both directions of
+        # both tables, and only for the executable whose tables were checked.
+        if self.name in ('g_bage', 'g_bage_v1040'):
+            with open(self.dir + '/code.bin', 'rb') as code:
+                if hashlib.sha256(code.read()).hexdigest() in (
+                    '618a0a5463aab8532d6732f6dd58ebd132f3c4f60232414677b3ed5c61f99fed',
+                    'f67534af3a71220851cf28d53ab73d40d7965e012e292d9be444ce5a43c24967',
+                ):
+                    self.verified_entries = (0x00101559, 0x0010160d, 0x001016c5, 0x001017a9)
+        # This ASRE base executable's sort routine splits around ARM calls that
+        # retain live registers across generated entry points.
+        if self.mode == 'abi' and self.name == 'g_asre':
+            with open(self.dir + '/code.bin', 'rb') as code:
+                if hashlib.sha256(code.read()).hexdigest() == '7c820d33c3b4aa8dddc479bc2fd48b92994f1701dad011470a31bb69acdbe7f5':
+                    self.safe_ranges = [(0x0013d500, 0x0013e800), (0x00278de4, 0x002791f0)]
+                    self.verified_entries = (0x0013df38, 0x0013e790, 0x00279134)
+                    self.opt = ['-O1']
         # the decoder's sites span 65 KB of each game that has it; the margin takes in the rest of its library
         self.decoder_range = (decoder[0] - DECODER_MARGIN, decoder[-1] + DECODER_MARGIN) if len(decoder) >= 8 else None
 
@@ -325,10 +357,11 @@ def functions_list(g):
     """The recompiler's --extra: the entries this game's runs found, and the 3dsrecomp project's runs of it if it has any.
     A merged list is written only when it changes, so its date says when the entries did."""
     lists = [p for p in (g.extra_functions, g.upstream_functions) if p and os.path.isfile(p) and os.path.getsize(p)]
-    if len(lists) == 1:
+    if len(lists) == 1 and not g.verified_entries:
         return lists[0]
     merged = f'{WORK}/functions_{g.name}.txt'
     text = ''.join(open(p, encoding='utf-8').read().strip() + '\n' for p in lists)
+    text += ''.join(f'0x{entry:08x}\n' for entry in g.verified_entries)
     if not os.path.isfile(merged) or open(merged, encoding='utf-8').read() != text:
         os.makedirs(WORK, exist_ok=True)
         with open(merged, 'w', encoding='utf-8', newline='\n') as f:
@@ -474,6 +507,21 @@ def build_code(g, args):
     link_game(g, rt, code, getattr(args, 'link_flags', None))
 
 
+def validate_native_gs_symbols(symbols, required):
+    """A weak lookup must use the same C name as the optional generated table."""
+    names = {}
+    for line in symbols.splitlines():
+        fields = line.split()
+        if len(fields) >= 2:
+            name, kind = fields[-1], fields[-2]
+            if 'gs_native_count' in name or 'gs_native_table' in name:
+                if name not in ('gs_native_count', 'gs_native_table'):
+                    raise ValueError('Native geometry shader table has namespace-mangled linkage: ' + name)
+                names[name] = kind
+    if required and any(names.get(name) not in ('R', 'D') for name in ('gs_native_count', 'gs_native_table')):
+        raise ValueError('Generated geometry shaders are missing from the linked executable')
+
+
 def link_game(g, rt, code, link_flags=None):
     os.makedirs(WORK + '/link', exist_ok=True)
     os.makedirs(g.out, exist_ok=True)
@@ -521,6 +569,8 @@ def link_game(g, rt, code, link_flags=None):
     out = g.rpx
     with open(g.nm, 'wb') as f:
         run([BIN + 'nm.exe', '-n', elf], cwd=WORK, stdout=f)
+    with open(g.nm, encoding='utf-8', errors='replace') as f:
+        validate_native_gs_symbols(f.read(), os.path.isfile(code + '/gs_native.o'))
     r = run(['elf2rpl.exe', elf, os.path.relpath(out, WORK).replace('\\', '/')], cwd=WORK, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
     if r.returncode:
         sys.exit('elf2rpl failed:\n' + r.stdout[-1000:])
@@ -618,8 +668,10 @@ def check_registers(path, droppable=frozenset()):
             ps = max(ps, registers)
             broken += [f'pixel program: {what}' for what in bad]
     print(f'registers: vertex shaders use up to {vs} of 48, pixel shaders up to {ps} of 200')
-    if not vs or vs > 48 or ps > 200:
-        sys.exit('a shader needs more registers than the GPU gives it')
+    # Observed-cache batches can contain only pixel shaders. An absent vertex
+    # stage is valid here; still reject empty packs and either register limit.
+    if not (vs or ps) or vs > 48 or ps > 200:
+        sys.exit('empty shader pack or a shader needs more registers than the GPU gives it')
     if broken:
         sys.exit('shader programs a real GPU may not take (tools/gsh_rules.py):\n   ' + '\n   '.join(broken[:20]))
     if dropped:  # shaders.idx (shadergen.h): its header, the fragment entries, then the vertex ones, 16 bytes each, big-endian
@@ -888,6 +940,7 @@ def pack(g, otp):
 
 
 def main():
+    global WORK
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('command', choices=['code', 'shaders', 'title', 'all', 'pack', 'gen', 'trial', 'lazy'])
     ap.add_argument('game')
@@ -913,12 +966,25 @@ def main():
     ap.add_argument('--only')
     ap.add_argument('--opt')
     ap.add_argument('--out', help='put the RPX, game.nm and shaders here instead, to keep a test build apart')
+    ap.add_argument('--prepared-game', help='code: reuse the extracted game directory from a Builder run with --keep')
+    ap.add_argument('--work-dir', help='code: reuse the Builder run’s build_win_builder directory')
     args = ap.parse_args()
-    if not os.path.isdir(f'{ROOT}/games/{args.game}'):
+    if (args.prepared_game or args.work_dir) and args.command != 'code':
+        ap.error('--prepared-game and --work-dir apply only to code')
+    if args.work_dir:
+        WORK = os.path.abspath(args.work_dir).replace('\\', '/')
+    prepared = os.path.abspath(args.prepared_game).replace('\\', '/') if args.prepared_game else None
+    if prepared and os.path.basename(prepared) != args.game:
+        ap.error('--prepared-game must match the game name')
+    if prepared and not all(os.path.isfile(prepared + '/' + name) for name in ('code.bin', 'exheader.bin', 'functions.txt')):
+        ap.error('--prepared-game needs code.bin, exheader.bin and functions.txt from a completed build')
+    if not prepared and not os.path.isdir(f'{ROOT}/games/{args.game}'):
         sys.exit(f'no games/{args.game}')
     if not os.path.exists(BIN + 'gcc.exe'):
         sys.exit('no toolchain: run tools/win/install_toolchain.sh once')
-    g = Game(args.game)
+    g = Game(args.game, prepared)
+    if prepared and re.search(r'_v\d+$', g.name):
+        g.upstream_functions = None  # the prepared update supplies its own entry list
     if args.mixed:
         g.mixed()
     if args.out:

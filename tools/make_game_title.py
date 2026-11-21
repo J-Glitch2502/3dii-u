@@ -306,8 +306,12 @@ def make_title(title, game, rpx, shaders, title_id, name, product, archives=ARCH
     # the room for saves: the game's in the player's own storage, /vol/save/<persistent id>, which the system lists as save data and keeps when the software is deleted, and
     # the logs' and test runs' in /vol/save/common. With none, the console has nowhere to put them, which Cemu doesn't care about.
     meta = meta.replace('<common_save_size type="hexBinary" length="8">0000000000000000<', '<common_save_size type="hexBinary" length="8">0000000004000000<')
-    meta = meta.replace('<account_save_size type="hexBinary" length="8">0000000000000000<', '<account_save_size type="hexBinary" length="8">0000000004000000<')
-    assert '<common_save_size type="hexBinary" length="8">0000000004000000<' in meta and '<account_save_size type="hexBinary" length="8">0000000004000000<' in meta
+    # Mario Maker creates 221 course files of up to 256 KiB each. Leave room
+    # for filesystem overhead and rewrites during save quota flushes.
+    account_save_size = 0x10000000 if title_id.upper() == '000500003D001A04' else 0x04000000
+    account_save = f'<account_save_size type="hexBinary" length="8">{account_save_size:016X}<'
+    meta = meta.replace('<account_save_size type="hexBinary" length="8">0000000000000000<', account_save)
+    assert '<common_save_size type="hexBinary" length="8">0000000004000000<' in meta and account_save in meta
     open(os.path.join(meta_dir, 'meta.xml'), 'w', encoding='utf-8', newline='').write(meta)
 
     content = os.path.join(title, 'content')

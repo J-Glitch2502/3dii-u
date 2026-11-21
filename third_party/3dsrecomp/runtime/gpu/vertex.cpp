@@ -11,13 +11,14 @@ u64 g_cpu_route[4];
 #endif
 
 VtxCpuStats vtx_cpu;
+std::atomic<bool> g_cpu_timing{false};
 bool g_gs_shared = false;  // measured on a console in Dark Moon's rain (2026-11-14): no faster than one thread, so off unless asked
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
-    double t0 = kMeasure ? now_ms() : 0;
+    double t0 = cpu_timing_enabled() ? now_ms() : 0;
     ~VtxCpuTimer() {
-        if (kMeasure) vtx_cpu.ms[why] += now_ms() - t0;
+        if (t0 != 0) vtx_cpu.ms[why] += now_ms() - t0;
     }
 };
 
@@ -266,6 +267,10 @@ void gs_reconfigure() {
 // (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame (2026-11-13). The game's build can bring its programs as C
 // (tools/pica_to_c.py, from the programs its runs logged: its own code, so only in a build made from the user's logs), which this finds by
 // entry and a hash of the words each was made from, and runs instead; with none, the interpreter runs everything as before.
+// These optional C symbols must have external linkage. Declaring them
+// inside the anonymous namespace leaves GCC looking for namespace-mangled
+// weak symbols instead of the generated C table, silently disabling it.
+}  // namespace
 extern "C" {
 typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
 typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], gs_emit_fn emit,
@@ -282,6 +287,7 @@ extern const unsigned gs_native_count __attribute__((weak));
 }
 static_assert(sizeof(V4) == 16 && sizeof(bool) == 1, "the generated code takes the register file as floats, and bools as bytes");
 
+namespace {
 static u64 gs_fnv(u64 h, u32 w) {
     for (int i = 0; i < 4; i++) h = (h ^ ((w >> (8 * i)) & 0xff)) * 0x100000001b3ull;
     return h;
@@ -319,7 +325,7 @@ const gs_native *gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u3
 void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
     ShaderUnit &u = *(ShaderUnit *)ctx;
     static u32 sampled;
-    const bool timed = kMeasure && (sampled++ & 15) == 0;
+    const bool timed = cpu_timing_enabled() && (sampled++ & 15) == 0;
     const double t0 = timed ? now_ms() : 0;
     if (Emitter *e = u.emitter) {
         e->vertex_id = vid;
@@ -340,7 +346,7 @@ void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
                         }
                     if (wind) g.pa.winding = true;
                     pa_submit3(gs_mapped[0], gs_mapped[1], gs_mapped[2]);
-                    if (kMeasure) vtx_cpu.geometry_prims++;
+                    if (cpu_timing_enabled()) vtx_cpu.geometry_prims++;
                 }
             } else if (prim && e->emit_prim) {
                 e->emit_prim(e);
@@ -357,12 +363,12 @@ void gs_run() {
     const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
     const gs_native *fn = gs_native_find(p, g.gs, entry);
     ShaderUnit &u = g.gs_unit;
-    const double t0 = kMeasure ? now_ms() : 0;
+    const double t0 = cpu_timing_enabled() ? now_ms() : 0;
     if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u)) {
         gs_mapped_ok = 0;
         shader_run(p, u, g.gs, entry);
     }
-    if (kMeasure) vtx_cpu.geometry_gs_ms += now_ms() - t0;
+    if (t0 != 0) vtx_cpu.geometry_gs_ms += now_ms() - t0;
     g.gs.b[15] = true;
 }
 
@@ -1077,7 +1083,7 @@ void vtx_draw(bool indexed) {
             // rain is drawn this way, 1600 vertices a frame, and took 30 ms of each frame on the GPU thread alone (2026-11-13).
             static std::vector<V4> vs_out;
             if (vs_out.size() < (size_t)n * 16) vs_out.resize((size_t)n * 16);
-            const double t0 = kMeasure ? now_ms() : 0;
+            const double t0 = cpu_timing_enabled() ? now_ms() : 0;
             constexpr u32 kChunk = 64;
             parallel_for((n + kChunk - 1) / kChunk, [&](u32 c, u32 tid) {
                 ShaderUnit &u = unit_for(tid);
@@ -1089,7 +1095,7 @@ void vtx_draw(bool indexed) {
                     gather_outputs(u, outmask, &vs_out[(size_t)i * 16]);
                 }
             });
-            if (kMeasure) vtx_cpu.geometry_vs_ms += now_ms() - t0;
+            if (t0 != 0) vtx_cpu.geometry_vs_ms += now_ms() - t0;
             if (!gs_run_shared(vs_out.data(), n))
                 for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
             return;

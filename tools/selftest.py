@@ -36,6 +36,13 @@ def screen_layouts():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_screen_layouts.cpp', '-o', exe], [exe]]
 
 
+def gfd_index():
+    """Shader file extents, missing programs, and truncated index tables."""
+    exe = build3ds.WORK + '/selftest/test_gfd_index.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_gfd_index.cpp', '-o', exe], [exe]]
+
+
 def memory_fills():
     """port/wiiu/memory_fills.h against made-up fills and writes of a made-up memory, built for this PC"""
     exe = build3ds.WORK + '/selftest/test_memory_fills.exe'
@@ -55,6 +62,13 @@ def languages():
     exe = build3ds.WORK + '/selftest/test_languages.exe'
     os.makedirs(os.path.dirname(exe), exist_ok=True)
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.RT}', '-static', ROOT + '/tools/test_languages.cpp', '-o', exe], [exe]]
+
+
+def cpu_parallel():
+    """ARM byte-lane operations against an independent scalar reference."""
+    exe = build3ds.WORK + '/selftest/test_cpu_parallel.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++17', '-O1', '-static', ROOT + '/tools/test_cpu_parallel.cpp', '-o', exe], [exe]]
 
 
 def latte_program():
@@ -125,21 +139,35 @@ def main():
         'PC autoplay': [[py, ROOT + '/tools/test_pc_autoplay.py']],
         'compiler policy': [[py, ROOT + '/builder/test_compiler_policy.py']],
         'trial tools': [[py, ROOT + '/tools/test_trial_tools.py']],
+        'homebrew dev publisher': [[py, ROOT + '/tools/test_ftp_homebrew_dev.py']],
         'vertex arrays': vertex_arrays(),
         'present rule': present_rule(),
         'screen layouts': screen_layouts(),
         'memory fills': memory_fills(),
+        'surface retirement': [[py, ROOT + '/tools/test_surface_retirement.py']],
+        'handwriting latency log': [[py, ROOT + '/tools/wiiu_diagnostics/test_handwriting_latency.py']],
+        'shader file validation': gfd_index(),
         'module exports': ro_tree(),
         'game languages': languages(),
+        'CPU byte operations': cpu_parallel(),
+        'Wii U audio ring': [[py, ROOT + '/tools/test_wiiu_audio_ring.py']],
+        'RomFS read-ahead': [[py, ROOT + '/tools/test_romfs_readahead.py']],
+        'filesystem delete errors': [[py, ROOT + '/tools/test_fs_delete_file.py']],
         'compiled programs': latte_program(),
         'open bools': open_bools(),
         'geometry shaders': gsx(),
+        'native geometry conditionals': [[py, ROOT + '/tools/test_gs_native_conditionals.py']],
         'command lists': [[py, ROOT + '/tools/test_shadergen_lists.py', shadergen()]],
         'program rules': [[py, ROOT + '/tools/gsh_rules.py', '--self-check']],
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
         'picture check': [[py, ROOT + '/tools/test_check_pictures.py']],
         'missed code': [[py, ROOT + '/tools/test_learn_missed.py']],
         'switch through a helper': [[py, ROOT + '/tools/test_recomp_switch.py']],
+        'mixed indirect safe callback': [[py, ROOT + '/tools/test_recomp_mixed_icall.py']],
+        'ARM bulk copy equivalence': [[py, ROOT + '/tools/test_recomp_bulk_copy.py']],
+        'VFP modified immediates': [[py, ROOT + '/tools/test_vfp_immediate.py']],
+        'Y2R coefficient replies': [[py, ROOT + '/tools/test_y2r_coefficients.py']],
+        'Y2R tiled movie blocks': [[py, ROOT + '/tools/test_y2r_movie_blocks.py']],
         'build markers': [[py, ROOT + '/tools/test_mark_built.py']],
         'WUP packer': [[py, ROOT + '/tools/test_pack_wup.py']],
         'boot sound': [[py, ROOT + '/tools/test_boot_sound.py']],

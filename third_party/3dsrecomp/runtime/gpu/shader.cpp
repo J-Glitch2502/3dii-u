@@ -1601,19 +1601,20 @@ struct SpecGen {
             }
             case OP_IFU:
             case OP_IFC: {
-                // ifs: the PICA's if stack holds 8 (shader_run's ifs[8]); Ocarina of Time 3D's vertex programs nest all 8
-                if (dst < i + 1 || dst + num > e || ifs >= 8 || !ends_plain(i + 1, dst) || !ends_plain(dst, dst + num)) {
+                // Only a taken IFU pushes the PICA stack. A known-false
+                // IFU can run at depth eight without consuming a ninth slot.
+                const bool known = I.op == OP_IFU && decided(I);
+                const bool taken = !known || ((b >> I.bid) & 1);
+                if (dst < i + 1 || dst + num > e || (taken && ifs >= 8) || !ends_plain(i + 1, dst) || !ends_plain(dst, dst + num)) {
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
                 cont = dst + num;
-                const bool known = I.op == OP_IFU && decided(I);
-                const bool taken = !known || ((b >> I.bid) & 1);
                 if (taken && !enter(dst)) {  // the true branch is a region ending at dst
                     fail = true; why = __LINE__; at = i;
                     return false;
                 }
-                ifs++;
+                if (taken) ifs++;
                 if (known) {
                     if (taken) block(i + 1, dst, false, 0);
                     else block(dst, dst + num, false, 0);
@@ -1627,14 +1628,17 @@ struct SpecGen {
                     if (num) {
                         w.o += "    } else {\n";
                         ends.pop_back();
+                        // A false IFC/IFU jumps straight to its else branch;
+                        // it never pushes the then branch's IF stack entry.
+                        ifs--;
                         r2 = block(dst, dst + num, false, 0);
+                        ifs++;
                         ends.push_back(dst);
                     }
                     w.o += "    }\n";
                     join(then, r1, now(), r2);
                 }
-                if (taken) ends.pop_back();
-                ifs--;
+                if (taken) { ends.pop_back(); ifs--; }
                 if (cont == e && cont != i + 1 && region_end(e)) {
                     fail = true; why = __LINE__; at = i;
                     return false;

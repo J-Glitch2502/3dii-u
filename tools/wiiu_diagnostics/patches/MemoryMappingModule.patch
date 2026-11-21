@@ -1,0 +1,526 @@
+diff --git a/source/CThread.h b/source/CThread.h
+index 79eb173..ae95ccd 100644
+--- a/source/CThread.h
++++ b/source/CThread.h
+@@ -40,7 +40,7 @@ public:
+         //! create the thread
+         if (pThread && pThreadStack) {
+             // clang-format off
+-            OSCreateThread(pThread, (int(*)(int, const char **)) & CThread::threadCallback, 1, (char *) this, (void *) (pThreadStack + iStackSize), iStackSize, iPriority, iAttributes);
++            OSCreateThread(pThread, (OSThreadEntryPointFn) & CThread::threadCallback, 1, (char *) this, (void *) (pThreadStack + iStackSize), iStackSize, iPriority, iAttributes);
+             // clang-format on
+         }
+     }
+diff --git a/source/function_replacements.cpp b/source/function_replacements.cpp
+index bdd3a34..03f1745 100644
+--- a/source/function_replacements.cpp
++++ b/source/function_replacements.cpp
+@@ -1,3 +1,5 @@
++#include "flight_recorder.h"
++#include <coreinit/spinlock.h>
+ #include "function_replacements.h"
+ #include "memory_mapping.h"
+ #include <coreinit/memheap.h>
+@@ -114,8 +116,38 @@ DECL_FUNCTION(int32_t, LiValidateAddress, void *ptr,
+     return real_LiValidateAddress(ptr, size, alignMask, errorCode, minAddr, maxAddr, name);
+ }
+ 
++#include "mapped_lock_trace.h"
++#include "mapped_heap_hooks.h"
++
+ // clang-format off
+ function_replacement_data_t function_replacements[] __attribute__((section(".data"))) = {
++        REPLACE_FUNCTION(MEMDumpHeap, LIBRARY_COREINIT, MEMDumpHeap),
++        REPLACE_FUNCTION(MEMCheckHeap, LIBRARY_COREINIT, MEMCheckHeap),
++        REPLACE_FUNCTION(MEMAllocFromExpHeapEx, LIBRARY_COREINIT, MEMAllocFromExpHeapEx),
++        REPLACE_FUNCTION(MEMFreeToExpHeap, LIBRARY_COREINIT, MEMFreeToExpHeap),
++        REPLACE_FUNCTION(MEMResizeForMBlockExpHeap, LIBRARY_COREINIT, MEMResizeForMBlockExpHeap),
++        REPLACE_FUNCTION(MEMGetAllocatableSizeForExpHeapEx, LIBRARY_COREINIT, MEMGetAllocatableSizeForExpHeapEx),
++        REPLACE_FUNCTION(MEMGetTotalFreeSizeForExpHeap, LIBRARY_COREINIT, MEMGetTotalFreeSizeForExpHeap),
++        REPLACE_FUNCTION(MEMSetAllocModeForExpHeap, LIBRARY_COREINIT, MEMSetAllocModeForExpHeap),
++        REPLACE_FUNCTION(MEMGetAllocModeForExpHeap, LIBRARY_COREINIT, MEMGetAllocModeForExpHeap),
++        REPLACE_FUNCTION(MEMSetGroupIDForExpHeap, LIBRARY_COREINIT, MEMSetGroupIDForExpHeap),
++        REPLACE_FUNCTION(MEMGetGroupIDForExpHeap, LIBRARY_COREINIT, MEMGetGroupIDForExpHeap),
++        REPLACE_FUNCTION(MEMAdjustExpHeap, LIBRARY_COREINIT, MEMAdjustExpHeap),
++        REPLACE_FUNCTION(MEMVisitAllocatedForExpHeap, LIBRARY_COREINIT, MEMVisitAllocatedForExpHeap),
++        REPLACE_FUNCTION(MEMDestroyExpHeap, LIBRARY_COREINIT, MEMDestroyExpHeap),
++        REPLACE_FUNCTION(MEMCheckExpHeap, LIBRARY_COREINIT, MEMCheckExpHeap),
++
++        REPLACE_FUNCTION(OSUninterruptibleSpinLock_TryAcquire, LIBRARY_COREINIT, OSUninterruptibleSpinLock_TryAcquire),
++        REPLACE_FUNCTION(OSUninterruptibleSpinLock_TryAcquireWithTimeout, LIBRARY_COREINIT, OSUninterruptibleSpinLock_TryAcquireWithTimeout),
++        REPLACE_FUNCTION(OSTryAcquireSpinLock, LIBRARY_COREINIT, OSTryAcquireSpinLock),
++        REPLACE_FUNCTION(OSTryAcquireSpinLockWithTimeout, LIBRARY_COREINIT, OSTryAcquireSpinLockWithTimeout),
++        REPLACE_FUNCTION(OSInitSpinLock, LIBRARY_COREINIT, OSInitSpinLock),
++
++        REPLACE_FUNCTION(OSUninterruptibleSpinLock_Acquire, LIBRARY_COREINIT, OSUninterruptibleSpinLock_Acquire),
++        REPLACE_FUNCTION(OSUninterruptibleSpinLock_Release, LIBRARY_COREINIT, OSUninterruptibleSpinLock_Release),
++        REPLACE_FUNCTION(OSAcquireSpinLock, LIBRARY_COREINIT, OSAcquireSpinLock),
++        REPLACE_FUNCTION(OSReleaseSpinLock, LIBRARY_COREINIT, OSReleaseSpinLock),
++
+         REPLACE_FUNCTION_VIA_ADDRESS(LiValidateAddress,                     0x32008904, 0x01008904),
+         REPLACE_FUNCTION_VIA_ADDRESS(sCheckDataRange,                       0x3200cf60, 0x0100cf60),
+         REPLACE_FUNCTION_VIA_ADDRESS(KiEffectiveToPhysical,                 0xffee0aac, 0xffee0aac),
+diff --git a/source/main.cpp b/source/main.cpp
+index b796ac2..e9fb81d 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -1,7 +1,9 @@
++#include "flight_recorder.h"
+ #include "function_replacements.h"
+ #include "globals.h"
+ #include "logger.h"
+ #include "memory_mapping.h"
++#include "mapped_heap_guard.h"
+ #include "version.h"
+ #include <coreinit/debug.h>
+ #include <function_patcher/function_patching.h>
+@@ -61,6 +63,7 @@ WUMS_INITIALIZE(args) {
+ 
+     ucSetupRequired = 0;
+     MemoryMapping_setupMemoryMapping();
++    mapped_heap::initialize();
+     MemoryMapping_CreateHeaps();
+ 
+     /* We can not use FunctionPatcher_InitLibrary here because OSDynLoadAcquire is not patched yet.
+@@ -82,10 +85,13 @@ WUMS_INITIALIZE(args) {
+ }
+ 
+ WUMS_APPLICATION_STARTS() {
++    flight::start();
+ #ifdef DEBUG
+     initLogging();
+ #endif
+     OSReport("Running MemoryMappingModule " VERSION VERSION_EXTRA "\n");
++    for (unsigned i = 0; i < 5; ++i)
++        OSReport("[AFR4 MM] MUTEX index=%u address=%08X owner_offset=1C size=2C\n", i, (uint32_t)&mapped_heap::guards[i]);
+ 
+     MemoryMapping_checkHeaps();
+ 
+@@ -97,6 +103,7 @@ WUMS_APPLICATION_STARTS() {
+ 
+ WUMS_APPLICATION_ENDS() {
+     MemoryMapping_checkHeaps();
++    flight::stop();
+ #ifdef DEBUG
+     deinitLogging();
+ #endif
+diff --git a/source/memory_mapping.cpp b/source/memory_mapping.cpp
+index 5b40695..4f99e3d 100644
+--- a/source/memory_mapping.cpp
++++ b/source/memory_mapping.cpp
+@@ -1,4 +1,6 @@
++#include "flight_recorder.h"
+ #include "memory_mapping.h"
++#include "mapped_heap_guard.h"
+ #include <coreinit/cache.h>
+ #include <coreinit/memexpheap.h>
+ #include <coreinit/memorymap.h>
+@@ -581,7 +583,12 @@ void *MemoryMapping_allocEx(uint32_t size, int32_t align, bool videoOnly) {
+             allocSize         = (size + alignAbs - 1) & ~(alignAbs - 1);
+         }
+ 
+-        res = MEMAllocFromExpHeapEx(heapHandle, allocSize, align);
++        {
++            flight::record(30, 0, (uint32_t)heapHandle, flight::load(&heapHandle->lock.owner), flight::load(&heapHandle->lock.recursion));
++            flight::Scope trace(10, (uintptr_t)__builtin_return_address(0), (uint32_t)heapHandle, allocSize, (uint32_t)align);
++            res = MEMAllocFromExpHeapEx(heapHandle, allocSize, align);
++            trace.result = (uint32_t)res;
++        }
+         if (res != nullptr) {
+             break;
+         }
+@@ -637,6 +644,8 @@ bool CheckMemExpHeapCore(MEMExpHeap *heap) {
+ }
+ 
+ bool CheckMemExpHeap(MEMExpHeap *heap) {
++    mapped_heap::Guard guard(&heap->header);
++    flight::Scope check(18, (uintptr_t)__builtin_return_address(0), (uint32_t)heap);
+     OSMemoryBarrier();
+     if (heap->header.tag != MEM_EXPANDED_HEAP_TAG) {
+         DEBUG_FUNCTION_LINE_ERR("[Exp Heap Check] Invalid heap handle. - %08X", heap->header.tag);
+@@ -695,6 +704,7 @@ MEMHeapHandle MemoryMapping_MEMFindContainHeap(void *block) {
+         uint32_t effectiveAddress = mem_mapping[i].effective_start_address;
+         auto heapHandle           = (MEMHeapHandle) effectiveAddress;
+         auto *heap                = (MEMExpHeap *) heapHandle;
++        mapped_heap::Guard guard(heapHandle);
+         if (block >= heap->header.dataStart &&
+             block < heap->header.dataEnd) {
+ #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+@@ -718,7 +728,11 @@ void MemoryMapping_free(void *ptr) {
+         }
+         if (ptr_val > mem_mapping[i].effective_start_address && ptr_val < mem_mapping[i].effective_end_address) {
+             auto heapHandle = (MEMHeapHandle) mem_mapping[i].effective_start_address;
+-            MEMFreeToExpHeap(heapHandle, ptr);
++            {
++                flight::record(30, 0, (uint32_t)heapHandle, flight::load(&heapHandle->lock.owner), flight::load(&heapHandle->lock.recursion));
++                flight::Scope trace(12, (uintptr_t)__builtin_return_address(0), (uint32_t)heapHandle, (uint32_t)ptr);
++                MEMFreeToExpHeap(heapHandle, ptr);
++            }
+             break;
+         }
+     }
+@@ -737,7 +751,9 @@ uint32_t MemoryMapping_MEMGetAllocatableSizeEx(uint32_t align) {
+         if (mem_mapping[i].physical_addresses == nullptr) {
+             break;
+         }
++        flight::Scope trace(14, (uintptr_t)__builtin_return_address(0), mem_mapping[i].effective_start_address, align);
+         uint32_t curRes = MEMGetAllocatableSizeForExpHeapEx((MEMHeapHandle) mem_mapping[i].effective_start_address, align);
++        trace.result = curRes;
+         DEBUG_FUNCTION_LINE_VERBOSE("heap at %08X MEMGetAllocatableSizeForExpHeapEx: %d KiB", mem_mapping[i].effective_start_address, curRes / 1024);
+         if (curRes > res) {
+             res = curRes;
+@@ -754,7 +770,9 @@ uint32_t MemoryMapping_GetFreeSpace() {
+         if (mem_mapping[i].physical_addresses == nullptr) {
+             break;
+         }
++        flight::Scope trace(16, (uintptr_t)__builtin_return_address(0), mem_mapping[i].effective_start_address);
+         uint32_t curRes = MEMGetTotalFreeSizeForExpHeap((MEMHeapHandle) mem_mapping[i].effective_start_address);
++        trace.result = curRes;
+         DEBUG_FUNCTION_LINE_VERBOSE("heap at %08X MEMGetTotalFreeSizeForExpHeap: %d KiB", mem_mapping[i].effective_start_address, curRes / 1024);
+         res += curRes;
+     }
+@@ -775,7 +793,7 @@ void MemoryMapping_CreateHeaps() {
+ #ifdef DEBUG
+         auto heap =
+ #endif
+-                MEMCreateExpHeapEx(address, size, MEM_HEAP_FLAG_USE_LOCK);
++                MEMCreateExpHeapEx(address, size, 0); // Protected by mapped_heap::Guard, including direct native API calls.
+ #ifdef DEBUG
+         DEBUG_FUNCTION_LINE("Created heap @%08X, size %d KiB", heap, size / 1024);
+ #endif
+diff --git a/source/version.h b/source/version.h
+index 66a2c7e..41beb9c 100644
+--- a/source/version.h
++++ b/source/version.h
+@@ -1,2 +1,2 @@
+ #pragma once
+-#define VERSION_EXTRA ""
+\ No newline at end of file
++#define VERSION_EXTRA " +AFR4-heap-mutex"
+\ No newline at end of file
+diff --git a/source/flight_recorder.h b/source/flight_recorder.h
+new file mode 100644
+index 0000000..8acfc17
+--- /dev/null
++++ b/source/flight_recorder.h
+@@ -0,0 +1,114 @@
++#define FLIGHT_MODULE "MM"
++#pragma once
++// Diagnostic-only recorder. Producers never allocate, print, access files or wait
++// for another core. Only the independent drain thread calls OSReport.
++#include <stdint.h>
++#ifndef FLIGHT_HOST_TEST
++#include <coreinit/core.h>
++#include <coreinit/thread.h>
++#include <coreinit/time.h>
++#include <coreinit/interrupts.h>
++#include <coreinit/debug.h>
++#endif
++namespace flight_mm {
++constexpr uint32_t Capacity = 1024, Words = 10;
++struct alignas(64) Ring { uint32_t head; uint32_t slot[Capacity][Words]; };
++inline Ring rings[3]{};
++inline uint32_t enabled = 0;
++#ifndef FLIGHT_HOST_TEST
++inline OSThread thread;
++#endif
++inline uint32_t load(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
++inline void store(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
++inline uint32_t record(uint32_t event, uint32_t caller, uint32_t a, uint32_t b, uint32_t c, uint32_t token = 0) {
++    if (!load(&enabled)) return 0;
++    #ifndef FLIGHT_HOST_TEST
++    if (OSGetCurrentThread() == &thread) return 0; // Avoid tracing the drain's own logger activity.
++#endif
++    const auto irq = OSDisableInterrupts();
++    const uint32_t core = OSGetCoreId();
++    if (core > 2) { OSRestoreInterrupts(irq); return 0; }
++    auto &r = rings[core];
++    const uint32_t seq = load(&r.head) + 1;
++    auto *s = r.slot[(seq - 1) % Capacity];
++    store(&s[0], 0); // Invalidate before reusing the slot.
++    const uint64_t tick = OSGetTime();
++    const uint32_t values[Words - 1] = {event, (uint32_t)(uintptr_t)OSGetCurrentThread(),
++        (uint32_t)(tick >> 32), (uint32_t)tick, caller, a, b, c, token};
++    for (unsigned i = 1; i < Words; ++i) store(&s[i], values[i - 1]);
++    store(&s[0], seq);
++    store(&r.head, seq);
++    OSRestoreInterrupts(irq);
++    return (seq & 0x3fffffff) | (core << 30);
++}
++struct Scope {
++    uint32_t token, event, caller, result = 0;
++    Scope(uint32_t e, uintptr_t pc, uint32_t a = 0, uint32_t b = 0, uint32_t c = 0)
++        : event(e), caller((uint32_t)pc) { token = record(e, caller, a, b, c); }
++    ~Scope() { if (token) record(event + 1, caller, result, 0, 0, token); }
++};
++// Reader takes a checked atomic snapshot. Concurrent overwrite is rejected.
++inline bool read(unsigned core, uint32_t seq, uint32_t out[Words]) {
++    auto *s = rings[core].slot[(seq - 1) % Capacity];
++    if (load(&s[0]) != seq) return false;
++    for (unsigned i = 0; i < Words; ++i) out[i] = load(&s[i]);
++    return load(&s[0]) == seq && out[0] == seq;
++}
++#ifndef FLIGHT_HOST_TEST
++alignas(32) inline uint8_t stack[32768];
++inline uint32_t stopRequested = 0;
++inline bool started = false;
++inline int drain(int, void *) {
++    uint32_t cursor[3]{};
++    uint32_t beat = 0;
++    while (!load(&stopRequested)) {
++        for (unsigned core = 0; core < 3; ++core) {
++            const uint32_t head = load(&rings[core].head);
++            if (head - cursor[core] > Capacity) {
++                const uint32_t lost = head - cursor[core] - Capacity;
++                OSReport("[AFR1 " FLIGHT_MODULE "] LOST core=%u count=%u\n", core, lost);
++                cursor[core] = head - Capacity;
++            }
++            // Bounded output to avoid drowning the existing TCP logger.
++            for (unsigned budget = 0; cursor[core] != head && budget < 64; ++budget) {
++                uint32_t out[Words];
++                const uint32_t seq = ++cursor[core];
++                if (!read(core, seq, out)) {
++                    OSReport("[AFR1 " FLIGHT_MODULE "] LOST core=%u seq=%u\n", core, seq);
++                    continue;
++                }
++                OSReport("[AFR1 " FLIGHT_MODULE "] E %u %u %u %08X %08X%08X %08X %08X %08X %08X %08X\n",
++                    core, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9]);
++            }
++        }
++        if (++beat % 10 == 0) OSReport("[AFR1 " FLIGHT_MODULE "] HEARTBEAT head=%u,%u,%u\n", load(&rings[0].head), load(&rings[1].head), load(&rings[2].head));
++        OSSleepTicks(OSMillisecondsToTicks(100));
++    }
++    return 0;
++}
++inline void start() {
++    if (started) return;
++    store(&stopRequested, 0);
++    for (auto &ring : rings) store(&ring.head, 0);
++    // Static thread and stack: startup does not depend on mapped heap allocation.
++    if (!OSCreateThread(&thread, drain, 0, nullptr, stack + sizeof(stack), sizeof(stack), 20,
++                        OS_THREAD_ATTRIB_AFFINITY_ANY)) {
++        OSReport("[AFR1 " FLIGHT_MODULE "] START_FAILED\n");
++        return;
++    }
++    started = true;
++    store(&enabled, 1);
++    OSReport("[AFR1 " FLIGHT_MODULE "] START capacity=%u event_words=%u\n", Capacity, Words);
++    OSResumeThread(&thread);
++}
++inline void stop() {
++    store(&enabled, 0);
++    if (!started) return;
++    store(&stopRequested, 1);
++    OSJoinThread(&thread, nullptr);
++    started = false;
++    OSReport("[AFR1 " FLIGHT_MODULE "] STOP\n");
++}
++#endif
++} // namespace flight_mm
++namespace flight = flight_mm;
+diff --git a/source/mapped_heap_guard.h b/source/mapped_heap_guard.h
+new file mode 100644
+index 0000000..483c0a7
+--- /dev/null
++++ b/source/mapped_heap_guard.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <coreinit/memheap.h>
++#include <coreinit/mutex.h>
++#ifndef MAPPED_HEAP_GUARD_TEST
++#include "memory_mapping.h"
++#endif
++namespace mapped_heap {
++inline OSMutex guards[5];
++inline bool ready = false;
++inline int index(MEMHeapHandle heap) {
++    const uintptr_t address = (uintptr_t)heap;
++    const uintptr_t bases[] = {MEMORY_HEAP0, MEMORY_HEAP1, MEMORY_HEAP2, MEMORY_HEAP3, MEMORY_START_VIDEO};
++    for (int i = 0; i < 5; ++i) if (address == bases[i]) return i;
++    return -1;
++}
++inline void initialize() {
++    if (ready) return;
++    for (auto &guard : guards) OSInitMutex(&guard);
++    ready = true; // Called during single-threaded module initialization, before hooks.
++}
++class Guard {
++    OSMutex *mutex = nullptr;
++public:
++    explicit Guard(MEMHeapHandle heap) {
++        const int i = index(heap);
++        if (ready && i >= 0) { mutex = &guards[i]; OSLockMutex(mutex); }
++    }
++    ~Guard() { if (mutex) OSUnlockMutex(mutex); }
++    Guard(const Guard &) = delete;
++    Guard &operator=(const Guard &) = delete;
++};
++}
+diff --git a/source/mapped_heap_hooks.h b/source/mapped_heap_hooks.h
+new file mode 100644
+index 0000000..f5ead05
+--- /dev/null
++++ b/source/mapped_heap_hooks.h
+@@ -0,0 +1,68 @@
++#pragma once
++#include "mapped_heap_guard.h"
++#include <coreinit/memexpheap.h>
++#include <function_patcher/function_patching.h>
++// Default/native heaps pass through without an additional mutex. Root mapped
++// heaps are created without their in-header uninterruptible spinlock; every
++// native public operation takes the same external recursive mutex instead.
++DECL_FUNCTION(void *, MEMAllocFromExpHeapEx, MEMHeapHandle heap, uint32_t size, int align) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMAllocFromExpHeapEx(heap, size, align);
++}
++DECL_FUNCTION(void, MEMFreeToExpHeap, MEMHeapHandle heap, void *block) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMFreeToExpHeap(heap, block);
++}
++DECL_FUNCTION(uint32_t, MEMResizeForMBlockExpHeap, MEMHeapHandle heap, void *block, uint32_t size) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMResizeForMBlockExpHeap(heap, block, size);
++}
++DECL_FUNCTION(uint32_t, MEMGetAllocatableSizeForExpHeapEx, MEMHeapHandle heap, int align) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMGetAllocatableSizeForExpHeapEx(heap, align);
++}
++DECL_FUNCTION(uint32_t, MEMGetTotalFreeSizeForExpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMGetTotalFreeSizeForExpHeap(heap);
++}
++DECL_FUNCTION(MEMExpHeapMode, MEMSetAllocModeForExpHeap, MEMHeapHandle heap, MEMExpHeapMode mode) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMSetAllocModeForExpHeap(heap, mode);
++}
++DECL_FUNCTION(MEMExpHeapMode, MEMGetAllocModeForExpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMGetAllocModeForExpHeap(heap);
++}
++DECL_FUNCTION(uint16_t, MEMSetGroupIDForExpHeap, MEMHeapHandle heap, uint16_t id) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMSetGroupIDForExpHeap(heap, id);
++}
++DECL_FUNCTION(uint16_t, MEMGetGroupIDForExpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMGetGroupIDForExpHeap(heap);
++}
++DECL_FUNCTION(uint32_t, MEMAdjustExpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMAdjustExpHeap(heap);
++}
++DECL_FUNCTION(void, MEMVisitAllocatedForExpHeap, MEMHeapHandle heap, MEMExpHeapBlockVisitor callback, void *context) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMVisitAllocatedForExpHeap(heap, callback, context);
++}
++DECL_FUNCTION(void *, MEMDestroyExpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMDestroyExpHeap(heap);
++}
++DECL_FUNCTION(BOOL, MEMCheckExpHeap, MEMHeapHandle heap, MEMExpHeapCheckFlags mode) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMCheckExpHeap(heap, mode);
++}
++
++DECL_FUNCTION(void, MEMDumpHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMDumpHeap(heap);
++}
++DECL_FUNCTION(BOOL, MEMCheckHeap, MEMHeapHandle heap) {
++    mapped_heap::Guard guard(heap);
++    return real_MEMCheckHeap(heap);
++}
+diff --git a/source/mapped_lock_trace.h b/source/mapped_lock_trace.h
+new file mode 100644
+index 0000000..e423f0f
+--- /dev/null
++++ b/source/mapped_lock_trace.h
+@@ -0,0 +1,88 @@
++#pragma once
++#include "flight_recorder.h"
++#include <coreinit/spinlock.h>
++#include <function_patcher/function_patching.h>
++// Trace only known mapped heap locks. Never acquire/release a lock on behalf
++// of a caller: these wrappers preserve the original return value and operation.
++static bool traceMappedLock(OSSpinLock *lock) {
++    const auto address = (uint32_t)lock;
++    return address == MEMORY_HEAP0 + 0x20 || address == MEMORY_HEAP1 + 0x20 ||
++           address == MEMORY_HEAP2 + 0x20 || address == MEMORY_HEAP3 + 0x20 ||
++           address == MEMORY_START_VIDEO + 0x20;
++}
++static uint32_t lockEvent(uint32_t event, OSSpinLock *lock, uintptr_t caller, uint32_t token = 0) {
++    return flight::record(event, (uint32_t)caller, (uint32_t)lock,
++                          flight::load(&lock->owner), flight::load(&lock->recursion), token);
++}
++DECL_FUNCTION(BOOL, OSUninterruptibleSpinLock_Acquire, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSUninterruptibleSpinLock_Acquire(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(32, lock, caller);
++    const BOOL result = real_OSUninterruptibleSpinLock_Acquire(lock);
++    lockEvent(33, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSUninterruptibleSpinLock_Release, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSUninterruptibleSpinLock_Release(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(34, lock, caller);
++    const BOOL result = real_OSUninterruptibleSpinLock_Release(lock);
++    lockEvent(35, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSAcquireSpinLock, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSAcquireSpinLock(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(36, lock, caller);
++    const BOOL result = real_OSAcquireSpinLock(lock);
++    lockEvent(37, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSReleaseSpinLock, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSReleaseSpinLock(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(38, lock, caller);
++    const BOOL result = real_OSReleaseSpinLock(lock);
++    lockEvent(39, lock, caller, token);
++    return result;
++}
++
++DECL_FUNCTION(BOOL, OSUninterruptibleSpinLock_TryAcquire, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSUninterruptibleSpinLock_TryAcquire(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(40, lock, caller);
++    const BOOL result = real_OSUninterruptibleSpinLock_TryAcquire(lock);
++    lockEvent(41, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSUninterruptibleSpinLock_TryAcquireWithTimeout, OSSpinLock *lock, OSTime timeout) {
++    if (!traceMappedLock(lock)) return real_OSUninterruptibleSpinLock_TryAcquireWithTimeout(lock, timeout);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(42, lock, caller);
++    const BOOL result = real_OSUninterruptibleSpinLock_TryAcquireWithTimeout(lock, timeout);
++    lockEvent(43, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSTryAcquireSpinLock, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) return real_OSTryAcquireSpinLock(lock);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(44, lock, caller);
++    const BOOL result = real_OSTryAcquireSpinLock(lock);
++    lockEvent(45, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(BOOL, OSTryAcquireSpinLockWithTimeout, OSSpinLock *lock, OSTime timeout) {
++    if (!traceMappedLock(lock)) return real_OSTryAcquireSpinLockWithTimeout(lock, timeout);
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(46, lock, caller);
++    const BOOL result = real_OSTryAcquireSpinLockWithTimeout(lock, timeout);
++    lockEvent(47, lock, caller, token);
++    return result;
++}
++DECL_FUNCTION(void, OSInitSpinLock, OSSpinLock *lock) {
++    if (!traceMappedLock(lock)) { real_OSInitSpinLock(lock); return; }
++    const uintptr_t caller = (uintptr_t)__builtin_return_address(0);
++    const uint32_t token = lockEvent(48, lock, caller);
++    real_OSInitSpinLock(lock);
++    lockEvent(49, lock, caller, token);
++}

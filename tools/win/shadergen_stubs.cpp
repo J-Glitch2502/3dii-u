@@ -5,4 +5,8 @@
 void rt_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); }
 void rt_fatal(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); exit(1); }
 int g_verbose;
-namespace gpu { GpuState g; bool g_stats, g_trace; u64 hash_bytes(const u8 *p, size_t n) { return 0; } }
+namespace gpu { GpuState g; bool g_stats, g_trace; u64 hash_bytes(const u8 *p, size_t n) {
+    u64 h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 0x100000001b3ull;
+    return h;
+} }

@@ -697,7 +697,9 @@ const char *const vs_registers =
     // doing what a PICA does took up to 54 registers, over a real GPU's 48 (tools/shadergen_main.cpp checks), so reciprocals stop short of infinity instead: 1e20 is past any PICA float.
     "vec4 vs_lim(float x) { return vec4(clamp(x, -1e20, 1e20)); }\n"
     "int vs_s32(float x) { return int(x); }\n"
-    "vec4 vs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; return u >= 96 ? vec4(1.0) : f[u]; }\n";
+    // Fetch a valid uniform even for the constant-one range, then select the result. A conditional fetch makes CafeGLSL retain
+    // many bone matrices across branches: MH4U's skinning shader needs 54 registers that way, but 32 with this equivalent lookup.
+    "vec4 vs_rel(int base, int off) { if (off < -128 || off > 127) off = 0; int u = (base + off) & 127; vec4 v = f[min(u,95)]; return u >= 96 ? vec4(1.0) : v; }\n";
 
 // What the rasterizer gets of the output registers in arr, through the output map. Y is negated: rows in a surface are PICA window rows, y up.
 void output_map(Gen &g, const s8 *slot_src, const char *arr) {
@@ -960,6 +962,21 @@ std::string gen_blit_fs() {
            "layout(binding = 0) uniform sampler2D tex;\n"
            "layout(binding = 0, std140) uniform Blit { vec4 uTint; vec4 uAdd; };\n"
            "void main() { FragColor = texture(tex, vUv) * uTint + uAdd; }\n";
+}
+
+// A D24S8 image transferred as RGBA8: PICA's bytes are depth low,
+// middle, high, stencil; RGBA8 interprets those as A, B, G, R. Average
+// the packed channels, as the transfer engine does, rather than the depth.
+std::string gen_depth_copy_fs() {
+    return "#version 450\n"
+           "layout(location = 0) in vec2 vUv;\n"
+           "layout(location = 0) out vec4 FragColor;\n"
+           "layout(binding = 0) uniform sampler2D tex;\n"
+           "layout(binding = 0, std140) uniform Blit { vec4 uStep; vec4 uUnused; };\n"
+           "vec4 pack_depth(vec2 uv) { uint d = uint(round(clamp(texture(tex, uv).r, 0.0, 1.0) * 16777215.0));\n"
+           " return vec4(0.0, float((d >> 16) & 255u), float((d >> 8) & 255u), float(d & 255u)) / 255.0; }\n"
+           "void main() { vec2 h = uStep.xy; FragColor = (pack_depth(vUv-h) + pack_depth(vUv+vec2(h.x,-h.y))\n"
+           " + pack_depth(vUv+vec2(-h.x,h.y)) + pack_depth(vUv+h)) * 0.25; }\n";
 }
 
 // An ETC1 or ETC1A4 texture decoded by the GPU: the texture's bytes, copied as they are in the game's memory into an RGBA8 staging texture

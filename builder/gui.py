@@ -13,7 +13,7 @@ import tempfile
 import threading
 
 import shiboken6
-from PySide6.QtCore import QBuffer, QIODevice, QObject, Property, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QBuffer, QIODevice, QLocale, QObject, Property, QSize, QStandardPaths, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QFontDatabase, QGuiApplication, QIcon, QImage, QPixmap
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow
@@ -266,6 +266,7 @@ class App(QObject):
     saveText, hasSave = _p(str, 'saveText'), _p(bool, 'hasSave')
     artKeySet, soundSet, artStyle = _p(bool, 'artKeySet'), _p(bool, 'soundSet'), _p(str, 'artStyle')
     gameMenu = _p(bool, 'gameMenu')  # the options menu in the games it builds (click the left stick)
+    language, languages = _p(str, 'language'), _p('QVariantList', 'languages')
     library = _p('QVariantList', 'library')
     keysOk, keysNeeded, keysText, otpOk, otpText = _p(bool, 'keysOk'), _p(bool, 'keysNeeded'), _p(str, 'keysText'), _p(bool, 'otpOk'), _p(str, 'otpText')
     sysOk, sysText = _p(bool, 'sysOk'), _p(str, 'sysText')
@@ -302,7 +303,10 @@ class App(QObject):
             faq = []
         faq = [e for e in faq if isinstance(e, dict) and isinstance(e.get('q'), str) and isinstance(e.get('a'), str) and e['q'] and e['a']]             if isinstance(faq, list) else []
         theme_mode = self.st.get('theme')
-        self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='',
+        system_locale = QLocale.system()
+        self.system_language = pipeline.language_for_locale(next(iter(system_locale.uiLanguages()), system_locale.name()))
+        self._s = dict(hasGame=False, gameName='', maker='', badge='', known=False, icon='', meta='', language='',
+                       languages=[f'System ({self.system_language})', *pipeline.LANGUAGES],
                        note='Pick one of your 3DS games to start. The builder reads its name and icon, and asks about its update and DLC.',
                        updateText='None', hasUpdate=False, dlcText='None', hasDlc=False, modText='None', hasMod=False, artText=NO_ART, hasArt=False, artUrl='', artOwn=False, iconText=NO_ART, hasIconArt=False, iconArtUrl='', tileUrl='', bezelText=NO_BEZEL, hasBezel=False, padArtText=NO_PAD_ART, hasPadArt=False, gameSoundText=NO_GAME_SOUND, hasGameSound=False, saveText=NO_SAVE, hasSave=False, artKeySet=bool(self.st.get('sgdb_key')), soundSet=os.path.isfile(BOOT_SOUND), artStyle=self.st.get('art_style', 'console'), gameMenu=self.st.get('game_menu', True) is not False, library=[], keysOk=False, keysNeeded=False, keysText='', otpOk=False,
                        otpText='', sysOk=False, sysText='', target=self.st.get('target', 'card'), destText='', cards=[], building=False, view='form', stages=[],
@@ -397,6 +401,15 @@ class App(QObject):
         self.set(artStyle=style)
 
     @Slot(str)
+    def setLanguage(self, language):
+        if not self.game:
+            return
+        language = language if language in pipeline.LANGUAGES else ''
+        self.st.setdefault('game_languages', {})[f'{self.game.title_id:016x}'] = language
+        save_settings(self.st)
+        self.set(language=language)
+
+    @Slot(str)
     def setThemeMode(self, mode):
         if mode not in ('system', 'light', 'dark'):
             return
@@ -454,10 +467,12 @@ class App(QObject):
             self.tell('Couldn\'t read this game', str(e), 'error')
             return
         self.game, self.update, self.dlc, self.mod = d, None, None, None
+        language = self.st.get('game_languages', {}).get(f'{d.title_id:016x}', '')
         info = pipeline.profile_for(d) or pipeline.derived(d)
         known = info['status'] in ('Plays', 'Complete')  # compat.json: tested on a real Wii U, or finished there
         self.set(hasGame=True, gameName=info['name'], maker=d.publisher or '', known=known, badge=f'{info["status"]} on Wii U' if known else 'Untested',
-                 icon=icon_url(d.icon) if d.icon else '', meta=f'{d.product}  ·  {d.title_id:016X}  ·  {describe(d)}', view='form')
+                 icon=icon_url(d.icon) if d.icon else '', meta=f'{d.product}  ·  {d.title_id:016X}  ·  {describe(d)}',
+                 language=language if language in pipeline.LANGUAGES else '', view='form')
         self.set_extra('update', None)
         self.set_extra('dlc', None)
         self.set_extra('mod', None)
@@ -1195,6 +1210,7 @@ class App(QObject):
             argv += ['--save', self.save_in]
         if not self._s['gameMenu']:
             argv += ['--no-menu']
+        argv += ['--language', self._s['language'] or self.system_language]
         self.log_lines, self.result, self.cancelled = [], None, False
         stages = [n for n, _ in pipeline.STAGES if n != 'Copying' or self._s['target'] == 'card']
         self.set(building=True, view='building', stages=stages, stage=0, failed=False, progress=0.0, detail='Starting...', log='')

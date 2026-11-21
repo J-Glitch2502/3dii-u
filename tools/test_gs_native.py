@@ -12,7 +12,13 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools', 'win'))
-import build3ds  # noqa: E402
+if sys.platform == 'win32':
+    import build3ds
+else:
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'linux'))
+    from native_build import load_builder
+    import tempfile
+    build3ds = load_builder(os.path.join(tempfile.gettempdir(), '3dii-gs-selftest'))
 
 
 def main():

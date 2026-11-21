@@ -4,10 +4,11 @@
 A geometry shader has no GPU path on the Wii U: the runtime runs it in its PICA interpreter on the GPU thread, a couple of hundred cycles an
 instruction. Luigi's Mansion: Dark Moon's rain (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame that way on a
 console (2026-11-13). A program logged in a .gsl file ("GS  " records: entry, code and swizzle word counts, the GS unit's whole code and swizzle
-memory, as port/wiiu/gx2_backend.cpp writes them) whose stretch from its entry runs straight through is written here as plain C: the same
+memory, as port/wiiu/gx2_backend.cpp writes them) whose stretch uses supported arithmetic and bounded control flow is written here as plain C: the same
 arithmetic as the interpreter's (pmul1, a dot product summed in the same order), on the same register file. A JMPC or JMPU to an END
 returns; a LOOP (not nested) is a loop, and a uniform addressed by its counter is found as the interpreter finds it. Anything else (calls,
-ifs, jumps elsewhere, addressing by a0) leaves that program to the interpreter.
+nonempty else blocks, conditionals mixed with loops, jumps elsewhere, addressing by a0) leaves that program to the interpreter.
+Bounded IFU/IFC regions without an else use ordinary C conditionals, with the same condition tests as the interpreter.
 
 The output is the game's own code translated, so it goes only into the build made from the user's own logs (build3ds.py), never into this
 repository. The runtime finds a function by its entry and a hash of the words it was made from (vertex.cpp: gs_native_find); check one
@@ -58,6 +59,7 @@ class Unsupported(Exception):
 def translate(entry, code, swz, fname):
     """(C source, end, swizzle entries used) for the program from entry, or Unsupported"""
     out, used, end, loop_end = [], set(), None, None
+    if_ends = []
     pc = entry
     while True:
         if pc >= len(code):
@@ -128,21 +130,35 @@ def translate(entry, code, swz, fname):
                 fop, refy, refx = (w >> 22) & 3, w >> 24 & 1, w >> 25 & 1
                 x, y = f'cond[0] == {refx}', f'cond[1] == {refy}'
                 o.append(f'if ({[f"({x}) || ({y})", f"({x}) && ({y})", x, y][fop]}) return 1;')
+        elif op in (0x27, 0x28):  # IFU / IFC, a bounded then-region with no else
+            dest, count = (w >> 10) & 0xfff, w & 0xff
+            if count or loop_end is not None:
+                raise Unsupported('an else block or a conditional inside a loop')
+            if dest <= pc or dest >= len(code) or (if_ends and dest > if_ends[-1]) or len(if_ends) >= 8:
+                raise Unsupported('an unstructured conditional region')
+            if op == 0x27:
+                condition = f'b[{(w >> 22) & 0xf}]'
+            else:
+                fop, refy, refx = (w >> 22) & 3, w >> 24 & 1, w >> 25 & 1
+                x, y = f'cond[0] == {refx}', f'cond[1] == {refy}'
+                condition = [f'({x}) || ({y})', f'({x}) && ({y})', x, y][fop]
+            out.append(f'    if ({condition}) {{  /* {pc:03x} */')
+            if_ends.append(dest)
         elif op == 0x2b:  # SETEMIT
             o.append(f'vid = {(w >> 24) & 3}; prim = {w >> 23 & 1}; wind = {w >> 22 & 1};')
         elif op == 0x2a:  # EMIT: the runtime copies the outputs, assembles, and turns the bank over
             o.append('emit(ctx, vid, prim, wind);')
         elif op == 0x29:  # LOOP: the body, to its last word, runs the int uniform's count + 1 times, the counter going up by its step
-            if loop_end is not None:
-                raise Unsupported('a loop in a loop')
+            if loop_end is not None or if_ends:
+                raise Unsupported('a nested loop or a loop inside a conditional')
             loop_end = (w >> 10) & 0xfff
             n = (w >> 22) & 3
             if loop_end <= pc or loop_end >= len(code):
                 raise Unsupported('a loop that ends before it starts')
             out.append(f'    aL = ui[{n}][1];\n    for (unsigned left = ui[{n}][0];; left--, aL += ui[{n}][2]) {{  /* {pc:03x} */')
         elif op == 0x22:  # END
-            if loop_end is not None:
-                raise Unsupported('an END inside a loop')
+            if loop_end is not None or if_ends:
+                raise Unsupported('an END inside a loop or conditional')
             end = pc + 1
         elif op != 0x21:  # NOP
             raise Unsupported(f'opcode {op:02x}')
@@ -151,6 +167,9 @@ def translate(entry, code, swz, fname):
         if pc == loop_end:
             out.append('    if (!left) break;\n    }')
             loop_end = None
+        while if_ends and pc + 1 == if_ends[-1]:
+            out.append('    }')
+            if_ends.pop()
         pc += 1
         if end is not None:
             break
@@ -216,7 +235,7 @@ def independence(entry, end, code, swz):
             mask &= sum(1 << r for r in range(16) if out[bank][r] == 0xf)
             bank ^= 1
             continue
-        elif op in (0x29, 0x2d):  # a loop, or a bool's jump past some of it: what a run wrote isn't the same on every path. Not shared.
+        elif op in (0x27, 0x28, 0x29, 0x2d):  # control flow: writes are not guaranteed on every path. Not shared.
             ok = False
             continue
         else:

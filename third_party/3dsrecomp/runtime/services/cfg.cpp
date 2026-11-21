@@ -3,6 +3,7 @@
 #include "../service.h"
 #include "../settings.h"
 #include "services.h"
+#include <fstream>
 
 namespace kernel {
 
@@ -20,8 +21,17 @@ static u32 cfg_region() {
 // (settings.ini), else the console's own
 int cfg_language() {
     static const int language = [] {
-        if (const char *l = getenv("RECOMP_LANGUAGE")) return atoi(l);
-        return pick_language(cfg_languages(), g_settings.language, g_system_language);
+        if (const char *override = getenv("RECOMP_LANGUAGE")) {
+            char *end;
+            const long value = strtol(override, &end, 10);
+            if (end != override && !*end && value >= 0 && value <= 11) return (int)value;
+        }
+        int fallback = g_system_language;
+        std::ifstream file(g_game.dir + "/language.txt");
+        int value;
+        char extra;
+        if (file >> value && value >= 0 && value <= 11 && !(file >> extra)) fallback = value;
+        return pick_language(cfg_languages(), g_settings.language, fallback);
     }();
     return language;
 }

@@ -1,0 +1,13 @@
+Real Wii U, Ever Oasis v1.1.0, system output set to 480p.
+Two consecutive approximately five-second reporting windows after discarding the first statistics report.
+Release CPU per-draw timers are disabled; no CPU busy percentage or per-draw CPU time is claimed.
+GPU pass timestamps can include submission gaps and presentation waiting.
+
+ 18292 [gx2] 30.0 fps, gpu thread 0% busy, 3752 draws/s, 0 on CPU, 0 fragment misses, 0 textures uploaded (0 KB, 0.0 ms, 0 decoded on the GPU), 24562 KB textures, 17 surfaces
+ 18292 [prof] the game's pictures a second: top screen 30.0, bottom screen 30.0
+ 18292 [prof] GPU per flip: busy 33.3 ms of 33.1 ms, over 134 flips | present 00000000 16.25 ms (1.0x) | draw 1829bfc0 16.22 ms (2.1x) | transfer 18000000 0.41 ms (1.0x) | lcd 00000000 0.23 ms (1.1x) | draw 18024100 0.05 ms (5.0x) | draw 18020080 0.04 ms (1.0x) | draw 18029680 0.04 ms (4.0x) | draw 18025180 0.04 ms (5.0x) | draw 1802a700 0.03 ms (4.0x) | clear 18020080 0.03 ms (1.0x) | draw 00000000 0.00 ms (1.0x)
+ 18292 [gx2] 0 read backs, 137 gpu copies, last upload 1834ab80 64x64 fmt 12 levels 2 dirty 0
+ 18603 [gx2] 29.9 fps, gpu thread 0% busy, 3058 draws/s, 0 on CPU, 0 fragment misses, 0 textures uploaded (0 KB, 0.0 ms, 0 decoded on the GPU), 24562 KB textures, 17 surfaces
+ 18603 [prof] the game's pictures a second: top screen 29.9, bottom screen 29.9
+ 18603 [prof] GPU per flip: busy 33.4 ms of 33.4 ms, over 155 flips | present 00000000 16.04 ms (1.0x) | draw 1829bfc0 15.86 ms (2.1x) | lcd 00000000 1.12 ms (1.1x) | transfer 18000000 0.12 ms (1.0x) | draw 18024100 0.05 ms (5.0x) | draw 18020080 0.04 ms (1.0x) | draw 18029680 0.04 ms (4.0x) | draw 18025180 0.04 ms (5.0x) | draw 1802a700 0.03 ms (4.0x) | clear 18020080 0.03 ms (1.0x) | draw 00000000 0.00 ms (1.0x)
+ 18603 [gx2] 0 read backs, 155 gpu copies, last upload 1834ab80 64x64 fmt 12 levels 2 dirty 0

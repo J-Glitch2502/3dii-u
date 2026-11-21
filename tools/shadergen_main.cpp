@@ -163,6 +163,7 @@ int main(int argc, char **argv) {
         return i;
     };
     const u32 blit_ps = add_ps(gen_blit_fs());
+    ps_index[fnv64(kDepthCopyKey, strlen(kDepthCopyKey))] = add_ps(gen_depth_copy_fs());
     const u32 fallback_ps = add_ps("#version 450\nlayout(location = 0) in vec4 vColor;\nlayout(location = 0) out vec4 FragColor;\nvoid main() { FragColor = vColor; }\n");
     const u32 fallback_tex_ps = add_ps("#version 450\nlayout(location = 0) in vec4 vColor;\nlayout(location = 1) in vec4 vTc01;\nlayout(location = 0) out vec4 FragColor;\n"
                                        "layout(binding = 0) uniform sampler2D t0;\nvoid main() { FragColor = clamp(vColor, 0.0, 1.0) * texture(t0, vTc01.xy); }\n");
@@ -251,7 +252,10 @@ int main(int argc, char **argv) {
             u32 inputs = 0;
             const bool none[16] = {};  // open bools aren't in the key
             const std::string src = gen_vs_glsl(p, r.entry, 0, iu, r.slots, &inputs, open);
-            if (src.empty()) failed++;
+            if (src.empty()) {
+                printf("not translated: open bools, entry %03x, mask %04x: shader.cpp line %d gave up at instruction %03x\n", r.entry, open, gpu::shader_glsl_fail_line, gpu::shader_glsl_fail_at);
+                failed++;
+            }
             else vs_index[vs_variant_key(p, r.entry, none, r.slots, open)] = {add_vs(src), inputs};
         }
     }

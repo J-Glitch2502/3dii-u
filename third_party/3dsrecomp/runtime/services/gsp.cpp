@@ -70,8 +70,10 @@ static void signal_irq_now(Irq id) {
 // block at a VBlank). A change of what a screen shows is the game's swap, which a 3DS's screens take at the next VBlank (gsp_swaps); games
 // that write those registers themselves swap in write_hw_regs, counted the same way. (fb_mutex held)
 static u32 swap_count[2];
+static u32 swap_requests[2], vblank_count;
 static unsigned swapped;  // the screens swapped since the last VBlank
 static void lcd_record(int screen, u32 select, u32 left, u32 right) {
+    swap_requests[screen]++;
     auto &l = gsp.lcd[screen];
     const u32 paddr = mem::vaddr_to_paddr(left);
     if (l.select != (select & 1) || l.left[select & 1] != paddr) swapped |= 1u << screen;
@@ -83,6 +85,11 @@ static void lcd_record(int screen, u32 select, u32 left, u32 right) {
 u32 gsp_swaps(int screen) {
     std::lock_guard<std::mutex> lk(fb_mutex);
     return swap_count[screen & 1];
+}
+
+GspFrameStats gsp_frame_stats() {
+    std::lock_guard<std::mutex> lk(fb_mutex);
+    return {vblank_count, {swap_requests[0], swap_requests[1]}, {swap_count[0], swap_count[1]}};
 }
 
 // framebuffer update from the shared memory (at VBlank), like the GSP module does
@@ -163,6 +170,7 @@ void gsp_vblank() {
     update_framebuffer(1);
     {
         std::lock_guard<std::mutex> fl(fb_mutex);
+        vblank_count++;
         for (int s = 0; s < 2; s++) swap_count[s] += swapped >> s & 1;
         swapped = 0;
     }

@@ -6,6 +6,7 @@
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <malloc.h>
+namespace wiiu { bool av_timing_enabled(); }
 #else
 #include <dlfcn.h>
 #endif
@@ -33,6 +34,38 @@ static u64 ready_counter = 1;
 static u32 next_thread_id = 1;
 static std::set<u32> tls_used;
 static u64 boot_ns;
+#ifdef __WIIU__
+static std::atomic<u32> diagnostics_level{1};
+static std::atomic<u32> diagnostics_thread{0};
+void set_diagnostics_thread(u32 thread) { diagnostics_thread.store(thread); }
+static bool detailed_diagnostics(Thread *t) {
+    const u32 selected = diagnostics_thread.load();
+    return diagnostics_level.load() >= 2 && (!selected || selected == t->id);
+}
+void set_diagnostics_level(u32 level) { diagnostics_level.store(std::min(level, 3u)); }
+struct SvcSample { u32 thread = 0, svc = 0, lr = 0, count = 0; const char *kind = "svc"; u64 total = 0, max = 0; };
+static SvcSample svc_samples[128];
+static u32 svc_samples_dropped;
+static void record_diagnostic(Thread *t, u32 svc, u32 lr, const char *kind, u64 elapsed) {
+    for (auto &s : svc_samples) {
+        if (s.count && (s.thread != t->id || s.svc != svc || s.lr != lr || strcmp(s.kind, kind))) continue;
+        s.thread = t->id; s.svc = svc; s.lr = lr; s.kind = kind;
+        ++s.count; s.total += elapsed; s.max = std::max(s.max, elapsed);
+        return;
+    }
+    ++svc_samples_dropped;
+}
+void diagnostics_report_locked() {
+    for (auto &s : svc_samples) if (s.count) {
+        LOG("[guest-svc] kind %s thread %u svc %02x lr %08x calls %u inclusive-us %llu max-us %llu\n",
+            s.kind, s.thread, s.svc, s.lr, s.count, (unsigned long long)(s.total / 1000), (unsigned long long)(s.max / 1000));
+        s = SvcSample{};
+    }
+    if (svc_samples_dropped) LOG("[guest-svc] sample table full: %u calls omitted\n", svc_samples_dropped);
+    svc_samples_dropped = 0;
+}
+void diagnostics_report() { Lock lk(kmutex); diagnostics_report_locked(); }
+#endif
 static std::shared_ptr<Process> self_process = std::make_shared<Process>();
 static std::shared_ptr<ResLimit> self_reslimit = std::make_shared<ResLimit>();
 u32 heap_size, linear_used;
@@ -244,6 +277,14 @@ static void switch_from(Thread *cur, Lock &lk) {
 
 void resume_thread(Thread *t) {
     if (t->status == TStatus::Dead || t->status == TStatus::Ready || t->status == TStatus::Running) return;
+#ifdef __WIIU__
+    if ((t->id == 1 || detailed_diagnostics(t)) && wiiu::av_timing_enabled()) {
+        t->diag_ready_at = real_ns();
+        const Thread *waker = current_thread();
+        t->diag_waker = waker ? waker->id : 0;
+        t->diag_waker_lr = waker ? waker->cpu.r[14] : 0;
+    }
+#endif
     for (auto &o : t->wait_objs) o->remove_waiter(t);
     t->wait_objs.clear();
     t->wait_gen++;
@@ -298,7 +339,52 @@ void reschedule(Lock &lk) {
 
 void block_current(Lock &lk) {
     Thread *cur = current_thread();
+#ifdef __WIIU__
+    const bool timed = (cur->id == 1 || detailed_diagnostics(cur)) && wiiu::av_timing_enabled();
+    const u64 began = timed ? real_ns() : 0;
+    const u32 caller = cur->cpu.r[14];
+    const int svc = cur->in_svc;
+    char object[48] = "sleep";
+    if (timed) { cur->diag_ready_at = 0; cur->diag_waker = cur->diag_waker_lr = 0; }
+    if (timed && cur->status == TStatus::WaitArb)
+        snprintf(object, sizeof object, "arb@%08x", cur->arb_addr);
+    if (timed && !cur->wait_objs.empty())
+        snprintf(object, sizeof object, "%s", cur->wait_objs.front()->name.c_str());
+#endif
     switch_from(cur, lk);
+#ifdef __WIIU__
+    if (timed) {
+        struct Sample { u32 thread = 0, caller = 0, count = 0, waker = 0, waker_lr = 0; int svc = 0; u64 ns = 0, max_ns = 0, ready_ns = 0; char object[48] = {}; };
+        static Sample samples[128];
+        static u32 dropped;
+        static u64 report_at = began;
+        const u64 now = real_ns(), elapsed = now - began;
+        bool recorded = false;
+        for (auto &s : samples) {
+            if (s.count && (s.thread != cur->id || s.caller != caller || s.svc != svc || strcmp(s.object, object) || s.waker != cur->diag_waker || s.waker_lr != cur->diag_waker_lr)) continue;
+            s.thread = cur->id; s.caller = caller; s.svc = svc;
+            s.waker = cur->diag_waker; s.waker_lr = cur->diag_waker_lr;
+            if (cur->diag_ready_at >= began && cur->diag_ready_at <= now) s.ready_ns += now - cur->diag_ready_at;
+            snprintf(s.object, sizeof s.object, "%s", object);
+            ++s.count; s.ns += elapsed; s.max_ns = std::max(s.max_ns, elapsed);
+            recorded = true;
+            break;
+        }
+        if (!recorded) ++dropped;
+        if (now - report_at >= 2000000000ULL) {
+            for (auto &s : samples) if (s.count) {
+                LOG("[guest-wait] thread %u lr %08x svc %02x object %s: %u waits total %llu us max %llu us ready-delay %llu us waker %u lr %08x in %llu ms\n",
+                    s.thread, s.caller, s.svc, s.object, s.count, (unsigned long long)(s.ns / 1000),
+                    (unsigned long long)(s.max_ns / 1000), (unsigned long long)(s.ready_ns / 1000),
+                    s.waker, s.waker_lr, (unsigned long long)((now - report_at) / 1000000));
+                s = Sample{};
+            }
+            if (dropped) LOG("[guest-wait] sample table full: %u waits omitted\n", dropped);
+            dropped = 0;
+            report_at = now;
+        }
+    }
+#endif
 }
 
 static void yield_current(Lock &lk) {
@@ -321,6 +407,10 @@ void sleep_current(u64 ns, Lock &lk) {
 // long as the storage took, which on a console is most of a transition between scenes, and the sound stuttered through each one (2026-11-10).
 void run_blocked(Lock &lk, const std::function<void()> &work) {
     Thread *cur = current_thread();
+#ifdef __WIIU__
+    const bool timed = detailed_diagnostics(cur);
+    const u32 caller = cur->cpu.r[14], svc = (u32)cur->in_svc;
+#endif
     cur->status = TStatus::WaitSleep;  // with no timeout set: nothing resumes it but the end of this
     cur->wait_gen++;
     flush_deferred();
@@ -330,11 +420,23 @@ void run_blocked(Lock &lk, const std::function<void()> &work) {
         running->cv.notify_one();
     }
     lk.unlock();
+#ifdef __WIIU__
+    const u64 began = timed ? real_ns() : 0;
+#endif
     work();
+#ifdef __WIIU__
+    const u64 completed = timed ? real_ns() : 0;
+#endif
     lk.lock();
     make_ready(cur, true);
     schedule_async();  // takes the CPU if it's free, and asks a thread of lower priority for it otherwise
     cur->cv.wait(lk, [&] { return running == cur; });
+#ifdef __WIIU__
+    if (timed) {
+        record_diagnostic(cur, svc, caller, "native-work", completed - began);
+        record_diagnostic(cur, svc, caller, "native-resume", real_ns() - completed);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------- wait objects
@@ -1217,9 +1319,17 @@ std::string kstats_report(u64 frames) {
 volatile u32 svcs;
 
 void svc_dispatch(CPU *c, u32 imm) {
+#ifdef __WIIU__
+    const bool timed = detailed_diagnostics(current_thread());
+    const u64 asked = timed ? real_ns() : 0;
+    const u32 caller = c->r[14];
+#endif
     while (lock_wanted.load(std::memory_order_relaxed)) std::this_thread::yield();  // lock_soon's caller first
     Lock lk(kmutex);
     Thread *const t = current_thread();
+#ifdef __WIIU__
+    const u64 entered = timed ? real_ns() : 0;
+#endif
     t->in_svc = (s32)imm;
     t->in_service = nullptr;
     kstats.svc[imm & 127]++;
@@ -1230,6 +1340,18 @@ void svc_dispatch(CPU *c, u32 imm) {
         LOG("[svc %u] %02x lr=%08x r0=%08x r1=%08x r2=%08x r3=%08x\n", current_thread()->id, imm, c->r[14], c->r[0],
             c->r[1], c->r[2], c->r[3]);
     svc_locked(c, imm, lk);
+#ifdef __WIIU__
+    if (timed) {
+        record_diagnostic(t, imm, caller, "lock-acquire", entered - asked);
+        record_diagnostic(t, imm, caller, "svc", real_ns() - entered);
+        static u64 report_at;
+        const u64 now = real_ns();
+        if (now - report_at >= 2000000000ULL) {
+            diagnostics_report_locked();
+            report_at = now;
+        }
+    }
+#endif
     t->in_svc = -1;
 }
 

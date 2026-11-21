@@ -1,0 +1,76 @@
+--- a/port/wiiu/gx2_backend.cpp
++++ b/port/wiiu/gx2_backend.cpp
+@@ -1206,6 +1206,11 @@
+     u32 slice[32];      // the hash's parts (hash_guest), and the next one a whole-heap flush checks
+     u32 slice_next;
+     bool maybe_dirty, dirty, hash_stale;
++    u64 ink_checked_flip = ~0ull, ink_changed_flip = 0;
++    OSTime ink_changed_time = 0;
++    unsigned ink_epoch = ~0u;
++    bool ink_pending = false;
++
+     // what a fill of the whole texture last left there, while nothing else has written it (gx2_memory_fill): the same fill again changes nothing
+     bool filled = false, fill_pending = false;
+     u32 fill_value = 0;
+@@ -1236,6 +1241,11 @@
+ // it stays the same for TURN_QUIET flips.
+ constexpr u32 TURN_BYTES = 32 << 10, TURN_LARGEST = 64 << 10, TURN_FLIPS = 30, TURN_QUIET = 300;
+ u32 turn_budget = TURN_BYTES;
++// Temporary local hardware A/B probe; it does not alter generic refresh in baseline mode.
++std::atomic<bool> ink_refresh{false};
++std::atomic<unsigned> ink_epoch{0};
++unsigned ink_probe_logs;
++
+ 
+ constexpr u8 k_fmt_bits[16] = {32, 24, 16, 16, 16, 16, 16, 8, 8, 8, 4, 4, 4, 8, 8, 8};
+ 
+@@ -1583,9 +1593,25 @@
+     const u64 tkey = tex_key(addr, w, h, fmt, levels);
+     if (auto hit = tex_index.find(tkey); hit != tex_index.end()) {
+         Tex &e = *hit->second;
++
++        const bool ink_canvas = g_game.program_id == 0x00040000000b3c00ULL
++            && w == 512 && h == 256 && fmt == 11 && levels == 1;
++        if (ink_canvas && e.ink_checked_flip != use_counter) {
++            e.ink_checked_flip = use_counter;
++            const unsigned epoch = ink_epoch.load();
++            if (e.ink_epoch != epoch) { e.ink_pending = false; e.ink_epoch = epoch; }
++            const u32 probe_hash = hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data());
++            if (!e.hash_stale && probe_hash != e.hash && !e.ink_pending) {
++                e.ink_pending = true;
++                e.ink_changed_flip = st_flips;
++                e.ink_changed_time = OSGetSystemTime();
++                if (ink_probe_logs < 160) LOG("[ink probe] changed addr=%08x mode=%u flip=%llu unflushed=%u next=%llu\n", addr, (unsigned)ink_refresh.load(), (unsigned long long)st_flips, (unsigned)e.unflushed, (unsigned long long)e.next_turn);
++            }
++            if (ink_refresh.load() && !e.hash_stale && probe_hash != e.hash) e.maybe_dirty = true;
++        }
+         // Brain Age's A4 handwriting canvas changes without a flush. The generic
+         // periodic check can delay the first stroke; check this canvas every flip.
+-        const bool handwriting_canvas = g_game.program_id == 0x00040000000b3c00ULL
++        const bool handwriting_canvas = ink_refresh.load() && g_game.program_id == 0x00040000000b3c00ULL
+             && w == 512 && h == 256 && fmt == 11 && levels == 1;
+         if ((stale_check || handwriting_canvas) && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale
+             && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
+@@ -1655,6 +1681,12 @@
+                     else memset(e.lag_rows, 0xff, sizeof rows);
+                 }
+                 upload_texture(e, part ? rows : nullptr);
++                if (ink_canvas && e.ink_pending) {
++                    const u64 us = OSTicksToMicroseconds(OSGetSystemTime() - e.ink_changed_time);
++                    if (ink_probe_logs++ < 160) LOG("[ink probe] upload addr=%08x mode=%u first=%llu flip=%llu delay_frames=%llu delay_us=%llu\n", addr, (unsigned)ink_refresh.load(), (unsigned long long)e.ink_changed_flip, (unsigned long long)st_flips, (unsigned long long)(st_flips-e.ink_changed_flip), (unsigned long long)us);
++                    e.ink_pending = false;
++                }
++
+             }
+             e.hash = hh;
+             e.hash_stale = e.dirty;
+@@ -5091,7 +5123,8 @@
+ 
+ // (net thread) a switch from the PC, from now on
+ bool gfx_set(const char *name, u32 v) {
+-    if (!strcmp(name, "uberall")) uber_all = v;
++    if (!strcmp(name, "inkrefresh") && v <= 1) { ink_refresh.store(v != 0); ink_epoch.fetch_add(1); }
++    else if (!strcmp(name, "uberall")) uber_all = v;
+     else if (!strcmp(name, "uberfb")) {
+         uber_fallback = v;
+         forget_ps = true;

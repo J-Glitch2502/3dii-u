@@ -678,8 +678,19 @@ def decode_vfp_dp(i, w):
     opc2 = Vn
     opc3 = (w >> 6) & 3
     if opc3 & 1 == 0:
-        i.kind = UDF
-        i.note = 'vmov imm (VFPv3)'
+        # Some emulator-targeted mods inject VFPv3 immediate moves. Lower the
+        # exact constant here even though retail ARM11 programs use VFPv2.
+        if w & 0xF0:
+            i.kind = UDF
+            i.note = 'reserved vfp immediate'
+            return
+        imm = (Vn << 4) | Vm
+        exponent = ((imm >> 4) & 3) + (-3 if imm & 64 else 1)
+        value = (1 + (imm & 15) / 16) * 2.0 ** exponent
+        if imm & 128:
+            value = -value
+        i.code.append(put(d, repr(value) + sfx))
+        i.note = 'vmov immediate' + tag
         return
     if opc2 == 0:
         if opc3 == 1:

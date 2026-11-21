@@ -63,6 +63,7 @@ public:
     SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish);
     void mix_into(QuadFrame &dst, int mix);
     const StereoFrame &output() const { return frame; }
+    void report_timing(unsigned index);  // DSP lock held; bounded source summary
 
 private:
     struct Buffer {
@@ -78,6 +79,7 @@ private:
     };
     struct State {
         bool enabled = false;
+        bool has_emitted = false;  // distinguish a running stream from first start
         u16 sync_count = 0;
         std::array<std::array<float, 4>, 3> gain{}, gain_ramp_start{};
         std::array<bool, 3> gain_ramp{};
@@ -105,6 +107,9 @@ private:
     };
     State st;
     StereoFrame frame{};
+    struct {
+        u32 frames = 0, blank_starts = 0, boundary_blanks = 0, empty = 0, short_frames = 0;
+    } timing;
 
     void parse_config(SourceConfig &cfg, const s16 coeffs[16]);
     void enqueue(const Buffer &b);

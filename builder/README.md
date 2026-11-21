@@ -24,7 +24,51 @@ No game data and no keys come with the builder. Everything it builds from is you
 
 **Games** in the bar on the left holds the games you picked before and lists the games tested on a real Wii U; **Help** answers questions about what you need, and holds the version, the update check and the light or dark look.
 
+**Game language** defaults to the computer's display language, with English as the fallback. Choose a language to override it for the selected title. The game must already include that language.
+
 Saves live in the game's own save storage on the console, like any installed game. They show up in Data Management.
+
+### Rebuild just the executable for hardware testing
+
+Keep the prepared files from a normal build with the pipeline's `--keep` flag. Use the same Builder work directory and devkitPro environment for subsequent builds:
+
+```sh
+python tools/win/build3ds.py code g_asre --prepared-game WORK/builder_work/g_asre --work-dir WORK/build_win_builder --out RPX_OUTPUT
+```
+
+This reuses the extracted game and compiled objects. Use a full build when changing the ROM, game assets, shader generator, or shader pack.
+
+For Cemu, close the running title and copy the new RPX into the `code/` directory of a test copy of the unpacked title. Launch that RPX directly in Cemu. The existing `content/` and `meta/` folders supply the assets and title metadata, so this test skips WUP packaging.
+
+Install the matching base WUP once on the Wii U. Close the game, enable FTPiiU and its system-file access in debug Aroma, then run:
+
+```sh
+python3 tools/ftp_dev_rpx.py WII_U_IP WORK/builder_work/g_asre/out/title RPX_OUTPUT/g_asre.rpx --volume storage_usb
+```
+
+Use `storage_mlc` if the test title is installed to internal storage. The tool checks the installed title ID and shader files, uploads and verifies the new RPX, and keeps the previous RPX as a uniquely named backup in the same code directory. Launch the title again from the Wii U Menu to run the new executable.
+
+### Update a homebrew WUHB without replacing its assets
+
+With our generic development build of RPXLoadingModule installed in Aroma, any
+WUHB under `sd:/wiiu/apps/` can have a companion `<full-name>.wuhb.dev` directory.
+No game-specific loader entry is needed. Reload Aroma once after installing the
+module; later updates are selected automatically at the next application launch.
+
+```sh
+python3 tools/ftp_homebrew_dev.py WII_U_IP \
+  'wiiu/apps/Kirby Triple Deluxe.wuhb' RPX_OUTPUT/g_bale.rpx \
+  --content CHANGED_CONTENT --release build-20261118-1
+```
+
+`CHANGED_CONTENT` holds only changed content files, such as `shaders.gsh` and
+`shaders.idx` from the same build. Omit `--content` for an RPX-only update. Both
+shader files must be supplied together. The publisher writes an immutable release,
+verifies every upload, and switches the small `active.txt` marker last. The module
+loads that release's `root.rpx` and merges its optional `content/` over the WUHB.
+The original bundle supplies other assets and keeps the same save identity.
+Nothing in this workflow writes to the installed USB title or to save folders.
+The original installed-title FTP updater above remains a separate alternative.
 
 ## Which games work
 
@@ -127,3 +171,7 @@ Windows 10 or 11 for now (Linux is planned):
   - `services/fs.cpp` serves the update's RomFS (`update_romfs.bin`, SelfNCCH path type 5) and the DLC's (`dlc_<content index>.romfs`, archive 0x2345678A for `0004008C` title IDs).
   - `services/misc.cpp`'s `am:app` answers the add-on content calls from `dlc_contents.bin`, `dlc_title.bin`, `dlc_ticket.bin` and `update_title.bin`.
   - The GPU-timeout fix (`services/gsp.cpp`) finds nngxSetTimeout in whatever code is loaded, so updated code and new games get it too.
+
+## Optional hardware development tools
+
+See [the source-only hardware debugging handoff](../tools/wiiu_diagnostics/README.md) for incremental RPX/content transfers, the dual-channel PC recorder, pinned Aroma/Cemu patches, validation results and known limitations. These tools are opt-in developer features; the experimental Aroma heap workaround needs separate review. The language GUI is functional but could use visual and UX polish before release.

@@ -1,6 +1,7 @@
 // Shaders compiled on the console itself: see shader_compile.cpp
 #pragma once
 #include <gx2/shaders.h>
+#include <coreinit/time.h>
 #include <string>
 #include "rt.h"
 
@@ -13,6 +14,7 @@ struct CompileDone {
     u32 inputs;
 };
 void shader_compile_init();                                                     // (GPU thread, after the shipped set) starts the compiler thread and queues the cache
+bool shader_cache_io_stalled(OSTime timeout);
 bool shader_compile_on();                                                       // whether it did: on unless a "noglslcompile" file is in the data folder
 void shader_compile_request(bool vs, u64 key, std::string glsl, u32 inputs);  // (GPU thread) a miss: compile this in the background
 bool shader_compile_take(CompileDone &out);                                     // (GPU thread) one finished shader, if any

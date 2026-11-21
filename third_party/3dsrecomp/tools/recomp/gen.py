@@ -17,6 +17,7 @@ from . import thumb
 from .ins import B, CALL, ICALL, JMP, SVC, UDF, OP, COND_C
 from . import flags
 from . import rtti
+from .bulk_copy import matches_copy32, copy32_fastpath
 
 
 def fname(key):
@@ -628,6 +629,7 @@ class Emitter:
         # return site, so one decoder doesn't cost the whole game the fast code.
         self.safe_ranges = []
         self.cur_abi = False
+        self.bulk_copy = True
 
     def is_safe(self, addr):
         return any(lo <= (addr & ~1) < hi for lo, hi in self.safe_ranges)
@@ -698,6 +700,7 @@ class Emitter:
     def _emit_function(self, key, insts, addrs, th, start, out_mask, fused):
         abi = self.cur_abi
         an = self.an
+        bulk_copy = self.bulk_copy and not abi and not th and matches_copy32(getattr(an, 'img', None), start, addrs)
         if self.flag_opt:
             lo = flags.liveness(insts, th, start, an.funcs, key in self.flag_returning, self.flag_reading_entries)
             for a, i in insts.items():
@@ -833,6 +836,10 @@ class Emitter:
                 out.append('  goto L_%x;' % prev_falls)
             if a in labels:
                 out.append('L_%x:' % a)
+            if bulk_copy and a == start + 0x0c:
+                writes_vf = 'vf =' in ' '.join(self.override.get(start + 0x1c, insts[start + 0x1c].code))
+                out.append(copy32_fastpath(start, writes_vf))
+                self.stats['bulk_copy32'] += 1
             out.append(self.emit_ins(i, key, insts))
             prev_falls = None
             if i.falls_through:
@@ -900,6 +907,15 @@ class Emitter:
             give, take = self.custom_sync(i.target)
             body.append('%s();%s %s(c, 0); %s();%s if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
                 before, give, fname(i.target), after, take, i.link | th))
+        elif i.kind == ICALL and self.cur_abi and self.safe_ranges:
+            # Function pointers can enter the same split decoder routines as direct calls.
+            # Keep the fast caller's locals alive until the safe callee actually returns;
+            # its intermediate return sites are not entries in the fast caller's table.
+            body.append('if (%s) { SO(); c->pc = tpc; rt_dispatch(c, 0); '
+                        'while (__builtin_expect(c->pc != 0x%xu, 0)) rt_dispatch(c, 0); SI(); } '
+                        'else { SOC(); c->pc = tpc; rt_dispatch(c, 0); SIC(); '
+                        'if (__builtin_expect(c->pc != 0x%xu, 0)) return; }' % (
+                            self.in_safe_c('tpc'), i.link | th, i.link | th))
         elif i.kind == ICALL:
             body.append('SOC(); c->pc = tpc; rt_dispatch(c, 0); SIC(); if (__builtin_expect(c->pc != 0x%xu, 0)) return;' % (
                 i.link | th))

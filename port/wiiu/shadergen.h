@@ -17,6 +17,8 @@ std::string gen_gsx_glsl(const ShaderProgram *vs, u32 vs_entry, u32 vb, const u8
 std::string gen_passthrough_vs();
 std::string gen_blit_vs();
 std::string gen_blit_fs();
+std::string gen_depth_copy_fs();
+constexpr char kDepthCopyKey[] = "depth copy d24s8";
 std::string gen_etc1_fs(bool alpha);                                     // decodes an ETC1 (ETC1A4 with alpha) texture on the GPU: see gx2_backend's gpu_decode
 constexpr char kEtc1Key[] = "etc1", kEtc1A4Key[] = "etc1a4";              // their entries in the fragment index
 std::string gen_untile_fs(u32 fmt);                                       // the same for a plain format, 0 to 11
@@ -67,5 +69,5 @@ constexpr u32 kShaderIndexMagic = 0x53484458;
 constexpr u32 kShaderIndexVersion = 1;
 // Raised whenever gen_fs_glsl or gen_vs_glsl comes to write a state differently. A console's shader cache holds the text the generator of
 // the build that wrote it made, and a build with another number here starts that cache over (shader_compile.cpp).
-constexpr u32 kShaderGenRevision = 2;
+constexpr u32 kShaderGenRevision = 5;
 }  // namespace gpu

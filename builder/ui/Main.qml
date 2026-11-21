@@ -643,6 +643,26 @@ ApplicationWindow {
                 }
             }
 
+            Row {
+                x: 224 + (418 - width) / 2; y: 585; height: 36
+                visible: app.hasGame && app.view === "form"
+                spacing: 10
+                Label { text: "Game language"; color: pal.label; anchors.verticalCenter: parent.verticalCenter }
+                ComboBox {
+                    width: 224
+                    Accessible.name: "Game language"
+                    palette.base: pal.card
+                    palette.button: pal.card
+                    palette.buttonText: pal.label
+                    palette.text: pal.label
+                    palette.window: pal.card
+                    palette.windowText: pal.label
+                    model: app.languages
+                    currentIndex: app.language ? app.languages.indexOf(app.language) : 0
+                    onActivated: app.setLanguage(currentText)
+                }
+            }
+
             Pill {
                 x: 224; y: 630; width: 418; height: 78
                 text: "Build It!"

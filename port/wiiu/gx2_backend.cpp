@@ -5,6 +5,7 @@
 // Surfaces hold PICA window rows: row 0 is y = 0, the bottom of the image, which is also how textures are sampled (t = 0 at row
 // 0). So a render target can be sampled as a texture as it is. Screens are rotated into place when they are presented.
 #include <coreinit/cache.h>
+#include <coreinit/debug.h>
 #include <coreinit/memdefaultheap.h>
 #include <coreinit/memexpheap.h>
 #include <coreinit/memfrmheap.h>
@@ -47,6 +48,7 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "latte_program.h"
+#include "gfd_index.h"
 #include "memory_fills.h"
 #include "loader.h"
 #include "present_rule.h"
@@ -81,9 +83,9 @@ u32 prof[P_COUNT], st_syncs, st_luts, st_flushes, st_rehashes;
 // above, and a draw's steps one after another (lap). "nolaps" in the data folder leaves the steps out of a measuring build, to see
 // what reading the clock a dozen times a draw costs.
 bool prof_laps = true;
-inline OSTime prof_now() { return kMeasure ? OSGetSystemTime() : 0; }
+inline OSTime prof_now() { return cpu_timing_enabled() ? OSGetSystemTime() : 0; }
 inline void prof_add(int k, OSTime since) {
-    if (kMeasure) prof[k] += (u32)(OSGetSystemTime() - since);
+    if (since) prof[k] += (u32)(OSGetSystemTime() - since);
 }
 // ---- the GPU's own time, per pass: where the console's GPU spends a frame (the "[prof] GPU" line)
 // A pass is the draws into one target, a clear, a copy, or the present. Each starts with two stamps from the GPU's clock: the cycle its command processor
@@ -101,6 +103,7 @@ struct GtFrame {
 GtFrame gt[GT_FRAMES];
 u32 gt_cur;
 bool gt_on = true, gt_broken;
+std::atomic<bool> live_gpu_timing{false};  // opt-in GPU timestamps in a release build; no alarm-based CPU sampler
 struct GtSum {
     u32 tag;
     u8 kind;
@@ -114,7 +117,7 @@ volatile bool gt_reset;
 OSTime gt_last_end;
 
 void gt_mark(u8 kind, u32 tag) {
-    if (!kMeasure || !gt_on || gt_broken) return;
+    if ((!kMeasure && !live_gpu_timing.load(std::memory_order_relaxed)) || !gt_on || gt_broken) return;
     GtFrame &f = gt[gt_cur];
     if (!f.top) {
         f.top = (u64 *)MEMAllocFromDefaultHeapEx(GT_MARKS * 16, 0x100);
@@ -152,7 +155,7 @@ void gt_add(u8 kind, u32 tag, u64 ticks) {
 
 // At the end of a present, once the GPU has finished the frame before last: the oldest frame's stamps are read, and its slot is the next frame's.
 void gt_flip(u32 first_target) {
-    if (!kMeasure || !gt_on || gt_broken) return;
+    if ((!kMeasure && !live_gpu_timing.load(std::memory_order_relaxed)) || !gt_on || gt_broken) return;
     gt_mark(GT_END, 0);
     gt_cur = (gt_cur + 1) % GT_FRAMES;
     GtFrame &f = gt[gt_cur];
@@ -191,10 +194,10 @@ void gt_flip(u32 first_target) {
 
 OSTime prof_t;
 inline void lap_start() {
-    if (kMeasure && prof_laps) prof_t = OSGetSystemTime();
+    if (cpu_timing_enabled() && prof_laps) prof_t = OSGetSystemTime();
 }
 inline void lap(int k) {
-    if (!kMeasure || !prof_laps) return;
+    if (!cpu_timing_enabled() || !prof_laps) return;
     const OSTime n = OSGetSystemTime();
     prof[k] += (u32)(n - prof_t);
     prof_t = n;
@@ -226,7 +229,7 @@ void ring_next_segment() {
     const OSTime tw = OSGetSystemTime();
     if (ring_fence[ring_seg]) GX2WaitTimeStamp(ring_fence[ring_seg]);
     const u32 waited = (u32)(OSGetSystemTime() - tw);
-    if (kMeasure) prof[P_WAIT] += waited;
+    if (cpu_timing_enabled()) prof[P_WAIT] += waited;
     dyn_waited += waited;  // (this one the picture's size goes by: dyn_res_update)
     ring_off = RING_SIZE / 3 * ring_seg;
     ring_end = ring_off + RING_SIZE / 3;
@@ -267,10 +270,13 @@ struct PsEntry {
 };
 constexpr u32 COMPILED_HERE = 0x7ffffffe;  // a VsEntry or PsEntry index: the console compiled it, nothing to load from the shipped set
 constexpr u32 MISSED = ~0u;                // the set lacks it: the fallback draws, or the CPU does, until the console has compiled it
+const void *extra_ps_gsh;
+constexpr u32 EXTRA_PS_INDEX = 0x40000000;
 std::unordered_map<u64, VsEntry> vs_table;
 std::unordered_map<u64, PsEntry> ps_table;
 GX2VertexShader *vs_passthrough, *vs_blit;
 GX2PixelShader *ps_blit, *ps_fallback, *ps_fallback_tex, *ps_uber, *ps_uber_lit;
+GX2PixelShader *ps_depth_copy;
 GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GPU (gpu_decode); null in a pack from before it had that one
 // A bit per attribute format (s8, u8, s16, float) kept the old way: copied by itself, integers as floats made by the CPU. Files named "cpuattr"
 // (all), "cpuattr8" and "cpuattr16" set them, and "cemu" the signed bytes. None by default: bytes fetched a 4-byte word at a time (gpu_fetched)
@@ -304,40 +310,40 @@ std::vector<u8> read_whole(const char *path, u32 align_to) {
     std::vector<u8> d;
     FILE *f = fopen(path, "rb");
     if (!f) return d;
-    fseek(f, 0, SEEK_END);
-    d.resize(ftell(f) + align_to);
-    fseek(f, 0, SEEK_SET);
-    fread(d.data(), 1, d.size() - align_to, f);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return d; }
+    const long length = ftell(f);
+    if (length < 0 || (size_t)length > SIZE_MAX - align_to || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return d;
+    }
+    d.resize((size_t)length + align_to);
+    const bool read_ok = fread(d.data(), 1, (size_t)length, f) == (size_t)length && !ferror(f);
     fclose(f);
-    d.resize(d.size() - align_to);
+    if (read_ok) d.resize((size_t)length);
+    else d.clear();
     return d;
 }
 
 // shaders.gsh is read as each shader is needed, not kept whole: with every lit state compiled ahead, Luigi's Mansion: Dark Moon's is 51 MB, which
 // stayed in a heap that a long session filled up. At boot the file is read once to note where each shader's header and program blocks are; a shader
 // is then two reads into a small GFD of its own, which WHB copies out of (its program in memory of its own), and which goes again.
-struct GfdShader {
-    u32 head_at, head_len, prog_at, prog_len;  // each block with its block header
-};
+using GfdShader = gfd_index::Shader;
 std::vector<GfdShader> gfd_vs, gfd_ps;
 std::vector<u8> gfd_file_head, gfd_end;  // the file's header and its end block
 FILE *gfd_file;
+// Small packs stay in RAM: a WUHB's streamed seeks pass through Aroma's
+// allocating hooks, and a hardware heartbeat dump caught that heap lock in
+// gfd_one. Keep the memory-saving stream path for packs above this fixed cap.
+constexpr size_t GFD_RESIDENT_LIMIT = 16u << 20;
+std::vector<u8> gfd_resident;
 
 static void gfd_scan(const u8 *d, u32 n) {
-    constexpr u32 VS_HEAD = 3, VS_PROG = 5, PS_HEAD = 6, PS_PROG = 7, END = 1;
-    auto be32 = [&](u32 at) { return (u32)d[at] << 24 | (u32)d[at + 1] << 16 | (u32)d[at + 2] << 8 | d[at + 3]; };
-    if (n < 32 || memcmp(d, "Gfx2", 4)) FATAL("shaders.gsh is not a GFD file\n");
-    const u32 first = be32(4);
-    gfd_file_head.assign(d, d + first);
-    for (u32 at = first; at + 32 <= n && !memcmp(d + at, "BLK{", 4);) {
-        const u32 head = be32(at + 4), kind = be32(at + 16), size = be32(at + 20), len = head + size;
-        if (kind == VS_HEAD) gfd_vs.push_back({at, len, 0, 0});
-        else if (kind == VS_PROG && !gfd_vs.empty()) gfd_vs.back().prog_at = at, gfd_vs.back().prog_len = len;
-        else if (kind == PS_HEAD) gfd_ps.push_back({at, len, 0, 0});
-        else if (kind == PS_PROG && !gfd_ps.empty()) gfd_ps.back().prog_at = at, gfd_ps.back().prog_len = len;
-        else if (kind == END) gfd_end.assign(d + at, d + at + len);
-        at += len;
-    }
+    gfd_index::Index parsed;
+    if (const char *error = gfd_index::scan(d, n, parsed)) FATAL("shaders.gsh: %s\n", error);
+    gfd_vs = std::move(parsed.vs);
+    gfd_ps = std::move(parsed.ps);
+    gfd_file_head.assign(d, d + parsed.header_len);
+    gfd_end.assign(d + parsed.end_at, d + parsed.end_at + parsed.end_len);
 }
 
 // one shader's blocks as a GFD file of their own, its blocks numbered as the first of their kind
@@ -345,13 +351,19 @@ static std::vector<u8> gfd_one(const GfdShader &g) {
     std::vector<u8> out(gfd_file_head);
     const size_t at = out.size();
     out.resize(at + g.head_len + g.prog_len);
-    wiiu::romfs_begin();  // the content's reads take turns (the game's RomFS is read the same way)
-    fseek(gfd_file, g.head_at, SEEK_SET);
-    const size_t a = fread(out.data() + at, 1, g.head_len, gfd_file);
-    fseek(gfd_file, g.prog_at, SEEK_SET);
-    const size_t b = fread(out.data() + at + g.head_len, 1, g.prog_len, gfd_file);
-    wiiu::romfs_end();
-    if (a != g.head_len || b != g.prog_len) FATAL("shaders.gsh could not be read\n");
+    if (!gfd_resident.empty()) {
+        // gfd_scan checked both extents before this pack became resident.
+        memcpy(out.data() + at, gfd_resident.data() + g.head_at, g.head_len);
+        memcpy(out.data() + at + g.head_len, gfd_resident.data() + g.prog_at, g.prog_len);
+    } else {
+        wiiu::romfs_begin();
+        const bool head_seek = fseek(gfd_file, g.head_at, SEEK_SET) == 0;
+        const size_t a = head_seek ? fread(out.data() + at, 1, g.head_len, gfd_file) : 0;
+        const bool prog_seek = fseek(gfd_file, g.prog_at, SEEK_SET) == 0;
+        const size_t b = prog_seek ? fread(out.data() + at + g.head_len, 1, g.prog_len, gfd_file) : 0;
+        wiiu::romfs_end();
+        if (a != g.head_len || b != g.prog_len) FATAL("shaders.gsh could not be read\n");
+    }
     for (size_t blk : {at, at + g.head_len})
         for (int k = 0; k < 8; k++) out[blk + 24 + k] = 0;  // block id and index: 0
     out.insert(out.end(), gfd_end.begin(), gfd_end.end());
@@ -368,11 +380,55 @@ GX2VertexShader *load_vs(u32 index) {
 }
 GX2PixelShader *load_ps(u32 index) {
     wiiu::last_ps = index;
+    if (index & EXTRA_PS_INDEX) {
+        GX2PixelShader *shader = WHBGfxLoadGFDPixelShader(index & ~EXTRA_PS_INDEX, extra_ps_gsh);
+        if (!shader) FATAL("cannot load extra pixel shader %u\n", index);
+        return shader;
+    }
     if (index >= gfd_ps.size()) FATAL("no pixel shader %u\n", index);
     std::vector<u8> one = gfd_one(gfd_ps[index]);
     GX2PixelShader *s = WHBGfxLoadGFDPixelShader(0, one.data());
     if (!s) FATAL("cannot load pixel shader %u\n", index);
     return s;
+}
+
+// An optional developer pack in the save directory adds previously missed pixel
+// shaders by key, while the bundle remains the source of the original tables.
+void load_extra_pixel_shaders() {
+    const std::string path = wiiu::data_dir() + "/extra-pixel-shaders.bin";
+    FILE *file = fopen(path.c_str(), "rb");
+    if (!file)
+        return;
+    u32 header[3];
+    std::array<u64, 1024> keys;
+    if (fread(header, sizeof(u32), 3, file) != 3 || header[0] != 0x4D505331 ||
+        !header[1] || header[1] > keys.size() || header[2] < 32 || header[2] > (16u << 20) ||
+        fread(keys.data(), sizeof(u64), header[1], file) != header[1]) {
+        fclose(file);
+        OSReport("[3dii-u shader] extra pixel shader pack has an invalid header\n");
+        return;
+    }
+    void *pack = memalign(64, header[2]);
+    const bool valid = pack && fread(pack, 1, header[2], file) == header[2] &&
+                       memcmp(pack, "Gfx2", 4) == 0 && fgetc(file) == EOF;
+    fclose(file);
+    if (!valid) {
+        free(pack);
+        OSReport("[3dii-u shader] extra pixel shader pack could not be read\n");
+        return;
+    }
+    gfd_index::Index parsed;
+    const char *error = gfd_index::scan((const u8 *)pack, header[2], parsed);
+    if (error || parsed.ps.size() != header[1]) {
+        OSReport("[3dii-u shader] ignoring extra shader pack: %s\n", error ? error : "pixel shader count mismatch");
+        free(pack);
+        return;
+    }
+    extra_ps_gsh = pack;
+    u32 added = 0;
+    for (u32 i = 0; i < header[1]; ++i)
+        added += ps_table.try_emplace(keys[i], PsEntry{nullptr, EXTRA_PS_INDEX | i}).second;
+    OSReport("[3dii-u shader] added %u precompiled pixel shaders\n", added);
 }
 
 void load_shader_tables() {
@@ -383,13 +439,25 @@ void load_shader_tables() {
         std::vector<u8> file = read_whole("fs:/vol/content/shaders.gsh", 0);
         if (file.empty()) FATAL("shaders.gsh is missing\n");
         gfd_scan(file.data(), (u32)file.size());
-    }  // and the memory goes back
-    gfd_file = fopen("fs:/vol/content/shaders.gsh", "rb");
-    if (!gfd_file) FATAL("shaders.gsh is missing\n");
+        if (file.size() <= GFD_RESIDENT_LIMIT) gfd_resident = std::move(file);
+    }
+    if (gfd_resident.empty()) {
+        gfd_file = fopen("fs:/vol/content/shaders.gsh", "rb");
+        if (!gfd_file) FATAL("shaders.gsh is missing\n");
+        OSReport("[3dii-u shader] large pack uses streamed reads\n");
+    } else {
+        OSReport("[3dii-u shader] resident pack: %u bytes; no shader file seeks during drawing\n", (u32)gfd_resident.size());
+    }
     if (idx.size() < sizeof(ShaderIndexHeader)) FATAL("shaders.idx is missing\n");
     const auto *h = (const ShaderIndexHeader *)idx.data();
     if (h->magic != kShaderIndexMagic || h->version != kShaderIndexVersion) FATAL("shaders.idx is the wrong version\n");
+    if (!gfd_index::table_fits(idx.size(), sizeof(*h), sizeof(ShaderIndexEntry), h->num_ps, h->num_vs))
+        FATAL("shaders.idx has a truncated entry table\n");
     const auto *e = (const ShaderIndexEntry *)(h + 1);
+    for (u32 i = 0; i < h->num_ps; ++i)
+        if (e[i].index >= gfd_ps.size()) FATAL("shaders.idx pixel index %u is out of range\n", e[i].index);
+    for (u32 i = 0; i < h->num_vs; ++i)
+        if (e[h->num_ps + i].index >= gfd_vs.size()) FATAL("shaders.idx vertex index %u is out of range\n", e[h->num_ps + i].index);
     for (u32 i = 0; i < h->num_ps; i++, e++) ps_table[(u64)e->key_hi << 32 | e->key_lo].index = e->index;
     for (u32 i = 0; i < h->num_vs; i++, e++) {
         VsEntry &v = vs_table[(u64)e->key_hi << 32 | e->key_lo];
@@ -399,6 +467,9 @@ void load_shader_tables() {
     vs_passthrough = load_vs(h->passthrough_vs);
     vs_blit = load_vs(h->blit_vs);
     ps_blit = load_ps(h->blit_ps);
+    const auto depth_copy = ps_table.find(fnv64(kDepthCopyKey, strlen(kDepthCopyKey)));
+    if (depth_copy != ps_table.end()) ps_depth_copy = load_ps(depth_copy->second.index);
+    if (h->pad >= gfd_ps.size() || gfd_ps.size() - h->pad < 2) FATAL("shaders.idx fallback indices are out of range\n");
     ps_fallback = load_ps(h->pad);
     ps_fallback_tex = load_ps(h->pad + 1);
     const auto uber = ps_table.find(fnv64(kUberKey, strlen(kUberKey)));
@@ -418,7 +489,8 @@ void load_shader_tables() {
             if (const auto it = ps_table.find(fnv64(k.data(), k.size())); it != ps_table.end()) ps_decode[fmt] = load_ps(it->second.index);
         }
     }
-    LOG("[gx2] %u fragment and %u vertex shaders available\n", h->num_ps, h->num_vs);
+    load_extra_pixel_shaders();
+    LOG("[gx2] %u fragment and %u vertex shader keys available\n", (u32)ps_table.size(), h->num_vs);
 }
 
 // find_ps's memory of states seen, cleared when the console compiles a shader (gfx_pump)
@@ -746,6 +818,9 @@ int start_resolution = 720;  // settings.ini's resolution as this start took it:
 // vw, vh: the viewport of the draw a target is made for, when there is one
 void rt_scale(u32 w, u32 h, float &sx, float &sy, u32 vw = 0, u32 vh = 0) {
     sx = sy = 1;
+    // Cave Story 3D's pixel-aligned UI and transition strips develop seams
+    // when rasterized into enlarged targets.
+    if (g_game.program_id == 0x000400000004a100ULL) return;
     // 256 and 512 wide, and 416 tall: some games draw a little more than the screen and crop it in the display transfer
     const u32 shown = w == 256 ? 240 : w == 512 ? 480 : w;
     if ((h == 400 || h == 416) && (shown == 240 || shown == 480)) {
@@ -824,9 +899,16 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         f.mipLevels = 1;
         // 24 bits of fixed point, as the PICA's depth buffer, not the usual 24-bit float: that has a 20-bit mantissa, so from the middle of the range out two depths a few
         // PICA steps apart are the same to it, and a floor mat drawn after the characters standing on it covered them on the console. Cemu's host GPU had kept them apart.
-        f.format = GX2_SURFACE_FORMAT_UNORM_R24_X8;
+        // Ever Oasis samples depth for its focus mask and uses stencil to
+        // clip effects in dialogue. Plain R32 fixed the sampled depth but
+        // lost stencil, exposing an opaque rectangular effect. GX2's legacy
+        // FLOAT_X8_X24 name is the 64-bit D32_FLOAT_S8_X24 format (0x81c):
+        // retain R32's 24-bit mantissa and the stencil channel together.
+        const bool sampleable_depth = fmt == 3 && g_game.program_id == 0x00040000001a4800ULL;
+        f.format = sampleable_depth ? GX2_SURFACE_FORMAT_FLOAT_X8_X24 : GX2_SURFACE_FORMAT_UNORM_R24_X8;
         f.aa = GX2_AA_MODE1X;
-        f.use = GX2_SURFACE_USE_DEPTH_BUFFER;
+        f.use = sampleable_depth ? (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE)
+                                 : GX2_SURFACE_USE_DEPTH_BUFFER;
         f.tileMode = GX2_TILE_MODE_DEFAULT;
         s->db.viewNumSlices = 1;
         s->db.depthClear = 1.0f;
@@ -1000,13 +1082,13 @@ const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 k
         if (e.addr == addr && e.size == size && e.buf && (now - e.checked < kVtxRecheck || hash_bytes(src, bytes) == e.hash)) {
             if (now - e.checked >= kVtxRecheck) e.checked = now;
             e.used = now;
-            if (kMeasure) st_vtx_hits++;
+            if (cpu_timing_enabled()) st_vtx_hits++;
             return e.buf;
         }
         vtx_retire(e);
         vtx_cache.erase(it);
     }
-    if (kMeasure) st_vtx_misses++;
+    if (cpu_timing_enabled()) st_vtx_misses++;
     void *buf = memalign(64, size + 64);
     if (!buf) {  // no room: this draw's own copy, as before
         void *w = ring_alloc(size + 64, 64);
@@ -1492,7 +1574,7 @@ void upload_texture(Tex &e, const u32 *rows = nullptr) {
         st_upload_bytes += e.bytes;
     }
     st_uploads++;
-    if (kMeasure) {
+    if (t0) {
         const u32 dt = (u32)(OSGetSystemTime() - t0);
         prof[P_TEXUP] += dt;
         st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
@@ -1512,9 +1594,14 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
     const u64 tkey = tex_key(addr, w, h, fmt, levels);
     if (auto hit = tex_index.find(tkey); hit != tex_index.end()) {
         Tex &e = *hit->second;
-        if (stale_check && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
+        // Brain Age's A4 handwriting canvas changes without a flush. The generic
+        // periodic check can delay the first stroke; check this canvas every flip.
+        const bool handwriting_canvas = g_game.program_id == 0x00040000000b3c00ULL
+            && w == 512 && h == 256 && fmt == 11 && levels == 1;
+        if ((stale_check || handwriting_canvas) && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale
+            && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
             static u32 logged;
-            if (logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
+            if (stale_check && logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
             e.maybe_dirty = true;
         }
         bool turn = false;
@@ -1916,7 +2003,13 @@ void send_state(const DrawState &ds, Surface &c, bool has_depth, bool stencil) {
     // At 4.5 times the 3DS's size every other 3DS pixel edge lands on the centre of a TV pixel, where two quads meeting at that edge can both leave the pixel to the other: the
     // console drew Dream Team's text boxes with a thin line where their pieces meet, and Cemu's GPU never did. A quarter of a pixel moves every edge off the centres.
     const float nudge = Sx != floorf(Sx) || Sy != floorf(Sy) ? 0.25f : 0.0f;
-    GX2SetViewport(ds.vp_x * Sx + nudge, ds.vp_y * Sy + c.row0 + nudge, 2 * ds.vp_hw * Sx, 2 * ds.vp_hh * Sy, 0.0f, 1.0f);
+    // Our vertex shaders already emit PICA depth in [0,1]. GX2's viewport
+    // helper always applies (far-near)/2 and (near+far)/2, even with HalfZ
+    // clipping enabled. Ever Oasis reads that depth back for its focus mask:
+    // the extra 0.5*z+0.5 made the background much blurrier than the 3DS.
+    // Validate this mapping on the depth-reading title before broadening it.
+    const float near_z = g_game.program_id == 0x00040000001a4800ULL ? -1.0f : 0.0f;
+    GX2SetViewport(ds.vp_x * Sx + nudge, ds.vp_y * Sy + c.row0 + nudge, 2 * ds.vp_hw * Sx, 2 * ds.vp_hh * Sy, near_z, 1.0f);
     if (ds.scissor_mode == 3) {
         const s32 x1 = std::clamp<s32>(ds.sc_x1, 0, c.w), x2 = std::clamp<s32>(ds.sc_x2, 0, c.w);
         const s32 y1 = std::clamp<s32>(ds.sc_y1, 0, c.h), y2 = std::clamp<s32>(ds.sc_y2, 0, c.h);
@@ -2341,7 +2434,85 @@ void decode_textures_first(const DrawState &ds) {
     }
 }
 
-void begin_draw_common(const DrawState &ds, GX2PixelShader *ps) {
+// Sample one frame every 30 presents. Only the card thread emits the trace.
+constexpr u32 DRAW_TRACE_INTERVAL = 30;
+constexpr u32 DRAW_TRACE_CAPACITY = 64;
+bool draw_trace_enabled;
+struct DrawTraceState {
+    u64 vs, fs;
+    u32 color, depth, width, height, depth_scale, depth_offset, flags, blend, color_mask;
+    u32 shader;
+    std::array<u32, 12> textures;
+    std::array<float, 4> viewport;
+    bool operator==(const DrawTraceState &) const = default;
+};
+struct DrawTraceFrame {
+    u64 frame;
+    u32 count, overflow;
+    std::array<DrawTraceState, DRAW_TRACE_CAPACITY> draws;
+};
+DrawTraceFrame draw_trace_current{}, draw_trace_ready{};
+std::mutex draw_trace_mutex;
+
+void trace_draw(const DrawState &ds, GX2PixelShader *ps, u64 vs) {
+    if (!draw_trace_enabled || st_flips % DRAW_TRACE_INTERVAL)
+        return;
+    u32 words[FS_KEY_WORDS];
+    const auto word_count = fs_key_words(ds, words);
+    const u64 key = fnv64(words, word_count * sizeof(u32));
+    u32 shader = MISSED;
+    if (ps == ps_uber) shader = MISSED - 1;
+    else if (ps == ps_uber_lit) shader = MISSED - 2;
+    else if (ps == ps_fallback_tex) shader = MISSED - 3;
+    else if (ps && ps != ps_fallback) {
+        auto entry = ps_table.find(key);
+        if (entry == ps_table.end() || entry->second.shader != ps) {
+            const std::string normal = fs_key(fs_normal(ds));
+            entry = ps_table.find(fnv64(normal.data(), normal.size()));
+        }
+        if (entry != ps_table.end() && entry->second.shader == ps)
+            shader = entry->second.index;
+        else
+            shader = MISSED - 4;  // a specialized shader with no matching table entry
+    }
+
+    u32 scale, offset;
+    memcpy(&scale, &ds.depth_scale, sizeof scale);
+    memcpy(&offset, &ds.depth_offset, sizeof offset);
+    const u32 flags = (u32)ds.wbuffer | (u32)ds.depth_test << 1 | (u32)ds.depth_write << 2 |
+                      (u32)ds.stencil << 3 | (u32)ds.alpha_test << 4 | (u32)ds.blend << 5 |
+                      (u32)ds.early_z << 6 | (u32)ds.depth_func << 8 | ds.depth_bits << 16;
+    const u32 blend = (u32)ds.eq_rgb | (u32)ds.eq_a << 4 | (u32)ds.sf_rgb << 8 |
+                      (u32)ds.df_rgb << 12 | (u32)ds.sf_a << 16 | (u32)ds.df_a << 20;
+    const DrawTraceState state{vs, key, ds.rt.color_addr, ds.rt.depth_addr, ds.rt.w, ds.rt.h,
+                              scale, offset, flags, blend, ds.color_mask, shader,
+                              {ds.tex[0].face_addr[0], ds.tex[0].w, ds.tex[0].h, ds.tex[0].fmt,
+                               ds.tex[1].face_addr[0], ds.tex[1].w, ds.tex[1].h, ds.tex[1].fmt,
+                               ds.tex[2].face_addr[0], ds.tex[2].w, ds.tex[2].h, ds.tex[2].fmt},
+                              {ds.vp_x, ds.vp_y, 2 * ds.vp_hw, 2 * ds.vp_hh}};
+    auto &frame = draw_trace_current;
+    for (u32 i = 0; i < frame.count; ++i)
+        if (frame.draws[i] == state)
+            return;
+    if (frame.count == frame.draws.size()) {
+        ++frame.overflow;
+        return;
+    }
+    frame.draws[frame.count++] = state;
+}
+
+void publish_draw_trace() {
+    auto &frame = draw_trace_current;
+    if (!frame.count)
+        return;
+    frame.frame = st_flips;
+    if (std::unique_lock lock(draw_trace_mutex, std::try_to_lock); lock.owns_lock())
+        draw_trace_ready = frame;
+    frame.count = frame.overflow = 0;
+}
+
+void begin_draw_common(const DrawState &ds, GX2PixelShader *ps, u64 vs = 0) {
+    trace_draw(ds, ps, vs);
     if (state_lost) {
         GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
         state_lost = false;
@@ -2547,7 +2718,7 @@ bool gx2_draw(const Gx2Draw &d) {
     lap(P_BIND);
     GX2PixelShader *const ps = find_ps(ds);
     lap(P_PS);
-    begin_draw_common(ds, ps);
+    begin_draw_common(ds, ps, key);
     GX2SetVertexShader(vs.shader);
     if (d.outline_color) {
         // Both sides, pushed back by as much as the mesh's slope gives over the outline's width, plus enough to cover two shaders rounding
@@ -2702,7 +2873,7 @@ bool gx2_draw(const Gx2Draw &d) {
                 // In steps of a multiple of 4 bytes, which is all a real GPU takes (vertex_arrays.h). The copy is kept (vtx_cached) until the game says it
                 // wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices, and copying each draw's arrays again took 20 to 50 MB a frame.
                 const u32 count = maxv - minv + 1, bytes = gpu_array_bytes(x, count), step = gpu_stride(x.stride);
-                if (kMeasure) {  // for the [prof] lines
+                if (cpu_timing_enabled()) {  // for the [prof] lines
                     st_attr_verts += count;
                     st_attr_bytes += bytes;
                     st_attr_streams++;
@@ -2740,7 +2911,7 @@ bool gx2_draw(const Gx2Draw &d) {
             // rather than depending on how each GPU path fetches little-endian integers. Only floats are read in place.
             const u32 stride = at->elems * 4;
             const u32 count = maxv - minv + 1;
-            if (kMeasure) {  // for the [prof] lines
+            if (cpu_timing_enabled()) {  // for the [prof] lines
                 st_attr_verts += count;
                 st_attr_bytes += (u64)count * at->stride;
                 st_attr_streams++;
@@ -2788,7 +2959,7 @@ bool gx2_draw(const Gx2Draw &d) {
         {
             // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later (see gx2_finish_list).
             const u32 elems = at->elems, stride = (elems == 1 ? 2 : elems) * 4, count = maxv - minv + 1, src_stride = at->stride;
-            if (kMeasure) {  // for the [prof] lines
+            if (cpu_timing_enabled()) {  // for the [prof] lines
                 st_attr_verts += count;
                 st_attr_bytes += (u64)count * src_stride;
                 st_attr_streams++;
@@ -3391,14 +3562,16 @@ void to_screen(GX2ColorBuffer *from, GX2ScanTarget target) {
 
 // Render targets a game made and stopped using (a course or a scene left behind) are freed. Kept for good, Mario Kart 7 had 88 after three
 // races where it began with 21, each holding its GPU memory (fast memory filled, and later targets went to slow memory), and every walk of the
-// list took longer: games slowed the longer they were played. One unused for kForgetAfter presents goes, what the GPU drew there that memory
-// lacks written back first, so nothing the game may still read is lost. One a present, as a write back waits for the GPU.
+// list took longer: games slowed the longer they were played. Only synchronized colour targets may be retired: an idle timeout does not
+// mean the game still owns their old guest addresses. Brain Age reuses a target's memory for a layout archive; writing its old pixels back
+// during eviction overwrote that archive. Keep unsynchronized colour targets until an explicit readback makes them safe to retire. This
+// retains their GPU contents for legitimate later reads without an unsolicited write into reused guest memory. Retire at most one a present.
 void forget_unused() {
     constexpr u64 kForgetAfter = 1800;  // presents: half a minute at 60, a minute at 30
     for (auto it = surfaces.begin(); it != surfaces.end(); ++it) {
         Surface &s = **it;
         if (s.last_use + kForgetAfter > use_counter || &s == cur_color || &s == cur_depth || s.in_list || s.shared_depth) continue;
-        if (!s.depth && s.gpu_newer && !s.guest_newer) write_back(s);
+        if (!s.depth && s.gpu_newer) continue;
         if (void *image = s.image()) {
             if (!s.mem1) free(image);
             else if (GfxHeapFreeMEM1) GfxHeapFreeMEM1(image);
@@ -3412,8 +3585,35 @@ void forget_unused() {
 
 void draw_fps();  // the frame rate counter (below, beside the text it draws)
 
+// Two clock reads per present, independent of the expensive draw timers. Average
+// FPS alone hides a movie alternating normal frames and 15 FPS stretches. These
+// disjoint gap buckets remain in the PC runtime log without taking screenshots.
+static void report_frame_pacing(OSTime began) {
+    static OSTime previous, start;
+    static u32 buckets[6], count, longest;
+    const OSTime now = OSGetSystemTime();
+    if (!previous) { previous = start = now; return; }
+    const u32 gap = (u32)OSTicksToMicroseconds(now - previous);
+    if (gap > 50000)
+        LOG("[pace-gap] gap %u us; before present %u us; present %u us\n", gap,
+            (u32)OSTicksToMicroseconds(began - previous), (u32)OSTicksToMicroseconds(now - began));
+    previous = now;
+    longest = std::max(longest, gap);
+    const u32 bucket = gap <= 20000 ? 0 : gap <= 35000 ? 1 : gap <= 50000 ? 2 : gap <= 67000 ? 3 : gap <= 100000 ? 4 : 5;
+    buckets[bucket]++;
+    count++;
+    if (now - start < OSSecondsToTicks(2)) return;
+    LOG("[pace] %u frames in %u ms; max gap %u us; gaps <=20/35/50/67/100/>100 ms: %u %u %u %u %u %u\n",
+        count, (u32)OSTicksToMilliseconds(now - start), longest,
+        buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5]);
+    start = now;
+    count = longest = 0;
+    memset(buckets, 0, sizeof buckets);
+}
+
 void present() {
-    const OSTime tp = prof_now();
+    const OSTime pacing_begin = OSGetSystemTime();
+    const OSTime tp = cpu_timing_enabled() ? pacing_begin : 0;
     gt_mark(GT_PRESENT, 0);
     if (dump_enabled && st_flips % 120 == 0) {
         dump_surface(tv_cb->surface, (wiiu::data_dir() + "/tv.ppm").c_str(), 2);
@@ -3455,7 +3655,9 @@ void present() {
     GX2Flush();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(TRUE);
+    publish_draw_trace();
     st_flips++;
+    if (st_flips == 1) OSReport("[3dii-u startup] first GPU present submitted\n");
     use_counter++;
     turn_budget = TURN_BYTES;
     forget_unused();
@@ -3464,6 +3666,7 @@ void present() {
     dyn_res_update();
     vtx_cache_flip();
     prof_add(P_PRESENT, tp);
+    report_frame_pacing(pacing_begin);
 }
 
 bool screen_fresh;
@@ -3680,6 +3883,7 @@ struct LastTransfer {
 // waits for the GPU, and an upload. The texture's bytes aren't in guest memory then: a lookup there of another size or format than the
 // transfer's reads what was there before, and what the game puts there later counts as newer (Surface::copy).
 static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags) {
+    gx2_flush_cpu_batch();
     gt_mark(GT_TRANSFER, out_paddr);
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w0 = out_dims & 0xffff, out_h0 = out_dims >> 16;
     const u32 scaling = (flags >> 24) & 3;
@@ -3691,13 +3895,22 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     const bool own_size = sy <= 1 && (flags & 0x22) == 0x20 && out_paddr >= mem::VRAM_PADDR && out_paddr < mem::VRAM_PADDR + mem::VRAM_SIZE;
     if ((flip && crop) || in_w < out_w0 || in_h < out_h0) return false;
     Surface *src = nullptr;
+    // Ever Oasis copies D24S8 as RGBA8 for its focus mask. Guest memory
+    // contains the clear value, not the GPU's depth; a CPU transfer therefore
+    // blurs the whole scene. Keep this experimental path limited to the
+    // observed title/format until stencil-preserving transfers are supported.
+    const bool depth_copy = ps_depth_copy && g_game.program_id == 0x00040000001a4800ULL
+        && (flags & 0x7722) == 0x20;
     for (auto &x : surfaces)
-        if (!x->depth && x->addr == in_paddr && x->w == in_w && x->h == in_h && !x->guest_newer &&
+        if ((!x->depth || (depth_copy && x->fmt == 3)) && x->addr == in_paddr && x->w == in_w && x->h == in_h && !x->guest_newer &&
             (x->sy > 1 || x->gpu_chain || (own_size && x->gpu_newer)))
             src = x.get();
     if (!src) return false;
     used(*src);
-    const bool own_size_copy = own_size && src->sy <= 1 && !src->gpu_chain;
+    // A small destination still accepts a downsample of an enlarged source.
+    // Requiring the source to be 1:1 rejected every such effect pass and
+    // forced a GPU readback followed by a CPU conversion and texture upload.
+    const bool own_size_copy = own_size && !src->gpu_chain;
     if (sy <= 1 && !src->gpu_chain && !own_size_copy) return false;
     // Neither bit 1 (linear in) nor bit 5 (left tiled): the picture lands in memory row by row, for whatever reads its bytes. Paper Mario's goes on to another
     // transfer here on the GPU; Luigi's Mansion 2's top screen halves go to texture copies into its LCD buffer, which read them back, and tiled they came out black.
@@ -3713,11 +3926,37 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     if (notes++ < 2) wiiu::note("copying surface %08x to %08x on the GPU", in_paddr, out_paddr);
     st_gpu_copies++;
     gx2_flush_cpu_batch();
+    // The copied window can be shorter than its power-of-two texture.
+    // Initialize the untouched rows too: real MEM2 allocations are not zeroed,
+    // and Ever Oasis's blur/bloom samples otherwise spread stale padding into
+    // the foreground. The other GPU texture-copy paths do this as well.
+    if (dst->first_use) {
+        dst->first_use = false;
+        GX2ClearColor(&dst->cb, 0, 0, 0, 0);
+        restore_context();
+    }
     flush_surface(*src);
-    GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, src->tex.surface.image, src->tex.surface.imageSize);
+    if (!src->depth) GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, src->tex.surface.image, src->tex.surface.imageSize);
     GX2SetColorBuffer(&dst->cb, GX2_RENDER_TARGET_0);
     cur_color = nullptr;
     begin_blit();
+    GX2Texture depth_tex;
+    if (src->depth) {
+        memset(&depth_tex, 0, sizeof depth_tex);
+        depth_tex.surface = src->db.surface;
+        depth_tex.surface.use = (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE);
+        depth_tex.viewNumMips = depth_tex.viewNumSlices = 1;
+        depth_tex.compMap = 0x00010203;
+        GX2InitTextureRegs(&depth_tex);
+        GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, depth_tex.surface.image, depth_tex.surface.imageSize);
+        GX2SetPixelShader(ps_depth_copy);
+        auto *u = (u32 *)ring_alloc(256, 256);
+        memset(u, 0, 256);
+        u[0] = swap_float(scaling ? 0.5f / in_w : 0.0f);
+        u[1] = swap_float(scaling == 2 ? 0.5f / src->tex_h : 0.0f);
+        GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_UNIFORM_BLOCK), u, 32);
+        GX2SetPixelUniformBlock(0, 32, u);
+    }
     GX2SetViewport(0, (float)dst->row0, (float)dst->sw, (float)(dst->sh - dst->row0), 0, 1);
     GX2SetScissor(0, dst->row0, dst->sw, dst->sh - dst->row0);
     float *q = (float *)ring_alloc(4 * 16 + 64, 64);
@@ -3728,8 +3967,8 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     memcpy(q, data, sizeof data);
     DCFlushRange(q, sizeof data);
     GX2SetAttribBuffer(0, sizeof data, 16, q);
-    GX2SetPixelTexture(&src->tex, 0);
-    GX2SetPixelSampler(&blit_sampler, 0);
+    GX2SetPixelTexture(src->depth ? &depth_tex : &src->tex, 0);
+    GX2SetPixelSampler(src->depth ? &lut_sampler : &blit_sampler, 0);
     GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
     state_lost = true;
     dst->gpu_newer = true;
@@ -4316,6 +4555,7 @@ static void relieve_mem1() {
 }
 
 void gfx_thread_init() {
+    OSReport("[3dii-u startup] initializing GX2\n");
     int_floats.fill();
     WHBGfxInit();
     free_whb_depth();
@@ -4334,7 +4574,9 @@ void gfx_thread_init() {
     drc_cb = WHBGfxGetDRCColourBuffer();
     tv_720 = tv_to_720();
     tv_buffer_to_mem2();
+    OSReport("[3dii-u startup] loading shader tables\n");
     load_shader_tables();
+    OSReport("[3dii-u startup] shader tables loaded\n");
     load_pad_bezel();
     shader_compile_init();  // what the set lacks, the console compiles as it goes
     vs_ubo_loc = vs_passthrough->uniformBlockCount ? vs_passthrough->uniformBlocks[0].offset : 0;
@@ -4370,6 +4612,10 @@ void gfx_thread_init() {
     GX2ClearColor(drc_cb, 0, 0, 0, 1);
     restore_context();
     wiiu::fs_begin(0xC006);
+    draw_trace_enabled = wiiu::debug_flag("drawtrace");
+    if (draw_trace_enabled)
+        OSReport("[3dii-u draw] enabled: one frame per %u presents, up to %u distinct states\n",
+                 DRAW_TRACE_INTERVAL, DRAW_TRACE_CAPACITY);
     if (wiiu::debug_flag("dump")) dump_enabled = true;
     if (wiiu::debug_flag("cpuvs")) gxt_cpu_vs = true;
     if (wiiu::debug_flag("cputex")) gxt_cpu_tex = true;
@@ -4412,6 +4658,31 @@ void gfx_thread_init() {
 }
 
 bool gfx_ready() { return gfx_is_ready; }
+
+void gfx_report_draw_trace() {
+    DrawTraceFrame frame;
+    {
+        std::lock_guard lock(draw_trace_mutex);
+        if (!draw_trace_ready.count)
+            return;
+        frame = draw_trace_ready;
+        draw_trace_ready.count = 0;
+    }
+    OSReport("[3dii-u draw] frame=%llu states=%u omitted_draws=%u\n",
+             (unsigned long long)frame.frame, frame.count, frame.overflow);
+    for (u32 i = 0; i < frame.count; ++i) {
+        const auto &d = frame.draws[i];
+        OSReport("[3dii-u draw] %u vs=%016llx fs=%016llx ps=%08x rt=%08x/%08x %ux%u depth=%08x/%08x flags=%06x blend=%06x mask=%08x\n",
+                 i, (unsigned long long)d.vs, (unsigned long long)d.fs, d.shader,
+                 d.color, d.depth, d.width, d.height, d.depth_scale, d.depth_offset,
+                 d.flags, d.blend, d.color_mask);
+        OSReport("[3dii-u draw] %u viewport=%.1f,%.1f,%.1f,%.1f tex0=%08x/%ux%u/%u tex1=%08x/%ux%u/%u tex2=%08x/%ux%u/%u\n",
+                 i, d.viewport[0], d.viewport[1], d.viewport[2], d.viewport[3],
+                 d.textures[0], d.textures[1], d.textures[2], d.textures[3],
+                 d.textures[4], d.textures[5], d.textures[6], d.textures[7],
+                 d.textures[8], d.textures[9], d.textures[10], d.textures[11]);
+    }
+}
 
 void gfx_take_misses(std::vector<u8> &out) {
     std::lock_guard<std::mutex> lk(miss_m);
@@ -4830,6 +5101,27 @@ static void show_lcd_from_memory() {
 
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {
+    if (av_timing_enabled()) {
+        static OSTime since;
+        static u32 polls, blanks, idle, held;
+        static u32 pictures[2];
+        const OSTime now = OSGetSystemTime();
+        ++polls;
+        blanks += vblank_pending ? 1 : 0;
+        idle += quiet ? 1 : 0;
+        held += present_rule.fresh && present_rule.on_swaps() && !present_rule.swapped_drawn() ? 1 : 0;
+        if (!since) since = now;
+        if (now - since >= OSSecondsToTicks(2)) {
+            LOG("[present-time] polls %u vblanks %u quiet %u held %u pictures %u/%u fresh %x frame %x swap_due %x since_swap %u\n",
+                polls, blanks, idle, held,
+                st_pictures[0] >= pictures[0] ? st_pictures[0] - pictures[0] : st_pictures[0],
+                st_pictures[1] >= pictures[1] ? st_pictures[1] - pictures[1] : st_pictures[1],
+                present_rule.fresh, present_rule.frame, present_rule.swap_due, present_rule.since_swap);
+            pictures[0] = st_pictures[0]; pictures[1] = st_pictures[1];
+            polls = blanks = idle = held = 0;
+            since = now;
+        }
+    }
     if (!vblank_pending) {
         // the menu and the keyboard are drawn at a VBlank's look only, so while one is up nothing is shown in between
         if (!menu_is_open && !kb_active && present_rule.between(quiet)) {
@@ -4917,6 +5209,8 @@ bool gfx_set(const char *name, u32 v) {
         uber_fallback = v;
         forget_ps = true;
     } else if (!strcmp(name, "cpuvs")) gxt_cpu_vs = v;
+    else if (!strcmp(name, "cpuattr") && v <= 15) gxt_cpu_attr = v;
+    else if (!strcmp(name, "drawtrace") && v <= 1) draw_trace_enabled = v;
     else if (!strcmp(name, "vtxcache")) {  // the vertex data cache (vtx_cached); off drops what it holds
         use_vtx_cache = v;
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
@@ -4925,7 +5219,11 @@ bool gfx_set(const char *name, u32 v) {
     else if (!strcmp(name, "halfss")) half_ss = v;  // a target its transfer scales down is drawn at the smaller size (note_downscaled); from the next one made
     else if (!strcmp(name, "capfps")) cap_fps = v;  // the game's frames a second (frame_cap_wait); 0 for as fast as it goes
     else if (!strcmp(name, "gsshared")) g_gs_shared = v;  // geometry shader runs on two threads (vertex.cpp: gs_run_shared)
-    else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
+    else if (!strcmp(name, "cputime") && v <= 1) g_cpu_timing.store(v != 0, std::memory_order_relaxed);
+    else if (!strcmp(name, "gputime")) {  // the GPU's own time per pass (gt_mark), in the [prof] lines
+        gt_on = v;
+        live_gpu_timing.store(v != 0, std::memory_order_relaxed);
+    }
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
     else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way
@@ -4975,6 +5273,17 @@ static void write_report() {
         (list_ns - last_list_ns) / 1e6 / flips, ms(P_PRESENT), ms(P_WAIT), ms(P_SYNC), st_syncs / flips, st_luts / flips, draws / flips, ds_built / flips, st_flushes / flips, st_rehashes / flips, (u32)textures.size());
     last_list_ns = list_ns;
     LOG("[prof] the game's pictures a second: top screen %.1f, bottom screen %.1f\n", st_pictures[0] / secs, st_pictures[1] / secs);
+    // Swap requests (Azahar's application-FPS counter), changed LCD buffers,
+    // and copied pictures are different events. Log them together before
+    // treating a 30-picture rate as 30 frames of guest execution.
+    static kernel::GspFrameStats previous_flow{};
+    const auto flow = kernel::gsp_frame_stats();
+    LOG("[frame-flow] per second: vblank %.1f; swap requests top %.1f bottom %.1f; buffer changes top %.1f bottom %.1f; copies top %.1f bottom %.1f; presents %.1f\n",
+        (u32)(flow.vblanks - previous_flow.vblanks) / secs,
+        (u32)(flow.requests[0] - previous_flow.requests[0]) / secs, (u32)(flow.requests[1] - previous_flow.requests[1]) / secs,
+        (u32)(flow.changes[0] - previous_flow.changes[0]) / secs, (u32)(flow.changes[1] - previous_flow.changes[1]) / secs,
+        st_pictures[0] / secs, st_pictures[1] / secs, fps);
+    previous_flow = flow;
     st_pictures[0] = st_pictures[1] = 0;
     {
         u64 surf = 0;

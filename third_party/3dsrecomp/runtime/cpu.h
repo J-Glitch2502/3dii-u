@@ -66,6 +66,7 @@ void rt_svc(CPU *c, u32 imm);
 // Set by the host when a thread with a higher priority than the running one became ready (an interrupt woke it):
 // generated code checks it on backward branches and calls rt_preempt, the way the 3DS kernel preempts a busy loop.
 extern volatile u32 rt_preempt_flag;
+extern u32 rt_bulk_copy_enabled;  // accessed with atomic builtins; a live performance trial switch
 void rt_preempt(CPU *c);
 void rt_undefined(CPU *c, u32 addr, u32 word);
 
@@ -165,9 +166,9 @@ static inline u32 uxtb16(u32 v) { return v & 0x00ff00ffu; }
 static inline u32 add16x(u32 a, u32 b) { return ((a + b) & 0xffff) | (((a >> 16) + (b >> 16)) << 16); }
 static inline u32 rev16(u32 v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
 static inline u32 sel(u32 n, u32 m, u32 ge) {
-    u32 r = 0;
-    for (int i = 0; i < 4; i++) r |= ((ge >> i) & 1 ? n : m) & (0xffu << (8 * i));
-    return r;
+    const u32 lanes = (ge & 1u) | ((ge & 2u) << 7) | ((ge & 4u) << 14) | ((ge & 8u) << 21);
+    const u32 mask = lanes * 255u;
+    return (n & mask) | (m & ~mask);
 }
 static inline u32 usad8(u32 a, u32 b) {
     u32 s = 0;
@@ -214,6 +215,31 @@ static inline u32 pas16(int kind, int op, u32 a, u32 b, u32 *ge) {
     return ((u32)r0 & 0xffff) | ((u32)r1 << 16);
 }
 static inline u32 pas8(int kind, int sub, u32 a, u32 b, u32 *ge) {
+    // Two independent byte lanes per word, with an unused byte between them.
+    // MobiClip's filters issue these operations repeatedly. Keeping carries
+    // in the guard bits avoids four scalar lane loops and saturation branches.
+    // ARM's unsigned saturating/halving instructions preserve both GE and Q.
+    if (kind >= 3) {
+        const u32 mask = 0x00ff00ffu, guard = 0x01000100u;
+        const u32 ae = a & mask, ao = (a >> 8) & mask;
+        const u32 be = b & mask, bo = (b >> 8) & mask;
+        u32 even = sub ? (ae | guard) - be : ae + be;
+        u32 odd = sub ? (ao | guard) - bo : ao + bo;
+        const u32 ec = even & guard, oc = odd & guard;
+        if (kind == 3) {
+            *ge = (ec >> 8 & 1u) | (ec >> 22 & 4u) | (oc >> 7 & 2u) | (oc >> 21 & 8u);
+        } else if (kind == 4) {
+            const u32 em = ec - (ec >> 8), om = oc - (oc >> 8);
+            if (sub) { even &= em; odd &= om; }
+            else { even |= em; odd |= om; }
+        } else {
+            // Subtraction's guard bit is the inverse of its ninth result bit.
+            if (sub) { even ^= guard; odd ^= guard; }
+            even >>= 1;
+            odd >>= 1;
+        }
+        return (even & mask) | ((odd & mask) << 8);
+    }
     int sgn = kind < 3;
     u32 out = 0;
     if (kind == 0 || kind == 3) *ge = 0;

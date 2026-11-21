@@ -448,7 +448,7 @@ int main(int argc, char **argv) {
     with open(cpath, 'w') as f:
         f.write('\n'.join(src))
     exe = os.path.join(tmp, 't')
-    subprocess.check_call(['clang', '-O1', '-w', '-ffp-contract=off', '-I', os.path.join(ROOT, 'runtime'), cpath, '-o', exe])
+    subprocess.check_call(['clang', '-O1', '-w', '-ffp-contract=off', '-I', os.path.join(ROOT, 'runtime'), cpath, '-o', exe, '-lm'])
     inp = os.path.join(tmp, 'in.bin')
     outp = os.path.join(tmp, 'out.bin')
     with open(inp, 'wb') as f:

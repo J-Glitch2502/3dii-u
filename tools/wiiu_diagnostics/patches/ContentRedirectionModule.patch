@@ -1,0 +1,915 @@
+diff --git a/src/FSAReplacements.cpp b/src/FSAReplacements.cpp
+index f095178..65715eb 100644
+--- a/src/FSAReplacements.cpp
++++ b/src/FSAReplacements.cpp
+@@ -1,14 +1,18 @@
++#include "flight_recorder.h"
+ #include "FSAReplacements.h"
+ #include "FileUtils.h"
+ #include "utils/logger.h"
+ #include <coreinit/core.h>
+ #include <coreinit/thread.h>
+-#include <malloc.h>
++#include <coreinit/memdefaultheap.h>
+ 
++// Preserve the installed title-default-heap allocation fix; do not regress to
++// the shared mapped heap for synchronous FSA temporary buffers.
+ static FSError processFSAShimInThread(FSAShimBuffer *shimBuffer) {
++    flight::Scope handoff(22, (uintptr_t)__builtin_return_address(0), (uint32_t)shimBuffer);
+     FSError res;
+     if (gThreadsRunning) {
+-        auto param = (FSShimWrapper *) malloc(sizeof(FSShimWrapper));
++        auto param = (FSShimWrapper *) MEMAllocFromDefaultHeapEx(sizeof(FSShimWrapper), 8);
+         if (param == nullptr) {
+             DEBUG_FUNCTION_LINE_ERR("Failed to allocate memory for FSShimWrapper");
+             OSFatal("ContentRedirectionModule: Failed to allocate memory for FSShimWrapper");
+@@ -22,7 +26,7 @@ static FSError processFSAShimInThread(FSAShimBuffer *shimBuffer) {
+             res = processShimBufferForFSA(param);
+             //No need to clean "param", it has been already free'd in processFSAShimBuffer.
+         } else {
+-            auto message = (FSShimWrapperMessage *) malloc(sizeof(FSShimWrapperMessage));
++            auto message = (FSShimWrapperMessage *) MEMAllocFromDefaultHeapEx(sizeof(FSShimWrapperMessage), 8);
+             if (message == nullptr) {
+                 DEBUG_FUNCTION_LINE_ERR("Failed to allocate memory for FSShimWrapperMessage");
+                 OSFatal("ContentRedirectionModule: Failed to allocate memory for FSShimWrapperMessage");
+@@ -46,7 +50,7 @@ static FSError processFSAShimInThread(FSAShimBuffer *shimBuffer) {
+             }
+             res = (FSError) recv.args[1];
+             // We only need to clean up "message". "param" has already been free'd by the other thread.
+-            free(message);
++            MEMFreeToDefaultHeap(message);
+         }
+     } else {
+         res = FS_ERROR_FORCE_REAL_FUNCTION;
+@@ -56,13 +60,20 @@ static FSError processFSAShimInThread(FSAShimBuffer *shimBuffer) {
+ }
+ 
+ DECL_FUNCTION(FSError, FSAOpenFileEx, FSAClientHandle client, const char *path, const char *mode, FSMode createMode, FSOpenFileFlags openFlag, uint32_t preallocSize, FSAFileHandle *handle) {
++    flight::Scope openTrace(20, (uintptr_t)__builtin_return_address(0), (uint32_t)client);
+     if (handle == nullptr) {
+         DEBUG_FUNCTION_LINE_WARN("handle is null.");
+         return FS_ERROR_INVALID_BUFFER;
+     }
+     *handle = -1;
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -70,7 +81,7 @@ DECL_FUNCTION(FSError, FSAOpenFileEx, FSAClientHandle client, const char *path,
+ 
+     auto res = fsaShimPrepareRequestOpenFile(shimBuffer, client, path, mode, createMode, openFlag, preallocSize);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestOpenFile failed");
+         return res;
+     }
+@@ -79,7 +90,7 @@ DECL_FUNCTION(FSError, FSAOpenFileEx, FSAClientHandle client, const char *path,
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) handle;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -90,13 +101,20 @@ DECL_FUNCTION(FSError, FSAOpenFileEx, FSAClientHandle client, const char *path,
+ }
+ 
+ DECL_FUNCTION(FSError, FSAOpenFile, FSAClientHandle client, const char *path, const char *mode, FSAFileHandle *handle) {
++    flight::Scope openTrace(20, (uintptr_t)__builtin_return_address(0), (uint32_t)client);
+     if (handle == nullptr) {
+         DEBUG_FUNCTION_LINE_WARN("handle is null.");
+         return FS_ERROR_INVALID_BUFFER;
+     }
+     *handle = -1;
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -104,7 +122,7 @@ DECL_FUNCTION(FSError, FSAOpenFile, FSAClientHandle client, const char *path, co
+ 
+     auto res = fsaShimPrepareRequestOpenFile(shimBuffer, client, path, mode, static_cast<FSMode>(0x660), static_cast<FSOpenFileFlags>(0), 0);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestOpenFile failed");
+         return res;
+     }
+@@ -113,7 +131,7 @@ DECL_FUNCTION(FSError, FSAOpenFile, FSAClientHandle client, const char *path, co
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) handle;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -124,7 +142,13 @@ DECL_FUNCTION(FSError, FSAOpenFile, FSAClientHandle client, const char *path, co
+ }
+ 
+ DECL_FUNCTION(FSError, FSACloseFile, FSAClientHandle client, FSAFileHandle handle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -132,12 +156,12 @@ DECL_FUNCTION(FSError, FSACloseFile, FSAClientHandle client, FSAFileHandle handl
+ 
+     auto res = fsaShimPrepareRequestCloseFile(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestCloseFile failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -148,7 +172,13 @@ DECL_FUNCTION(FSError, FSACloseFile, FSAClientHandle client, FSAFileHandle handl
+ }
+ 
+ DECL_FUNCTION(FSError, FSAFlushFile, FSAClientHandle client, FSAFileHandle handle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -156,12 +186,12 @@ DECL_FUNCTION(FSError, FSAFlushFile, FSAClientHandle client, FSAFileHandle handl
+ 
+     auto res = fsaShimPrepareRequestFlushFile(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestFlushFile failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -177,7 +207,13 @@ DECL_FUNCTION(FSError, FSAGetStat, FSAClientHandle client, const char *path, FSA
+         return FS_ERROR_INVALID_BUFFER;
+     }
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -185,7 +221,7 @@ DECL_FUNCTION(FSError, FSAGetStat, FSAClientHandle client, const char *path, FSA
+ 
+     auto res = fsaShimPrepareRequestQueryInfo(shimBuffer, client, path, FSA_QUERY_INFO_STAT);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+@@ -194,7 +230,7 @@ DECL_FUNCTION(FSError, FSAGetStat, FSAClientHandle client, const char *path, FSA
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) stat;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -210,7 +246,13 @@ DECL_FUNCTION(FSError, FSAGetStatFile, FSAClientHandle client, FSAFileHandle han
+         return FS_ERROR_INVALID_BUFFER;
+     }
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -218,7 +260,7 @@ DECL_FUNCTION(FSError, FSAGetStatFile, FSAClientHandle client, FSAFileHandle han
+ 
+     auto res = fsaShimPrepareRequestStatFile(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+@@ -227,7 +269,7 @@ DECL_FUNCTION(FSError, FSAGetStatFile, FSAClientHandle client, FSAFileHandle han
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) stat;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -243,7 +285,13 @@ DECL_FUNCTION(FSError, FSARemove, FSAClientHandle client, const char *path) {
+         return FS_ERROR_INVALID_PARAM;
+     }
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -251,12 +299,12 @@ DECL_FUNCTION(FSError, FSARemove, FSAClientHandle client, const char *path) {
+ 
+     auto res = fsaShimPrepareRequestRemove(shimBuffer, client, path);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -267,7 +315,13 @@ DECL_FUNCTION(FSError, FSARemove, FSAClientHandle client, const char *path) {
+ }
+ 
+ DECL_FUNCTION(FSError, FSARename, FSAClientHandle client, const char *oldPath, const char *newPath) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -275,12 +329,12 @@ DECL_FUNCTION(FSError, FSARename, FSAClientHandle client, const char *oldPath, c
+ 
+     auto res = fsaShimPrepareRequestRename(shimBuffer, client, oldPath, newPath);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -291,7 +345,13 @@ DECL_FUNCTION(FSError, FSARename, FSAClientHandle client, const char *oldPath, c
+ }
+ 
+ DECL_FUNCTION(FSError, FSASetPosFile, FSAClientHandle client, FSAFileHandle handle, FSAFilePosition pos) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -299,12 +359,12 @@ DECL_FUNCTION(FSError, FSASetPosFile, FSAClientHandle client, FSAFileHandle hand
+ 
+     auto res = fsaShimPrepareRequestSetPos(shimBuffer, client, handle, pos);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -315,7 +375,13 @@ DECL_FUNCTION(FSError, FSASetPosFile, FSAClientHandle client, FSAFileHandle hand
+ }
+ 
+ DECL_FUNCTION(FSError, FSATruncateFile, FSAClientHandle client, FSAFileHandle handle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -323,12 +389,12 @@ DECL_FUNCTION(FSError, FSATruncateFile, FSAClientHandle client, FSAFileHandle ha
+ 
+     auto res = fsaShimPrepareRequestTruncate(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -339,7 +405,13 @@ DECL_FUNCTION(FSError, FSATruncateFile, FSAClientHandle client, FSAFileHandle ha
+ }
+ 
+ DECL_FUNCTION(FSError, FSAReadFile, FSAClientHandle client, uint8_t *buffer, uint32_t size, uint32_t count, FSAFileHandle handle, uint32_t flags) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -347,12 +419,12 @@ DECL_FUNCTION(FSError, FSAReadFile, FSAClientHandle client, uint8_t *buffer, uin
+ 
+     auto res = fsaShimPrepareRequestReadFile(shimBuffer, client, buffer, size, count, 0, handle, static_cast<FSAReadFlag>(flags & 0xfffffffe));
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -363,7 +435,13 @@ DECL_FUNCTION(FSError, FSAReadFile, FSAClientHandle client, uint8_t *buffer, uin
+ }
+ 
+ DECL_FUNCTION(FSError, FSAReadFileWithPos, FSAClientHandle client, uint8_t *buffer, uint32_t size, uint32_t count, FSAFilePosition pos, FSAFileHandle handle, uint32_t flags) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -371,12 +449,12 @@ DECL_FUNCTION(FSError, FSAReadFileWithPos, FSAClientHandle client, uint8_t *buff
+ 
+     auto res = fsaShimPrepareRequestReadFile(shimBuffer, client, buffer, size, count, pos, handle, static_cast<FSAReadFlag>(flags | FSA_READ_FLAG_READ_WITH_POS));
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -387,7 +465,13 @@ DECL_FUNCTION(FSError, FSAReadFileWithPos, FSAClientHandle client, uint8_t *buff
+ }
+ 
+ DECL_FUNCTION(FSError, FSAWriteFile, FSAClientHandle client, const uint8_t *buffer, uint32_t size, uint32_t count, FSAFileHandle handle, uint32_t flags) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -395,12 +479,12 @@ DECL_FUNCTION(FSError, FSAWriteFile, FSAClientHandle client, const uint8_t *buff
+ 
+     auto res = fsaShimPrepareRequestWriteFile(shimBuffer, client, buffer, size, count, 0, handle, static_cast<FSAWriteFlag>(flags & 0xfffffffe));
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -411,7 +495,13 @@ DECL_FUNCTION(FSError, FSAWriteFile, FSAClientHandle client, const uint8_t *buff
+ }
+ 
+ DECL_FUNCTION(FSError, FSAWriteFileWithPos, FSAClientHandle client, uint8_t *buffer, uint32_t size, uint32_t count, FSAFilePosition pos, FSAFileHandle handle, uint32_t flags) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -419,12 +509,12 @@ DECL_FUNCTION(FSError, FSAWriteFileWithPos, FSAClientHandle client, uint8_t *buf
+ 
+     auto res = fsaShimPrepareRequestWriteFile(shimBuffer, client, buffer, size, count, pos, handle, static_cast<FSAWriteFlag>(flags | FSA_WRITE_FLAG_READ_WITH_POS));
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -440,7 +530,13 @@ DECL_FUNCTION(FSError, FSAGetPosFile, FSAClientHandle client, FSAFileHandle hand
+         return FS_ERROR_INVALID_BUFFER;
+     }
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -448,7 +544,7 @@ DECL_FUNCTION(FSError, FSAGetPosFile, FSAClientHandle client, FSAFileHandle hand
+ 
+     auto res = fsaShimPrepareRequestGetPos(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+@@ -457,7 +553,7 @@ DECL_FUNCTION(FSError, FSAGetPosFile, FSAClientHandle client, FSAFileHandle hand
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) outPos;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -468,7 +564,13 @@ DECL_FUNCTION(FSError, FSAGetPosFile, FSAClientHandle client, FSAFileHandle hand
+ }
+ 
+ DECL_FUNCTION(FSError, FSAIsEof, FSAClientHandle client, FSAFileHandle handle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -476,12 +578,12 @@ DECL_FUNCTION(FSError, FSAIsEof, FSAClientHandle client, FSAFileHandle handle) {
+ 
+     auto res = fsaShimPrepareRequestIsEof(shimBuffer, client, handle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -528,7 +630,13 @@ DECL_FUNCTION(FSError, FSAOpenDir, FSAClientHandle client, const char *path, FSA
+     }
+     *dirHandle = -1;
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -536,7 +644,7 @@ DECL_FUNCTION(FSError, FSAOpenDir, FSAClientHandle client, const char *path, FSA
+ 
+     auto res = fsaShimPrepareRequestOpenDir(shimBuffer, client, path);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+@@ -545,7 +653,7 @@ DECL_FUNCTION(FSError, FSAOpenDir, FSAClientHandle client, const char *path, FSA
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) dirHandle;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -561,7 +669,13 @@ DECL_FUNCTION(FSError, FSAReadDir, FSAClientHandle client, FSADirectoryHandle di
+         return FS_ERROR_INVALID_BUFFER;
+     }
+ 
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -569,7 +683,7 @@ DECL_FUNCTION(FSError, FSAReadDir, FSAClientHandle client, FSADirectoryHandle di
+ 
+     auto res = fsaShimPrepareRequestReadDir(shimBuffer, client, dirHandle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+@@ -578,7 +692,7 @@ DECL_FUNCTION(FSError, FSAReadDir, FSAClientHandle client, FSADirectoryHandle di
+     auto *hackyBuffer = (uint32_t *) &shimBuffer->response;
+     hackyBuffer[1]    = (uint32_t) directoryEntry;
+     res               = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -589,7 +703,13 @@ DECL_FUNCTION(FSError, FSAReadDir, FSAClientHandle client, FSADirectoryHandle di
+ }
+ 
+ DECL_FUNCTION(FSError, FSARewindDir, FSAClientHandle client, FSADirectoryHandle dirHandle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -597,12 +717,12 @@ DECL_FUNCTION(FSError, FSARewindDir, FSAClientHandle client, FSADirectoryHandle
+ 
+     auto res = fsaShimPrepareRequestRewindDir(shimBuffer, client, dirHandle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -613,7 +733,13 @@ DECL_FUNCTION(FSError, FSARewindDir, FSAClientHandle client, FSADirectoryHandle
+ }
+ 
+ DECL_FUNCTION(FSError, FSACloseDir, FSAClientHandle client, FSADirectoryHandle dirHandle) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -621,12 +747,12 @@ DECL_FUNCTION(FSError, FSACloseDir, FSAClientHandle client, FSADirectoryHandle d
+ 
+     auto res = fsaShimPrepareRequestCloseDir(shimBuffer, client, dirHandle);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -637,7 +763,13 @@ DECL_FUNCTION(FSError, FSACloseDir, FSAClientHandle client, FSADirectoryHandle d
+ }
+ 
+ DECL_FUNCTION(FSError, FSAMakeDir, FSAClientHandle client, const char *path, FSMode mode) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -645,12 +777,12 @@ DECL_FUNCTION(FSError, FSAMakeDir, FSAClientHandle client, const char *path, FSM
+ 
+     auto res = fsaShimPrepareRequestMakeDir(shimBuffer, client, path, mode);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -661,7 +793,13 @@ DECL_FUNCTION(FSError, FSAMakeDir, FSAClientHandle client, const char *path, FSM
+ }
+ 
+ DECL_FUNCTION(FSError, FSAChangeDir, FSAClientHandle client, const char *path) {
+-    auto *shimBuffer = (FSAShimBuffer *) memalign(0x20, sizeof(FSAShimBuffer));
++    FSAShimBuffer *shimBuffer;
++    {
++    flight::Scope allocation(24, (uintptr_t)__builtin_return_address(0), sizeof(FSAShimBuffer), 0x20);
++    shimBuffer = (FSAShimBuffer *) MEMAllocFromDefaultHeapEx(sizeof(FSAShimBuffer), 0x20);
++    allocation.result = (uint32_t)shimBuffer;
++    }
++    flight::record(26, 0, (uint32_t)shimBuffer, sizeof(FSAShimBuffer), 0);
+     if (!shimBuffer) {
+         DEBUG_FUNCTION_LINE_WARN("FS_ERROR_OUT_OF_RESOURCES");
+         return FS_ERROR_OUT_OF_RESOURCES;
+@@ -669,12 +807,12 @@ DECL_FUNCTION(FSError, FSAChangeDir, FSAClientHandle client, const char *path) {
+ 
+     auto res = fsaShimPrepareRequestChangeDir(shimBuffer, client, path);
+     if (res != FS_ERROR_OK) {
+-        free(shimBuffer);
++        MEMFreeToDefaultHeap(shimBuffer);
+         DEBUG_FUNCTION_LINE_WARN("fsaShimPrepareRequestQueryInfo failed");
+         return res;
+     }
+     res = processFSAShimInThread(shimBuffer);
+-    free(shimBuffer);
++    MEMFreeToDefaultHeap(shimBuffer);
+     if (res != FS_ERROR_FORCE_REAL_FUNCTION) {
+         return res;
+     }
+@@ -727,6 +865,6 @@ FSError processShimBufferForFSA(FSShimWrapper *param) {
+             OSFatal("ContentRedirectionModule: ASYNC FSA API is not supported");
+         }
+     }
+-    free(param);
++    MEMFreeToDefaultHeap(param);
+     return res;
+ }
+\ No newline at end of file
+diff --git a/src/FileUtils.cpp b/src/FileUtils.cpp
+index f678b4d..59cf764 100644
+--- a/src/FileUtils.cpp
++++ b/src/FileUtils.cpp
+@@ -536,7 +536,7 @@ void startFSIOThreads() {
+ 
+         OSMemoryBarrier();
+ 
+-        if (!OSCreateThread(threadData->thread, &fsIOthreadCallback, 1, (char *) threadData, reinterpret_cast<void *>((uint32_t) threadData->stack + stackSize), stackSize, 0, core)) {
++        if (!OSCreateThread(threadData->thread, (OSThreadEntryPointFn)&fsIOthreadCallback, 1, (char *) threadData, reinterpret_cast<void *>((uint32_t) threadData->stack + stackSize), stackSize, 0, core)) {
+             free(threadData->thread);
+             free(threadData->stack);
+             threadData->setup = false;
+diff --git a/src/main.cpp b/src/main.cpp
+index 594de05..ce47f70 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,3 +1,4 @@
++#include "flight_recorder.h"
+ #include "FSAReplacements.h"
+ #include "FSReplacements.h"
+ #include "FileUtils.h"
+@@ -50,6 +51,7 @@ WUMS_INITIALIZE() {
+ }
+ 
+ WUMS_APPLICATION_STARTS() {
++    flight::start();
+     OSReport("Running ContentRedirectionModule " VERSION VERSION_EXTRA "\n");
+     initLogging();
+     startFSIOThreads();
+@@ -59,6 +61,7 @@ WUMS_APPLICATION_ENDS() {
+     clearFSLayer();
+ 
+     stopFSIOThreads();
++    flight::stop();
+ 
+     deinitLogging();
+ }
+diff --git a/src/version.h b/src/version.h
+index 66a2c7e..8329535 100644
+--- a/src/version.h
++++ b/src/version.h
+@@ -1,2 +1,2 @@
+ #pragma once
+-#define VERSION_EXTRA ""
+\ No newline at end of file
++#define VERSION_EXTRA " +AFR3-drain"
+\ No newline at end of file
+diff --git a/src/flight_recorder.h b/src/flight_recorder.h
+new file mode 100644
+index 0000000..f2e252a
+--- /dev/null
++++ b/src/flight_recorder.h
+@@ -0,0 +1,114 @@
++#define FLIGHT_MODULE "FS"
++#pragma once
++// Diagnostic-only recorder. Producers never allocate, print, access files or wait
++// for another core. Only the independent drain thread calls OSReport.
++#include <stdint.h>
++#ifndef FLIGHT_HOST_TEST
++#include <coreinit/core.h>
++#include <coreinit/thread.h>
++#include <coreinit/time.h>
++#include <coreinit/interrupts.h>
++#include <coreinit/debug.h>
++#endif
++namespace flight_fs {
++constexpr uint32_t Capacity = 256, Words = 10;
++struct alignas(64) Ring { uint32_t head; uint32_t slot[Capacity][Words]; };
++inline Ring rings[3]{};
++inline uint32_t enabled = 0;
++#ifndef FLIGHT_HOST_TEST
++inline OSThread thread;
++#endif
++inline uint32_t load(const uint32_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
++inline void store(uint32_t *p, uint32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
++inline uint32_t record(uint32_t event, uint32_t caller, uint32_t a, uint32_t b, uint32_t c, uint32_t token = 0) {
++    if (!load(&enabled)) return 0;
++    #ifndef FLIGHT_HOST_TEST
++    if (OSGetCurrentThread() == &thread) return 0; // Avoid tracing the drain's own logger activity.
++#endif
++    const auto irq = OSDisableInterrupts();
++    const uint32_t core = OSGetCoreId();
++    if (core > 2) { OSRestoreInterrupts(irq); return 0; }
++    auto &r = rings[core];
++    const uint32_t seq = load(&r.head) + 1;
++    auto *s = r.slot[(seq - 1) % Capacity];
++    store(&s[0], 0); // Invalidate before reusing the slot.
++    const uint64_t tick = OSGetTime();
++    const uint32_t values[Words - 1] = {event, (uint32_t)(uintptr_t)OSGetCurrentThread(),
++        (uint32_t)(tick >> 32), (uint32_t)tick, caller, a, b, c, token};
++    for (unsigned i = 1; i < Words; ++i) store(&s[i], values[i - 1]);
++    store(&s[0], seq);
++    store(&r.head, seq);
++    OSRestoreInterrupts(irq);
++    return (seq & 0x3fffffff) | (core << 30);
++}
++struct Scope {
++    uint32_t token, event, caller, result = 0;
++    Scope(uint32_t e, uintptr_t pc, uint32_t a = 0, uint32_t b = 0, uint32_t c = 0)
++        : event(e), caller((uint32_t)pc) { token = record(e, caller, a, b, c); }
++    ~Scope() { if (token) record(event + 1, caller, result, 0, 0, token); }
++};
++// Reader takes a checked atomic snapshot. Concurrent overwrite is rejected.
++inline bool read(unsigned core, uint32_t seq, uint32_t out[Words]) {
++    auto *s = rings[core].slot[(seq - 1) % Capacity];
++    if (load(&s[0]) != seq) return false;
++    for (unsigned i = 0; i < Words; ++i) out[i] = load(&s[i]);
++    return load(&s[0]) == seq && out[0] == seq;
++}
++#ifndef FLIGHT_HOST_TEST
++alignas(32) inline uint8_t stack[32768];
++inline uint32_t stopRequested = 0;
++inline bool started = false;
++inline int drain(int, void *) {
++    uint32_t cursor[3]{};
++    uint32_t beat = 0;
++    while (!load(&stopRequested)) {
++        for (unsigned core = 0; core < 3; ++core) {
++            const uint32_t head = load(&rings[core].head);
++            if (head - cursor[core] > Capacity) {
++                const uint32_t lost = head - cursor[core] - Capacity;
++                OSReport("[AFR1 " FLIGHT_MODULE "] LOST core=%u count=%u\n", core, lost);
++                cursor[core] = head - Capacity;
++            }
++            // Bounded output to avoid drowning the existing TCP logger.
++            for (unsigned budget = 0; cursor[core] != head && budget < 24; ++budget) {
++                uint32_t out[Words];
++                const uint32_t seq = ++cursor[core];
++                if (!read(core, seq, out)) {
++                    OSReport("[AFR1 " FLIGHT_MODULE "] LOST core=%u seq=%u\n", core, seq);
++                    continue;
++                }
++                OSReport("[AFR1 " FLIGHT_MODULE "] E %u %u %u %08X %08X%08X %08X %08X %08X %08X %08X\n",
++                    core, out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7], out[8], out[9]);
++            }
++        }
++        if (++beat % 10 == 0) OSReport("[AFR1 " FLIGHT_MODULE "] HEARTBEAT head=%u,%u,%u\n", load(&rings[0].head), load(&rings[1].head), load(&rings[2].head));
++        OSSleepTicks(OSMillisecondsToTicks(100));
++    }
++    return 0;
++}
++inline void start() {
++    if (started) return;
++    store(&stopRequested, 0);
++    for (auto &ring : rings) store(&ring.head, 0);
++    // Static thread and stack: startup does not depend on mapped heap allocation.
++    if (!OSCreateThread(&thread, drain, 0, nullptr, stack + sizeof(stack), sizeof(stack), 20,
++                        OS_THREAD_ATTRIB_AFFINITY_ANY)) {
++        OSReport("[AFR1 " FLIGHT_MODULE "] START_FAILED\n");
++        return;
++    }
++    started = true;
++    store(&enabled, 1);
++    OSReport("[AFR1 " FLIGHT_MODULE "] START capacity=%u event_words=%u\n", Capacity, Words);
++    OSResumeThread(&thread);
++}
++inline void stop() {
++    store(&enabled, 0);
++    if (!started) return;
++    store(&stopRequested, 1);
++    OSJoinThread(&thread, nullptr);
++    started = false;
++    OSReport("[AFR1 " FLIGHT_MODULE "] STOP\n");
++}
++#endif
++} // namespace flight_fs
++namespace flight = flight_fs;

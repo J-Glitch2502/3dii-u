@@ -15,6 +15,11 @@
 using Handle = u32;
 
 namespace kernel {
+#ifdef __WIIU__
+void set_diagnostics_level(u32 level);
+void set_diagnostics_thread(u32 thread);
+void diagnostics_report();
+#endif
 std::string save_root();  // <save base>/<title id>: saves, log.txt
 u32 alloc_linear(u32 size);  // (lock held) linear heap memory for HLE objects the GPU may read (0 if none)
 
@@ -114,6 +119,10 @@ struct Thread : WaitObject {
     std::thread host;
     unsigned mach = 0;  // host thread's Mach port (thread dumps sample its stack for the guest call chain)
     u64 ready_seq = 0;
+#ifdef __WIIU__
+    u64 diag_ready_at = 0;
+    u32 diag_waker = 0, diag_waker_lr = 0;
+#endif
     // waiting
     std::vector<std::shared_ptr<WaitObject>> wait_objs;
     bool wait_all = false;

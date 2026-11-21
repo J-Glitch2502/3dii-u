@@ -675,6 +675,8 @@ struct VtxCpuStats {
     u64 geometry_prims;
 };
 extern VtxCpuStats vtx_cpu;
+extern std::atomic<bool> g_cpu_timing;  // opt-in timing counters; no alarm sampler or shader tracing
+inline bool cpu_timing_enabled() { return kMeasure || g_cpu_timing.load(std::memory_order_relaxed); }
 extern bool g_gs_shared;  // a draw's geometry shader runs go to two threads where they can (vertex.cpp: gs_run_shared); a switch for a console
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)
 extern double g_tex_decode_ms;
