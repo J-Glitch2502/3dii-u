@@ -10,10 +10,16 @@
 #endif
 
 #include "gpu/pica.h"
+#include "checkpoint.h"
 
 namespace gpu {
 
 GpuState g;
+#ifdef __WIIU__
+std::atomic<bool> g_pool_idle_spin{false};
+#else
+std::atomic<bool> g_pool_idle_spin{true};
+#endif
 bool g_stats = false, g_trace = false;
 double g_t_shade = 0, g_t_setup = 0, g_t_flush = 0;
 double now_ms() {
@@ -132,6 +138,13 @@ std::vector<std::thread> workers;
 // never destroyed: detached workers may still be waiting on them during process exit
 std::mutex &pool_mtx = *new std::mutex;
 std::condition_variable &pool_cv = *new std::condition_variable;
+#ifdef __WIIU__
+// A 750 has no cheap 64-bit atomic load: the shim takes a shared spinlock.
+// Sleeping an idle worker leaves core 0 available to the lower-priority compiler.
+constexpr u32 kIdleSpinLimit=0;
+#else
+constexpr u32 kIdleSpinLimit=20000;
+#endif
 std::atomic<u64> pool_work{0};  // gen << 48 | n << 24 | next
 std::atomic<u32> pool_done{0};
 std::atomic<u32> pool_sleepers{0};
@@ -859,3 +872,20 @@ void flush() {
 }
 
 }  // namespace gpu
+
+#ifdef RECOMP_RESUMABLE
+namespace gpu { bool gx2_checkpoint(checkpoint::Image &im); }
+bool checkpoint::gpu_capture(Image &im) {
+    using namespace gpu;
+    ensure_init(); raster_flush();
+    state_fields([&](void *p, size_t n) { im.memory(p, n); });
+    if (!gx2_checkpoint(im)) return false;
+    im.restore.push_back([] {
+        g.vs.dirty = g.gs.dirty = true;
+        g.vs.prog = g.gs.prog = nullptr;
+        g.light_lut_dirty = g.fog_lut_dirty = g.pt_dirty = true;
+        ++g.regs_version; g.ds_version = 0;
+    });
+    return true;
+}
+#endif

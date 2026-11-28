@@ -1,0 +1,250 @@
+diff --git a/src/function_patcher.cpp b/src/function_patcher.cpp
+index 3972436..d97cc09 100644
+--- a/src/function_patcher.cpp
++++ b/src/function_patcher.cpp
+@@ -5,9 +5,26 @@
+ #include "utils/logger.h"
+ 
+ #include <gx2/surface.h>
++#include <coreinit/time.h>
+ 
+ #include <wups.h>
+ 
++static void captureRecorderGamePad(const GX2ColorBuffer *buffer, GX2ScanTarget target) {
++    if (target != GX2_SCAN_TARGET_DRC0 || !buffer || !gEnabled || gBlockScreenshots ||
++        gBlockDRCScreenshots || gTakeScreenshotDRC.state != SCREENSHOT_STATE_READY) return;
++
++    const uint32_t id = gRecorderRequest.exchange(0);
++    if (!id) return;
++
++    OSCalendarTime time;
++    OSTicksToCalendarTime(OSGetTime(), &time);
++    gTakeScreenshotDRC.state = SCREENSHOT_STATE_SAVING;
++    if (!takeScreenshot(const_cast<GX2ColorBuffer *>(buffer), target, gDRCSurfaceFormat,
++                        IMAGE_OUTPUT_FORMAT_PNG, gQuality, time, id)) {
++        gTakeScreenshotDRC.state = SCREENSHOT_STATE_READY;
++    }
++}
++
+ DECL_FUNCTION(void, GX2CopyColorBufferToScanBuffer, const GX2ColorBuffer *colorBuffer, GX2ScanTarget scan_target) {
+     if (gEnabled) {
+         if (gCheckIfScreenRendered) {
+@@ -38,6 +55,7 @@ DECL_FUNCTION(void, GX2CopyColorBufferToScanBuffer, const GX2ColorBuffer *colorB
+         }
+     }
+ 
++    captureRecorderGamePad(colorBuffer, scan_target);
+     real_GX2CopyColorBufferToScanBuffer(colorBuffer, scan_target);
+ }
+ 
+@@ -85,6 +103,7 @@ DECL_FUNCTION(void, GX2MarkScanBufferCopied, GX2ScanTarget scan_target) {
+         }
+     }
+ 
++    captureRecorderGamePad(&lastDRCColorBuffer, scan_target);
+     real_GX2MarkScanBufferCopied(scan_target);
+ }
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index 92eda2f..66100f8 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -13,7 +13,7 @@
+ 
+ // Mandatory plugin information.
+ WUPS_PLUGIN_NAME("Screenshot plugin");
+-WUPS_PLUGIN_DESCRIPTION("This plugin allows you to make screenshots that will be saved to the sd card");
++WUPS_PLUGIN_DESCRIPTION("Capture screenshots to SD or from Wii U Session Recorder");
+ WUPS_PLUGIN_VERSION(VERSION_FULL);
+ WUPS_PLUGIN_AUTHOR("Maschell");
+ WUPS_PLUGIN_LICENSE("GPL");
+diff --git a/src/screenshot_utils.cpp b/src/screenshot_utils.cpp
+index 8f7376b..2c7124a 100644
+--- a/src/screenshot_utils.cpp
++++ b/src/screenshot_utils.cpp
+@@ -269,15 +269,16 @@ void ScreenshotSavedCallback(NotificationModuleHandle handle, void *context) {
+     OSMemoryBarrier();
+ }
+ 
+-bool takeScreenshot(GX2ColorBuffer *srcBuffer, GX2ScanTarget scanTarget, GX2SurfaceFormat outputBufferSurfaceFormat, ImageOutputFormatEnum outputFormat, int quality, const OSCalendarTime &time) {
+-    if (srcBuffer == nullptr) {
++bool takeScreenshot(GX2ColorBuffer *srcBuffer, GX2ScanTarget scanTarget, GX2SurfaceFormat outputBufferSurfaceFormat, ImageOutputFormatEnum outputFormat, int quality, const OSCalendarTime &time, uint32_t recorderId) {
++    if (srcBuffer == nullptr || !gThreadData.thread) {
+         DEBUG_FUNCTION_LINE_ERR("Source buffer was NULL");
+         return false;
+     }
+     auto text = string_format("\ue01e Saving screenshot of the %s...", scanTarget == GX2_SCAN_TARGET_TV ? "TV" : "GamePad");
+-    NotificationModuleHandle screenshot;
++    NotificationModuleHandle screenshot{};
+     NotificationModuleStatus err;
+-    if ((err = NotificationModule_AddDynamicNotificationWithCallback(text.c_str(),
++    if (!recorderId &&
++        (err = NotificationModule_AddDynamicNotificationWithCallback(text.c_str(),
+                                                                      &screenshot,
+                                                                      ScreenshotSavedCallback,
+                                                                      (void *) scanTarget)) != NOTIFICATION_MODULE_RESULT_SUCCESS) {
+@@ -345,6 +346,7 @@ bool takeScreenshot(GX2ColorBuffer *srcBuffer, GX2ScanTarget scanTarget, GX2Surf
+     param->format             = colorBuffer.surface.format;
+     param->scanTarget         = scanTarget;
+     param->time               = time;
++    param->recorderId         = recorderId;
+ 
+     res = sendMessageToThread(param);
+     if (!res) {
+@@ -363,9 +365,10 @@ error:
+     }
+ 
+     auto errorText = string_format("\ue01e Saving screenshot of the %s failed", scanTarget == GX2_SCAN_TARGET_TV ? "TV" : "GamePad");
+-    if ((err = NotificationModule_UpdateDynamicNotificationText(screenshot, errorText.c_str())) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
+-        (err = NotificationModule_UpdateDynamicNotificationBackgroundColor(screenshot, COLOR_RED)) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
+-        (err = NotificationModule_FinishDynamicNotificationWithShake(screenshot, 2.0f, 0.5f)) != NOTIFICATION_MODULE_RESULT_SUCCESS) {
++    if (!recorderId &&
++        ((err = NotificationModule_UpdateDynamicNotificationText(screenshot, errorText.c_str())) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
++         (err = NotificationModule_UpdateDynamicNotificationBackgroundColor(screenshot, COLOR_RED)) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
++         (err = NotificationModule_FinishDynamicNotificationWithShake(screenshot, 2.0f, 0.5f)) != NOTIFICATION_MODULE_RESULT_SUCCESS)) {
+         DEBUG_FUNCTION_LINE_ERR("Failed to update notification: %s", NotificationModule_GetStatusStr(err));
+     }
+ 
+diff --git a/src/screenshot_utils.h b/src/screenshot_utils.h
+index dac42d1..19c4688 100644
+--- a/src/screenshot_utils.h
++++ b/src/screenshot_utils.h
+@@ -10,7 +10,7 @@
+ 
+ bool saveTextureAsPicture(const std::string &path, uint8_t *sourceBuffer, uint32_t width, uint32_t height, uint32_t pitch, GX2SurfaceFormat format, ImageOutputFormatEnum outputFormat, bool convertRGBtoSRGB, int quality);
+ 
+-bool takeScreenshot(GX2ColorBuffer *srcBuffer, GX2ScanTarget scanTarget, GX2SurfaceFormat outputBufferSurfaceFormat, ImageOutputFormatEnum outputFormat, int quality, const OSCalendarTime &time);
++bool takeScreenshot(GX2ColorBuffer *srcBuffer, GX2ScanTarget scanTarget, GX2SurfaceFormat outputBufferSurfaceFormat, ImageOutputFormatEnum outputFormat, int quality, const OSCalendarTime &time, uint32_t recorderId = 0);
+ 
+ void RequestScreenshot();
+ void InitDRCAttachCallbacks();
+\ No newline at end of file
+diff --git a/src/thread.cpp b/src/thread.cpp
+index ead7dc2..cbbf9d1 100644
+--- a/src/thread.cpp
++++ b/src/thread.cpp
+@@ -10,11 +10,26 @@
+ #include <coreinit/cache.h>
+ #include <coreinit/title.h>
+ 
++#include <cstdio>
+ #include <dirent.h>
+ #include <malloc.h>
+ 
+ FSIOThreadData gThreadData;
+ bool gThreadsRunning;
++std::atomic<uint32_t> gRecorderRequest{0};
++
++static void pollRecorderRequest() {
++    constexpr char path[] = WIIU_SCREENSHOT_PATH "recorder/request";
++    FILE *request = fopen(path, "rb");
++    if (!request) return;
++
++    unsigned int id = 0;
++    const bool valid = fscanf(request, "%8x", &id) == 1 && id != 0;
++    fclose(request);
++    if (remove(path) == 0 && valid) {
++        gRecorderRequest.store(id);
++    }
++}
+ 
+ static bool getPath(GX2ScanTarget scanTarget, ImageOutputFormatEnum outputFormat, std::string &path, OSCalendarTime &output) {
+     std::string buffer = string_format("%s%016llX", WIIU_SCREENSHOT_PATH, OSGetTitleID());
+@@ -66,13 +81,18 @@ static bool getPath(GX2ScanTarget scanTarget, ImageOutputFormatEnum outputFormat
+     return true;
+ }
+ 
+-static int32_t fsIOThreadCallback([[maybe_unused]] int argc, const char **argv) {
++static int32_t fsIOThreadCallback([[maybe_unused]] int argc, void *argv) {
+     auto *magic = ((FSIOThreadData *) argv);
+ 
+     constexpr int32_t messageSize = sizeof(magic->messages) / sizeof(magic->messages[0]);
+     OSInitMessageQueue(&magic->queue, magic->messages, messageSize);
+     OSMessage recv;
+-    while (OSReceiveMessage(&magic->queue, &recv, OS_MESSAGE_FLAGS_BLOCKING)) {
++    for (;;) {
++        if (!OSReceiveMessage(&magic->queue, &recv, OS_MESSAGE_FLAGS_NONE)) {
++            pollRecorderRequest();
++            OSSleepTicks(OSMillisecondsToTicks(75));
++            continue;
++        }
+         if (recv.args[0] == FS_IO_QUEUE_COMMAND_STOP) {
+             DEBUG_FUNCTION_LINE("Received break command! Stop thread");
+             break;
+@@ -81,22 +101,30 @@ static int32_t fsIOThreadCallback([[maybe_unused]] int argc, const char **argv)
+ 
+             std::string path;
+             bool success = false;
+-            if (getPath(message->scanTarget, message->outputFormat, path, message->time)) {
++            const bool fromRecorder = message->recorderId != 0;
++            if (fromRecorder) {
++                path = string_format("%srecorder/%08x.png.part", WIIU_SCREENSHOT_PATH, message->recorderId);
++            }
++            if (fromRecorder || getPath(message->scanTarget, message->outputFormat, path, message->time)) {
+                 DEBUG_FUNCTION_LINE("Saving to %s", path.c_str());
+                 auto res = saveTextureAsPicture(path, message->sourceBuffer, message->width, message->height, message->pitch, message->format, message->outputFormat, message->convertRGBtoSRGB, message->quality);
+-                if (res) {
++                if (fromRecorder) {
++                    res = res && rename(path.c_str(), path.substr(0, path.size() - 5).c_str()) == 0;
++                    if (!res) remove(path.c_str());
++                }
++                success = res;
++                if (res && !fromRecorder) {
+                     NotificationModuleStatus err;
+                     auto text = string_format("\ue01e Saving screenshot of the %s done!", message->scanTarget == GX2_SCAN_TARGET_TV ? "TV" : "GamePad");
+                     if ((err = NotificationModule_UpdateDynamicNotificationText(message->notificationHandle, text.c_str())) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
+                         (err = NotificationModule_FinishDynamicNotification(message->notificationHandle, 2.0)) != NOTIFICATION_MODULE_RESULT_SUCCESS) {
+                         DEBUG_FUNCTION_LINE_ERR("Failed to update notification: %s", NotificationModule_GetStatusStr(err));
+                     }
+-                    success = true;
+                 }
+             } else {
+                 DEBUG_FUNCTION_LINE_ERR("Failed to get and create path");
+             }
+-            if (!success) {
++            if (!success && !fromRecorder) {
+                 NotificationModuleStatus err;
+                 auto errorText = string_format("\ue01e Saving screenshot of the %s failed", message->scanTarget == GX2_SCAN_TARGET_TV ? "TV" : "GamePad");
+                 if ((err = NotificationModule_UpdateDynamicNotificationText(message->notificationHandle, errorText.c_str())) != NOTIFICATION_MODULE_RESULT_SUCCESS ||
+@@ -111,6 +139,7 @@ static int32_t fsIOThreadCallback([[maybe_unused]] int argc, const char **argv)
+                 MEMFreeToMappedMemory(message->sourceBuffer);
+             }
+ 
++            if (fromRecorder) gTakeScreenshotDRC.state = SCREENSHOT_STATE_READY;
+             OSMemoryBarrier();
+             free(message);
+         }
+@@ -134,6 +163,7 @@ bool sendMessageToThread(SaveScreenshotMessage *param) {
+ }
+ 
+ void startFSIOThreads() {
++    gRecorderRequest.store(0);
+     auto stackSize = 16 * 1024;
+ 
+     auto *threadData = &gThreadData;
+diff --git a/src/thread.h b/src/thread.h
+index a123b66..595b992 100644
+--- a/src/thread.h
++++ b/src/thread.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ #include "common.h"
+ 
++#include <atomic>
++
+ #include "notifications/notifications.h"
+ 
+ #include <coreinit/messagequeue.h>
+@@ -29,10 +31,12 @@ struct SaveScreenshotMessage {
+     int quality;
+     GX2ScanTarget scanTarget;
+     OSCalendarTime time;
++    uint32_t recorderId;
+ };
+ 
+ extern FSIOThreadData gThreadData;
+ extern bool gThreadsRunning;
++extern std::atomic<uint32_t> gRecorderRequest;
+ 
+ #define FS_IO_QUEUE_COMMAND_STOP               0x13371337
+ #define FS_IO_QUEUE_COMMAND_PROCESS_FS_COMMAND 0x42424242

@@ -846,6 +846,68 @@ ApplicationWindow {
                     Card {
                         visible: app.view === "form"
                         enabled: !win.busy
+                        title: "Output"
+                        subtitle: "Choose an installed title or Homebrew."
+                        CardRow {
+                            label: "Package"
+                            ComboBox {
+                                width: 280
+                                palette.base: pal.card
+                                palette.button: pal.card
+                                palette.text: pal.label
+                                palette.buttonText: pal.label
+                                Accessible.name: "Output package type"
+                                readonly property var formats: ["wup", "wup-update", "homebrew"]
+                                model: ["WUP install", "WUP update", "Homebrew (.wuhb)"]
+                                currentIndex: formats.indexOf(app.outputFormat)
+                                onActivated: function(index) { app.setOutputFormat(formats[index]) }
+                            }
+                        }
+                        CardRow {
+                            visible: app.outputFormat === "wup-update"
+                            label: "Update contents"
+                            sub: "Binary only reuses the original base shaders. Both options require a matching full base build."
+                            ComboBox {
+                                width: 240
+                                Accessible.name: "WUP update contents"
+                                model: ["Binary only", "Binary + shaders"]
+                                currentIndex: app.wupUpdateParts === "binary" ? 0 : 1
+                                onActivated: function(index) { app.setWupUpdateParts(index === 0 ? "binary" : "both") }
+                            }
+                        }
+                        CardRow {
+                            visible: app.outputFormat === "wup-update"
+                            label: "Matching base"
+                            sub: app.wupBaseText
+                            Pill { text: "Choose manifest"; onClicked: app.chooseWupBase() }
+                            Pill { text: "Use last build"; visible: app.hasWupBase; onClicked: app.clearWupBase() }
+                        }
+                        CardRow {
+                            visible: app.outputFormat === "homebrew"
+                            label: "Build"
+                            ComboBox {
+                                width: 280
+                                palette.base: pal.card
+                                palette.button: pal.card
+                                palette.text: pal.label
+                                palette.buttonText: pal.label
+                                Accessible.name: "Homebrew build contents"
+                                readonly property var keys: ["full", "binary", "shaders", "both"]
+                                model: ["Full game (.wuhb)", "Binary only (.rpx)", "Shaders only", "Binary + shaders"]
+                                currentIndex: keys.indexOf(app.homebrewParts)
+                                onActivated: function(index) { app.setHomebrewParts(keys[index]) }
+                            }
+                        }
+                        CardRow {
+                            visible: app.outputFormat === "homebrew"
+                            label: "Import guide"; sub: "Small exports update an existing WUHB."
+                            Pill { text: "Open"; accessibleName: "Open Homebrew import guide"; onClicked: app.homebrewGuide() }
+                        }
+                    }
+
+                    Card {
+                        visible: app.view === "form"
+                        enabled: !win.restarting
                         title: "Your Files"
                         subtitle: "These will be staying in your PC.\nThe Builder won't ever show or keep keys."
                         CardRow {
@@ -854,11 +916,13 @@ ApplicationWindow {
                             Pill { text: "Folder"; tone: "cyan"; onClicked: app.chooseKeys() }
                         }
                         CardRow {
+                            visible: app.outputFormat !== "homebrew"
                             label: "Wii U otp.bin"; sub: app.otpText; light: app.otpOk ? "cyan" : "red"
                             Pill { text: "Info"; onClicked: app.explain("otp") }
                             Pill { text: "File"; tone: "cyan"; onClicked: app.chooseOtp() }
                         }
                         CardRow {
+                            visible: app.outputFormat !== "homebrew" || app.homebrewParts === "full"
                             label: "3DS System Files"; sub: app.sysText; light: app.sysOk ? "cyan" : "red"
                             Pill { text: "Info"; onClicked: app.explain("system") }
                             Pill { text: "Folder"; tone: "cyan"; onClicked: app.chooseSystem() }
@@ -1196,6 +1260,14 @@ ApplicationWindow {
                         sub: app.gameMenu ? "Show the overlay on the TV and GamePad." : "Left out of the games you build."
                         Pill { text: "On"; accessibleName: "In-game menu on"; tone: app.gameMenu ? "cyan" : "grey"; onClicked: app.setGameMenu(true) }
                         Pill { text: "Off"; accessibleName: "In-game menu off"; tone: app.gameMenu ? "grey" : "cyan"; onClicked: app.setGameMenu(false) }
+                    }
+                    CardRow {
+                        visible: app.gameMenu
+                        enabled: !win.busy
+                        label: "In-game menu style"
+                        sub: "Applies when building the game executable."
+                        Pill { text: "New"; tone: app.menuStyle === "new" ? "cyan" : "grey"; onClicked: app.setMenuStyle("new") }
+                        Pill { text: "Classic"; tone: app.menuStyle === "classic" ? "cyan" : "grey"; onClicked: app.setMenuStyle("classic") }
                     }
                     CardRow {
                         visible: app.gameMenu

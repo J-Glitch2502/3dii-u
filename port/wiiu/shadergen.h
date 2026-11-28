@@ -6,7 +6,14 @@
 
 namespace gpu {
 std::string gen_fs_glsl(const DrawState &ds);
-std::string gen_uber_fs(bool lit);
+// stages < 0 keeps dynamic stage selection; otherwise the draw must have exactly this many stages.
+// max_lights is an upper bound, never a quality setting. Uniform guards preserve the actual light count.
+std::string gen_uber_fs(bool lit, u32 texture_mask = 7, int stages = -1, u32 max_lights = 8);
+std::string uber_family_key(bool lit, u32 texture_mask, int stages = -1, u32 max_lights = 8);
+u64 uber_material_key(const DrawState &ds, u32 max_lights);
+std::string gen_uber_material_fs(const DrawState &ds, u32 max_lights);
+u64 uber_lighting_material_key(const DrawState &ds, u32 max_lights);
+std::string gen_uber_lighting_material_fs(const DrawState &ds, u32 max_lights);
 constexpr char kUberKey[] = "uber", kUberLitKey[] = "uber lit";  // their entries in the fragment index, hashed like any key
 // open: the bools the shader reads as it runs, where it is to serve every set of them (vs_open_bools)
 std::string gen_vs_glsl(const ShaderProgram *p, u32 entry, u32 b, const u8 (*iu)[4], const s8 *slot_src, u32 *inputs, u32 open = 0);
@@ -17,6 +24,8 @@ std::string gen_gsx_glsl(const ShaderProgram *vs, u32 vs_entry, u32 vb, const u8
 std::string gen_passthrough_vs();
 std::string gen_blit_vs();
 std::string gen_blit_fs();
+std::string gen_depth_copy_fs();
+constexpr char kDepthCopyKey[] = "depth copy d24s8";
 std::string gen_etc1_fs(bool alpha);                                     // decodes an ETC1 (ETC1A4 with alpha) texture on the GPU: see gx2_backend's gpu_decode
 constexpr char kEtc1Key[] = "etc1", kEtc1A4Key[] = "etc1a4";              // their entries in the fragment index
 std::string gen_untile_fs(u32 fmt);                                       // the same for a plain format, 0 to 11
@@ -67,5 +76,5 @@ constexpr u32 kShaderIndexMagic = 0x53484458;
 constexpr u32 kShaderIndexVersion = 1;
 // Raised whenever gen_fs_glsl or gen_vs_glsl comes to write a state differently. A console's shader cache holds the text the generator of
 // the build that wrote it made, and a build with another number here starts that cache over (shader_compile.cpp).
-constexpr u32 kShaderGenRevision = 6;
+constexpr u32 kShaderGenRevision = 10;
 }  // namespace gpu

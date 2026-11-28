@@ -2,16 +2,27 @@
 // writes RGB out as lines or 8x8 tiles. Here the whole conversion runs when the game starts it, so it's finished by the time the
 // game looks. Command numbers, coefficient tables and rounding follow 3dbrew and Citra's reverse engineering of the hardware.
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <vector>
 
 #include "../service.h"
 #include "services.h"
 
+#ifdef __WIIU__
+namespace wiiu {
+bool av_timing_enabled();
+bool video_conversion_worker(void (*work)(void *), void *context);
+}
+#endif
+
 namespace kernel {
 namespace {
 
 struct Dma {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(addr, size, unit, gap); }
+#endif
     u32 addr = 0, size = 0, unit = 0, gap = 0;
 };
 
@@ -22,15 +33,19 @@ struct DmaReader {
     void read(u8 *out, u32 n) {
         for (u32 got = 0; got < n;) {
             if (!unit) {  // no pattern: one continuous run
-                out[got++] = *gptr(at);
-                at += step;
-                continue;
+                const u32 run = n - got;
+                const u8 *src = gptr(at);
+                if (step == 1) memcpy(out + got, src, run);
+                else for (u32 i = 0; i < run; ++i) out[got + i] = src[i * step];
+                at += run * step;
+                return;
             }
             const u32 run = std::min(n - got, left / step);
             if (step == 1) {
                 memcpy(out + got, gptr(at), run);
             } else {
-                for (u32 i = 0; i < run; i++) out[got + i] = *gptr(at + i * step);
+                const u8 *src = gptr(at);
+                for (u32 i = 0; i < run; i++) out[got + i] = src[i * step];
             }
             got += run;
             at += run * step;
@@ -44,8 +59,8 @@ struct DmaReader {
 };
 
 struct DmaWriter {
-    u32 at, left, unit, gap;
-    explicit DmaWriter(const Dma &d) : at(d.addr), left(d.unit), unit(d.unit), gap(d.gap) {}
+    u32 at, left, unit, gap, end;
+    explicit DmaWriter(const Dma &d) : at(d.addr), left(d.unit), unit(d.unit), gap(d.gap), end(d.addr) {}
     void put(const u8 *p, u32 n) {
         while (n) {
             if (unit && !left) {
@@ -55,6 +70,7 @@ struct DmaWriter {
             const u32 run = unit ? std::min(left, n) : n;
             memcpy(gptr(at), p, run);
             at += run;
+            end = at;
             p += run;
             n -= run;
             left -= unit ? run : 0;
@@ -70,6 +86,7 @@ constexpr s16 kStandard[4][8] = {
 };
 
 struct Y2rService : Service {
+    SERVICE_CHECKPOINT(Y2rService, done, input_format, output_format, rotation, block, spatial, temporal, interrupt, width, lines, alpha, standard, co, dither, y, u, v, yuyv, out, warned_rotation, busy)
     using Service::Service;
     std::shared_ptr<Event> done = make_event(ONESHOT, "y2r");
     u32 input_format = 0, output_format = 0, rotation = 0, block = 0, spatial = 0, temporal = 0, interrupt = 0;
@@ -99,8 +116,10 @@ struct Y2rService : Service {
         std::vector<u8> luma(width * (interleaved ? 16 : 8)), cu(width * 4), cv(width * 4);
         std::vector<u32> tiles(tiles_across * 64), turned(tiles_across * 64);
         std::vector<u8> line(width * 4);
+        std::vector<u8> tile_row(block ? tiles_across * 64 * bytes : 0);
         DmaReader ry(interleaved ? yuyv : y, interleaved ? 1 : step), ru(u, step), rv(v, step);
         DmaWriter w(out);
+        const bool direct_movie = input_format == 1 && output_format == 0 && block && !rotation;
 
         // positions in a tile, in output order
         u8 order[64];
@@ -142,6 +161,47 @@ struct Y2rService : Service {
                 ru.read(cu.data(), crows * width / 2);
                 rv.read(cv.data(), crows * width / 2);
             }
+            // The common movie path can encode directly into the tiled DMA
+            // row. Avoid constructing and then rearranging an RGB image first.
+            if (direct_movie && rows == 8) {
+                // A 4:2:0 chroma sample serves a 2x2 luma block. Those four
+                // pixels are adjacent in Morton order, so share chroma work
+                // and emit four packed words rather than sixteen byte stores.
+                // floor((floor(a / 8) + b) / 32) == floor((a + 8*b) / 256),
+                // including negative values: fold the constant offsets once.
+                const s32 ro = (co[5] + 0x18) * 8;
+                const s32 go = (co[6] + 0x18) * 8;
+                const s32 bo = (co[7] + 0x18) * 8;
+                for (u32 row = 0; row < 8; row += 2) {
+                    const u8 *yp = luma.data() + row * width;
+                    const u8 *up = cu.data() + (row / 2) * (width / 2);
+                    const u8 *vp = cv.data() + (row / 2) * (width / 2);
+                    for (u32 x = 0; x < width; x += 2) {
+                        const s32 U = up[x / 2], V = vp[x / 2];
+                        const s32 cr = co[1] * V + ro;
+                        const s32 cg = -co[2] * V - co[3] * U + go;
+                        const s32 cb = co[4] * U + bo;
+                        u8 *d = tile_row.data() + ((x / 8) * 64 + order[row * 8 + (x & 7)]) * 4;
+                        auto pixel = [&](u32 Y, u8 *dst) {
+                            const s32 cy = co[0] * Y;
+                            const u32 r = (u32)std::clamp((cy + cr) >> 8, 0, 255);
+                            const u32 g = (u32)std::clamp((cy + cg) >> 8, 0, 255);
+                            const u32 b = (u32)std::clamp((cy + cb) >> 8, 0, 255);
+                            u32 packed = (u8)alpha | (b << 8) | (g << 16) | (r << 24);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+                            packed = __builtin_bswap32(packed);
+#endif
+                            memcpy(dst, &packed, sizeof packed);
+                        };
+                        pixel(yp[x], d);
+                        pixel(yp[x + 1], d + 4);
+                        pixel(yp[x + width], d + 8);
+                        pixel(yp[x + width + 1], d + 12);
+                    }
+                }
+                w.put(tile_row.data(), (u32)tile_row.size());
+                continue;
+            }
             for (u32 row = 0; row < rows; row++) {
                 const u32 crow = is420 ? row / 2 : row;
                 for (u32 x = 0; x < width; x++) {
@@ -182,11 +242,13 @@ struct Y2rService : Service {
                 tiles.swap(turned);
             }
             if (block) {
-                u8 packed[64 * 4];
                 for (u32 t = 0; t < tiles_across; t++) {
+                    u8 *packed = tile_row.data() + t * 64 * bytes;
                     for (u32 i = 0; i < 64; i++) encode(tiles[t * 64 + i], packed + order[i] * bytes);
-                    w.put(packed, 64 * bytes);
                 }
+                // A complete tile row follows the same DMA unit/gap pattern
+                // as separate tile writes, with far fewer guest-address lookups.
+                w.put(tile_row.data(), (u32)tile_row.size());
             } else {
                 for (u32 row = 0; row < rows; row++) {
                     u8 *d = line.data();
@@ -195,9 +257,10 @@ struct Y2rService : Service {
                 }
             }
         }
-        // A strided span also contains untouched bytes, so don't claim ownership of its gaps.
-        if (out.unit && out.gap && span > out.unit) gsp_cache_op(out.addr, span, false);
-        else gsp_cpu_wrote(out.addr, span);
+        // Invalidate the actual written span without claiming untouched DMA gaps.
+        const u32 written = w.end - out.addr;
+        if (out.unit && out.gap && written > out.unit) gsp_cache_op(out.addr, written, false);
+        else gsp_cpu_wrote(out.addr, written);
     }
 
     static Dma dma(IPC &ipc) {
@@ -214,6 +277,9 @@ struct Y2rService : Service {
             ipc.ok(2);
             ipc.set(2, v);
         };
+        // Replies contain four little-endian pairs of signed 16-bit coefficients,
+        // independent of the host byte order. Games may fetch a standard table
+        // and pass it back with SetCoefficient instead of SetStandardCoefficient.
         auto coefficients = [&](const s16 *values) {
             ipc.ok(5);
             for (u32 i = 0; i < 4; i++)
@@ -259,8 +325,8 @@ struct Y2rService : Service {
             memcpy(co, kStandard[standard], sizeof co);
             ipc.ok();
             break;
-        case 0x0021:  // GetStandardCoefficient
-            if (ipc[1] >= 4) ipc.result(0xE0E053ED);  // CAM InvalidEnumValue / InvalidArgument / Usage
+        case 0x0021:  // GetStandardCoefficient: a query, not a change to the active table
+            if (ipc[1] >= 4) ipc.result(0xE0E053ED);  // CAM / InvalidEnumValue / InvalidArgument / Usage
             else coefficients(kStandard[ipc[1]]);
             break;
         case 0x0022: alpha = ipc[1] & 0xffff; ipc.ok(); break;
@@ -278,7 +344,47 @@ struct Y2rService : Service {
             const u32 span = conversion.output_span();
             if (!span) { ipc.result(RES_INVALID_ADDRESS); break; }
             busy = true;
-            run_blocked(*ipc.lk, [&] { conversion.convert(span); });
+            {
+                const auto began = std::chrono::steady_clock::now();
+                unsigned long long convert_us = 0;
+                run_blocked(*ipc.lk, [&] {
+                    const auto work = std::chrono::steady_clock::now();
+#ifdef __WIIU__
+                    struct Job { Y2rService *conversion; u32 span; } job{&conversion, span};
+                    if (!wiiu::video_conversion_worker([](void *context) {
+                        auto &job = *static_cast<Job *>(context);
+                        job.conversion->convert(job.span);
+                    }, &job)) conversion.convert(span);
+#else
+                    conversion.convert(span);
+#endif
+                    convert_us = (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - work).count();
+                });
+#ifdef __WIIU__
+                if (wiiu::av_timing_enabled()) {
+                    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - began).count();
+                    static u32 count = 0, max_us = 0;
+                    static u64 total_us = 0, work_us = 0;
+                    static auto report_at = began;
+                    ++count;
+                    total_us += (u64)us;
+                    work_us += convert_us;
+                    max_us = std::max(max_us, (u32)us);
+                    if (std::chrono::steady_clock::now() - report_at >= std::chrono::seconds(2)) {
+                        LOG("[y2r-time] %u conversions in 2s; mean %llu us max %u us work %llu us resume %llu us; %ux%u format %u -> %u block %u unit %u gap %u\n",
+                            count, (unsigned long long)(total_us / count), max_us,
+                            (unsigned long long)(work_us / count), (unsigned long long)((total_us - work_us) / count),
+                            width, lines, input_format, output_format, block, out.unit, out.gap);
+                        count = max_us = 0;
+                        total_us = 0;
+                        work_us = 0;
+                        report_at = std::chrono::steady_clock::now();
+                    }
+                }
+#endif
+            }
             warned_rotation |= conversion.warned_rotation;
             busy = false;
             done->signal();

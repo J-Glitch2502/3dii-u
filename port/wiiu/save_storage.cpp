@@ -58,19 +58,28 @@ constexpr u64 CACHE_FILE_MAX = 16 << 20, CACHE_MAX = 48 << 20;  // bigger files 
 
 bool under(const std::string &path, const std::string &prefix) { return !path.compare(0, prefix.size(), prefix); }
 
+// Unknown storage keeps strict quota commits; only a verified ordinary directory
+// (Aroma's SD-backed homebrew save mapping) can omit them.
+bool checkpoint_quota_required = true;
+std::mutex quota_mutex;
 int flush_save_quota(const char *path, u8 slot) {
-    if (wiiu::fsa_direct_flush_quota(path)) return 0;
+    int result;
+    if (wiiu::fsa_direct_flush_quota(path, result)) return result;
     return flush_quota ? flush_quota(&client, &block, slot, FS_ERROR_FLAG_ALL) : -1;
 }
-
 int flush_save_quotas(bool now) {
-    const bool mine = !account_dir.empty() && under(g_save_base, account_dir);
+    std::lock_guard<std::mutex> lock(quota_mutex);
+    if (!flush_quota) return 0;
+    const bool mine = !account_dir.empty() && !g_save_base.compare(0, account_dir.size(), account_dir);
     wiiu::fs_begin(0xC007);
     int result = 0;
-    if (!account_dir.empty() && (mine || now)) result = flush_save_quota(account_dir.c_str(), account_slot);
+    if (!account_dir.empty() && (mine || now) && !wiiu::fsa_direct_flush_quota(account_dir.c_str(), result))
+        result = flush_quota(&client, &block, account_slot, FS_ERROR_FLAG_ALL);
     if (!mine || now) {
-        const int common = flush_save_quota("/vol/save/common", COMMON);
-        if (!result) result = common;
+        int common_result;
+        if (!wiiu::fsa_direct_flush_quota("/vol/save/common", common_result))
+            common_result = flush_quota(&client, &block, COMMON, FS_ERROR_FLAG_ALL);
+        if (!result) result = common_result;
     }
     wiiu::fs_end();
     return result;
@@ -81,8 +90,9 @@ long write_retrying(int fd, const void *data, size_t len, u64 at) {
     const long n = pwrite(fd, data, len, (off_t)at);
     if (n == (long)len) return n;
     LOG("[save] wrote %ld of %x bytes at %llx: error %d, flushing\n", n, (u32)len, (unsigned long long)at, errno);
-    // A cache writeback can reach this retry while it is already draining the cache.
-    if (flush_quota && flush_save_quotas(true) < 0) wiiu::save_dirty();
+    // A retry can run inside write_out_all. Flush the journal without
+    // reentering the cache writeback loop while this file is being written.
+    if (flush_save_quotas(true) < 0) wiiu::save_dirty();
     const long done = std::max(n, 0L), more = pwrite(fd, (const u8 *)data + done, len - done, (off_t)(at + done));
     if (more < 0) LOG("[save] still failing: error %d\n", errno);
     return more < 0 ? n : done + more;
@@ -115,6 +125,10 @@ bool write_out(const std::shared_ptr<wiiu::SaveFile> &f) {
         f->dirty = false;
     }
     const OSTime t = OSGetSystemTime();
+    if (!wiiu::ensure_save_capacity(f->path,n)) {
+        free(copy);
+        std::lock_guard<std::mutex> lk(cache_m);f->dirty=true;return false;
+    }
     const int fd = open(f->path.c_str(), O_RDWR | O_CREAT, 0644);
     bool ok = fd >= 0;
     if (ok) {
@@ -209,6 +223,8 @@ void save_mount() {
     note("save storage: client %d, init %d, folder %d, player %d %s, flush %s", added, inited, folder, player, account_dir.empty() ? "(saves in common)" : account_dir.c_str(),
          flush_quota ? "yes" : "no");
     fsa_direct_check_writes();
+    if (!account_dir.empty()) fsa_report_save_quota(account_dir.c_str());
+    checkpoint_quota_required = fsa_report_save_quota("/vol/save/common") != 0;
 }
 
 const std::string &save_account_dir() { return account_dir; }
@@ -245,6 +261,21 @@ bool save_pending() {
 
 // Once a burst of writes has settled, or every few seconds if one doesn't. On the card thread, so that a slow flush only makes the game's next file operation wait.
 // The game's storage, and the common one too when asked for at once: the logs, test runs and markers are written there just before.
+int flush_checkpoint_storage() {
+    // Checkpoints only write common storage. Do not commit the unrelated account
+    // directory or ask nn_save to flush an SD directory as a title quota.
+    // fflush/fclose still check the actual file writes on every backend.
+    if (!checkpoint_quota_required) return 0;
+    std::lock_guard<std::mutex> lock(quota_mutex);
+    if (!flush_quota) return -1;
+    fs_begin(0xC007);
+    int result;
+    if (!fsa_direct_flush_quota("/vol/save/common", result))
+        result = flush_quota(&client, &block, COMMON, FS_ERROR_FLAG_ALL);
+    fs_end();
+    return result;
+}
+
 void save_flush(bool now) {
     if (!flush_quota) return;
     const OSTime t = OSGetSystemTime();

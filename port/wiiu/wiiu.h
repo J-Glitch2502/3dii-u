@@ -8,9 +8,12 @@
 namespace audio {
 void shutdown();
 void pause(bool on);
+void report_output_timing();  // audio thread only; bounded queue/recovery summary
 }
 
 namespace wiiu {
+void set_av_timing(bool on);  // opt-in audio/scheduler/GPU-pump timing, no alarms
+bool av_timing_enabled();
 // this title's save storage on the console, for saves and logs
 const std::string &data_dir();
 // save_storage.cpp. Mount before anything goes near data_dir. A change to a save makes it dirty, and the card thread flushes it.
@@ -19,6 +22,7 @@ void save_dirty();
 void save_flush(bool now);
 long save_write(int fd, const void *data, u32 len, u64 at);
 void save_resize(int fd, u64 size);
+bool ensure_save_capacity(const std::string &file, u64 incoming);  // grow native WUP quota before a write; SD Homebrew unchanged
 const std::string &save_account_dir();  // the player's storage, /vol/save/<persistent id>, or empty without one
 bool save_dir_lacks(const std::string &path, const char *first, const char *second);  // confirmed by a complete listing
 bool save_pending();                     // saved by the game and not flushed yet
@@ -41,11 +45,14 @@ void fs_end();
 void romfs_begin();  // the game's RomFS reads: they take turns only with each other, never with saves being written out or flushed
 void romfs_end();
 void fsa_direct_check_writes();
+// Returns 1 for a quota, 0 for an ordinary directory, -1 if unknown.
+int fsa_report_save_quota(const char *path);
 void fsa_direct_report();  // fsa_direct.cpp: which way file calls go, for the log
-bool fsa_direct_flush_quota(const char *path);
+bool fsa_direct_flush_quota(const char *path, int &result);
 // direct_read.cpp: the game's RomFS read past Aroma's hook on the file calls, once three stretches of it have matched the ordinary path. false: read it the ordinary way.
 void direct_read_open(const char *path, int fd, u64 size);
-bool direct_read(void *dst, u32 len, u64 off);
+bool direct_read(void *dst, u32 len, u64 off, bool *cached = nullptr);
+void gfx_report_draw_trace();  // (card thread) sends a sampled frame to the console log
 void gfx_write_misses();  // (card thread) adds what the GPU thread has noted to shader_misses.bin
 void gfx_take_misses(std::vector<u8> &out);  // the same notes, for the PC
 int net_thread(int, void *);  // net_console.cpp: the PC's way in, over the network
@@ -78,6 +85,9 @@ void profile_this_core();  // console_profile.cpp
 void profile_stop();
 void profile_write();
 void profile_send();  // (net thread) "prof"
+void set_video_worker(bool enabled);
+void set_diagnostics_level(u32 level);
+bool video_conversion_worker(void (*work)(void *), void *context);
 // GamePad touch position -> 3DS bottom-screen pixel, if the touch is on it
 void touch_to_bottom(u16 x, u16 y, bool &touch, u16 &tx, u16 &ty);
 // (input thread) the menu overlay takes input while it is open

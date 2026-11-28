@@ -1,0 +1,65 @@
+[
+  {
+    "name": "MemoryMappingModule",
+    "repository": "https://github.com/wiiu-env/MemoryMappingModule.git",
+    "base_commit": "b849fecf421f9f7ce3056d8d08581ef0bb0a4d91",
+    "patch": "MemoryMappingModule.patch",
+    "bytes": 24222,
+    "untracked_sources": [
+      "source/flight_recorder.h",
+      "source/mapped_heap_guard.h",
+      "source/mapped_heap_hooks.h",
+      "source/mapped_lock_trace.h"
+    ],
+    "license": "Preserve the upstream repository license; patch does not replace it."
+  },
+  {
+    "name": "ContentRedirectionModule",
+    "repository": "https://github.com/wiiu-env/ContentRedirectionModule.git",
+    "base_commit": "31b319b6b4370caf4ab173f0db91cf838c6819d0",
+    "patch": "ContentRedirectionModule.patch",
+    "bytes": 41423,
+    "untracked_sources": [
+      "src/flight_recorder.h"
+    ],
+    "license": "Preserve the upstream repository license; patch does not replace it."
+  },
+  {
+    "name": "RPXLoadingModule",
+    "repository": "https://github.com/wiiu-env/RPXLoadingModule.git",
+    "base_commit": "307f892e0ca692d43c9878957486d0b366080d7c",
+    "patch": "RPXLoadingModule.patch",
+    "bytes": 16811,
+    "untracked_sources": [
+      "src/DevBundlePaths.h",
+      "tests/dev_bundle_paths.cpp"
+    ],
+    "license": "Preserve the upstream repository license; patch does not replace it."
+  },
+  {
+    "name": "ScreenshotWUPS",
+    "repository": "https://github.com/wiiu-env/ScreenshotWUPS.git",
+    "base_commit": "d6b2fc846ba09dae10611495122fa5e99adf3970",
+    "patch": "ScreenshotWUPS.patch",
+    "bytes": 11771,
+    "untracked_sources": [],
+    "license": "Preserve the upstream repository license; patch does not replace it."
+  },
+  {
+    "name": "Cemu-Aroma",
+    "repository": "https://github.com/Littlemac123/Cemu-Aroma.git",
+    "base_commit": "09c5d4c0be460e77a755545c08c4371eaaf42638",
+    "patch": "Cemu-Aroma.patch",
+    "bytes": 117867,
+    "untracked_sources": [
+      "docs/native-gamepad.md",
+      "src/input/api/DRC/DRCInput.cpp",
+      "src/input/api/DRC/DRCInput.h",
+      "tools/drc/pairing_config.py",
+      "tools/python/aroma_ftp_smoke_test.py",
+      "tools/python/emulator_pause_hotkey.py",
+      "tools/python/wiiload_send.py"
+    ],
+    "license": "Preserve the upstream repository license; patch does not replace it."
+  }
+]

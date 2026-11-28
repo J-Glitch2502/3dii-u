@@ -1,3 +1,4 @@
+#include <atomic>
 // Shaders the shipped set lacks are compiled on the console itself, on a thread of their own, with CafeGLSL's library for the Wii U
 // (third_party/cafeglsl_ppc: version 1.0, where the PC build runs 0.2, and its programs differ: latte_program.h). A miss draws with its
 // fallback meanwhile and takes the real shader once the GPU thread installs it (gfx_pump). Validated native programs are restored on later
@@ -22,9 +23,11 @@
 
 #include "latte_program.h"
 #include "shader_compile.h"
-#include "shader_native_cache.h"
+#include "shader_queue.h"
 #include "shadergen.h"
 #include "wiiu.h"
+#include "physical_file.h"
+#include "loader.h"
 
 
 
@@ -35,6 +38,7 @@ struct Job {
     u64 key;
     u32 inputs;
     std::string glsl;
+    bool demanded = false;
     u32 tries = 0;  // compiles that came back hollow (compile_thread)
 };
 OSMutex mutex;
@@ -44,8 +48,8 @@ std::unordered_set<u64> known;  // asked for once: the cache and a live miss may
 constexpr u32 STACK = 4 << 20;  // the compiler recurses
 OSThread *compiler;
 volatile OSTime busy_since;  // when the compile in progress began, 0 between compiles
+std::atomic<u32> cache_io_since_ms{0};
 volatile u32 watched;        // reports written about the compile in progress
-uint64_t native_disk_bytes;  // compiler thread only, initialized while scanning the cache at boot
 
 // How many of a generated vertex shader's inputs (v0 to v15) its code reads: named again after being declared
 u32 inputs_read(const std::string &glsl) {
@@ -69,130 +73,12 @@ u32 inputs_read(const std::string &glsl) {
 const std::string &cache_path() {
     static std::string p;
     if (p.empty()) {
-        char name[48];
-        snprintf(name, sizeof name, "/shader_cache_%016llx.bin", (unsigned long long)gpu::shipped_set_id);
-        p = wiiu::data_dir() + name;
+        char name[180];
+        snprintf(name, sizeof name, "/vol/external01/wiiu/3dii-u/cache/%016llx/shader_cache_%016llx.bin",
+                 (unsigned long long)g_game.program_id, (unsigned long long)gpu::shipped_set_id);
+        p = name;
     }
     return p;
-}
-
-std::string native_prefix() {
-    char name[48];
-    snprintf(name, sizeof name, "shader_native_%016llx_", (unsigned long long)shipped_set_id);
-    return name;
-}
-std::string native_path(const Job &j) {
-    char name[32];
-    snprintf(name, sizeof name, "%c_%016llx.bin", j.vs ? 'v' : 'p', (unsigned long long)j.key);
-    return wiiu::data_dir() + "/" + native_prefix() + name;
-}
-shader_native_cache::Identity native_identity(const Job &j) {
-    const char *version = GetGLSLCompilerVersion();
-    return {kShaderGenRevision, shipped_set_id, shader_native_cache::hash(version, strlen(version)), j.key,
-            shader_native_cache::hash(j.glsl.data(), j.glsl.size()), j.vs, j.inputs};
-}
-// Called with fs_begin held. An incomplete cache is disposable, never a partial shader.
-std::vector<u8> native_read_file(const std::string &path) {
-    std::vector<u8> bytes;
-    if (FILE *f = fopen(path.c_str(), "rb")) {
-        if (!fseek(f, 0, SEEK_END)) {
-            const long n = ftell(f);
-            if (n > 0 && (unsigned long)n <= shader_native_cache::kMaxFile && !fseek(f, 0, SEEK_SET)) {
-                bytes.resize(n);
-                if (fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) bytes.clear();
-            }
-        }
-        fclose(f);
-    }
-    return bytes;
-}
-bool native_load(const Job &j, CompileDone &d) {
-    wiiu::fs_begin(0xC00B);
-    const auto file = native_read_file(native_path(j));
-    wiiu::fs_end();
-    const u8 *gfd;
-    size_t size;
-    if (!shader_native_cache::decode(file, native_identity(j), gfd, size)) return false;
-    const u32 header_size = j.vs ? GFDGetVertexShaderHeaderSize(0, gfd) : GFDGetPixelShaderHeaderSize(0, gfd);
-    const u32 program_size = j.vs ? GFDGetVertexShaderProgramSize(0, gfd) : GFDGetPixelShaderProgramSize(0, gfd);
-    if (!header_size || !program_size) return false;
-    // GFD copies the header (including GX2R fields); own both blocks directly
-    // instead of letting that copy erase a WHB-created GX2R buffer's ownership.
-    void *header = memalign(64, header_size);
-    void *program = memalign(GX2_SHADER_PROGRAM_ALIGNMENT, program_size);
-    if (!header || !program || !(j.vs ? GFDGetVertexShader((GX2VertexShader *)header, program, 0, gfd)
-                                     : GFDGetPixelShader((GX2PixelShader *)header, program, 0, gfd))) {
-        free(program); free(header);
-        return false;
-    }
-    d.from_gfd = true;
-    if (j.vs) d.vs_shader = (GX2VertexShader *)header;
-    else d.ps_shader = (GX2PixelShader *)header;
-    u32 &resources = j.vs ? d.vs_shader->regs.sq_pgm_resources_vs : d.ps_shader->regs.sq_pgm_resources_ps;
-    u32 registers = resources & 255;
-    if ((j.vs && (d.vs_shader->size <= 16 || (inputs_read(j.glsl) && !d.vs_shader->attribVarCount))) ||
-        !fit_program(j.vs ? d.vs_shader->program : d.ps_shader->program, j.vs ? d.vs_shader->size : d.ps_shader->size,
-                     registers, shader_budget::kOrdinary)) {
-        shader_compile_discard(d);
-        return false;
-    }
-    resources = (resources & ~255u) | registers;
-    return true;
-}
-void native_save(const Job &j, const CompileDone &d) {
-    // Include both temporary files in the budget; this cache shares the title's save quota.
-    if (!shader_native_cache::fits_budget(native_disk_bytes, shader_native_cache::kMaxFile * 2) ||
-        !(j.vs ? shader_native_cache::writer_fits(*d.vs_shader) : shader_native_cache::writer_fits(*d.ps_shader))) return;
-    const std::string path = native_path(j), raw = path + ".gsh.tmp", temp = path + ".tmp";
-    GFDFile gfd;
-    if (j.vs) gfd.vertexShaders.push_back(d.vs_shader);
-    else gfd.pixelShaders.push_back(d.ps_shader);
-    wiiu::fs_begin(0xC00B);
-    if (WriteGFD(gfd, raw)) {
-        const auto bytes = shader_native_cache::encode(native_read_file(raw), native_identity(j));
-        if (!bytes.empty()) if (FILE *f = fopen(temp.c_str(), "wb")) {
-            const bool written = fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
-            const bool closed = fclose(f) == 0;
-            if (written && closed) {
-                struct stat st{};
-                if (!stat(path.c_str(), &st) && !remove(path.c_str())) native_disk_bytes -= std::min<uint64_t>(native_disk_bytes, st.st_size);
-                if (!rename(temp.c_str(), path.c_str())) native_disk_bytes += bytes.size();
-            }
-        }
-    }
-    for (const auto *p : {&raw, &temp}) if (remove(p->c_str())) {
-        struct stat st{};
-        if (!stat(p->c_str(), &st) && st.st_size > 0) native_disk_bytes += st.st_size;
-    }
-    wiiu::fs_end();  // no extra save flush: cache loss only costs a recompile
-}
-
-static void cache_drop_old() {
-    const std::string dir = wiiu::data_dir();
-    remove((dir + "/shader_cache.bin").c_str());
-    native_disk_bytes = 0;
-    if (DIR *d = opendir(dir.c_str())) {
-        std::vector<std::string> old;
-        while (dirent *e = readdir(d)) {
-            const std::string n = e->d_name;
-            if (n.rfind("shader_cache_", 0) == 0 && dir + "/" + n != cache_path()) old.push_back(dir + "/" + n);
-            if (n.rfind("shader_native_", 0) == 0) {
-                if (n.rfind(native_prefix(), 0) != 0 || n.size() < 4 || n.substr(n.size() - 4) != ".bin") old.push_back(dir + "/" + n);
-                else {
-                    struct stat st{};
-                    if (!stat((dir + "/" + n).c_str(), &st) && st.st_size > 0) native_disk_bytes += st.st_size;
-                }
-            }
-        }
-        closedir(d);
-        for (const std::string &o : old) {
-            if (!remove(o.c_str())) LOG("[glsl] an older build's cache gone: %s\n", o.c_str());
-            else if (o.rfind(dir + "/shader_native_", 0) == 0) {
-                struct stat st{};
-                if (!stat(o.c_str(), &st) && st.st_size > 0) native_disk_bytes += st.st_size;
-            }
-        }
-    }
 }
 
 // The file starts with these two words. Its GLSL is what the shader generator of the build that wrote it made of each state, so a build whose
@@ -202,76 +88,69 @@ const u32 kCacheHead[2] = {0x53484443, kShaderGenRevision};  // 'SHDC'
 
 // u8 vs, u8 pad[3], u32 inputs, u64 key, u32 length, the GLSL: this console's own bytes, nobody else reads it
 void cache_append(const Job &j) {
-    wiiu::fs_begin(0xC00B);  // its turn with every other file call
-    if (FILE *f = fopen(cache_path().c_str(), "ab")) {
-        fseek(f, 0, SEEK_END);
-        if (ftell(f) == 0) fwrite(kCacheHead, 1, sizeof kCacheHead, f);
-        const u32 head[5] = {(u32)j.vs << 24, j.inputs, (u32)(j.key >> 32), (u32)j.key, (u32)j.glsl.size()};
-        fwrite(head, 1, sizeof head, f);
-        fwrite(j.glsl.data(), 1, j.glsl.size(), f);
-        fclose(f);
+    cache_io_since_ms.store((u32)OSTicksToMilliseconds(OSGetSystemTime()) + 1, std::memory_order_release);
+    {
+        wiiu::PhysicalFile f;
+        if (f.open(cache_path(), "a")) {
+            const u32 head[5] = {(u32)j.vs << 24, j.inputs, (u32)(j.key >> 32), (u32)j.key, (u32)j.glsl.size()};
+            if ((!f.empty() || f.write(kCacheHead, sizeof kCacheHead)) && f.write(head, sizeof head))
+                f.write(j.glsl.data(), (unsigned)j.glsl.size());
+        }
+        // A missing SD/cache disables persistence, never falls back to Aroma's
+        // redirected fopen path. The compiled shader remains usable in memory.
     }
-    wiiu::fs_end();
-    // No flush of its own: one takes ~400 ms on the card thread, and the game's next file read waits behind it, which stalled Bowser's Inside Story's
-    // battles and NSMB2's menus as their shaders compiled (2026-11-08). The cache goes out with the game's next save or at quitting; lost to a power-off,
-    // it's only compiled again. A journal that fills up first is flushed by the write that finds it full (write_retrying).
+    cache_io_since_ms.store(0, std::memory_order_release);
 }
 
 void cache_load() {
-    cache_drop_old();
-    FILE *f = fopen(cache_path().c_str(), "rb");
-    if (!f) return;
+    wiiu::PhysicalFile f;
+    if (!f.open(cache_path(), "r")) return;
     u32 n = 0, head[5];
-    if (fread(head, 1, sizeof kCacheHead, f) != sizeof kCacheHead || memcmp(head, kCacheHead, sizeof kCacheHead)) {
-        fclose(f);
-        if ((f = fopen(cache_path().c_str(), "wb"))) fclose(f);  // another generator's, or from before the file said whose: emptied
-        LOG("[glsl] the shader cache was another build's generator's: started over\n");
+    if (f.read(head, sizeof kCacheHead) != sizeof kCacheHead || memcmp(head, kCacheHead, sizeof kCacheHead)) {
+        f.close();
+        if (f.open(cache_path(), "w")) f.close();
         return;
     }
-    while (fread(head, 1, sizeof head, f) == sizeof head && head[4] < (1 << 20)) {
+    while (f.read(head, sizeof head) == sizeof head && head[4] < (1 << 20)) {
         Job j{(head[0] >> 24) != 0, true, (u64)head[2] << 32 | head[3], head[1], std::string(head[4], '\0')};
-        if (fread(&j.glsl[0], 1, head[4], f) != head[4]) break;
-        if (known.insert(j.key).second) {
-            jobs.push_back(std::move(j));
-            n++;
-        }
+        if (f.read(j.glsl.data(), head[4]) != head[4]) break;
+        if (known.insert(j.key).second) { jobs.push_back(std::move(j)); n++; }
     }
-    fclose(f);
-    LOG("[glsl] %u shaders from the cache to restore or compile\n", n);
-}
-
-void start_compiler() {
-    InitGLSLCompiler();
-    LOG("[glsl] compiler %s up\n", GetGLSLCompilerVersion());
-    if (g_verbose < 2) return;
-    static char info[4096];
-    {  // two known small shaders first: whether compiling works here at all, how long one takes, and that a loop (r600's jump tracker) gets through: in
-        // Cemu it only does with tools/win/patch_cafeglsl_traps.py applied to the library
-        const std::string plain = gen_passthrough_vs();
-        const std::string with_loop = "#version 450\nlayout(location = 0) in vec4 aPos;\nlayout(binding = 0, std140) uniform VS { vec4 f[96]; vec4 uDraw; ivec4 uInt[4]; };\n"
-                                      "void main() { vec4 p = aPos; for (int i = 0; i <= uInt[0].x; i++) p += f[i]; gl_Position = p; }\n";
-        const struct {
-            const char *name;
-            const std::string *glsl;
-        } steps[] = {{"plain", &plain}, {"loop", &with_loop}};
-        for (const auto &s : steps) {
-            LOG("[glsl] test %s: compiling\n", s.name);
-            const OSTime t0 = OSGetSystemTime();
-            GX2VertexShader *v = nullptr;
-            info[0] = 0;
-            watched = 0;
-            busy_since = t0;
-            const GX2ShaderMode m = CompileVertexShader(s.glsl->c_str(), GLSL_COMPILE_BLOCK, &v, info, sizeof info, GLSL_COMPILER_FLAG_NONE);
-            busy_since = 0;
-            LOG("[glsl] test %s: mode %d, %s, %u ms: %.200s\n", s.name, (int)m, v ? "shader made" : "no shader", (u32)OSTicksToMilliseconds(OSGetSystemTime() - t0), info);
-            if (v) FreeVertexShader(v);
-        }
-    }
+    LOG("[glsl] %u shaders from physical SD cache; redirected cache I/O disabled\n", n);
 }
 
 int compile_thread(int, void *) {
-    bool started = false;
     static char info[4096];
+    // Shipped shader packs may cover every draw. Do not initialize cafeglsl
+    // or compile its diagnostic shaders until a real missing shader needs it.
+    // Keep the same warm-up and validation before that first compilation.
+    bool initialized = false;
+    const auto initialize = [&] {
+        InitGLSLCompiler();
+        LOG("[glsl] compiler %s up\n", GetGLSLCompilerVersion());
+        if (g_verbose >= 2) {  // two known small shaders first: whether compiling works here at all, how long one takes, and that a loop (r600's jump tracker) gets through: in
+            // Cemu it only does with tools/win/patch_cafeglsl_traps.py applied to the library
+            const std::string plain = gen_passthrough_vs();
+            const std::string with_loop = "#version 450\nlayout(location = 0) in vec4 aPos;\nlayout(binding = 0, std140) uniform VS { vec4 f[96]; vec4 uDraw; ivec4 uInt[4]; };\n"
+                                          "void main() { vec4 p = aPos; for (int i = 0; i <= uInt[0].x; i++) p += f[i]; gl_Position = p; }\n";
+            const struct {
+                const char *name;
+                const std::string *glsl;
+            } steps[] = {{"plain", &plain}, {"loop", &with_loop}};
+            for (const auto &s : steps) {
+                LOG("[glsl] test %s: compiling\n", s.name);
+                const OSTime t0 = OSGetSystemTime();
+                GX2VertexShader *v = nullptr;
+                info[0] = 0;
+                watched = 0;
+                busy_since = t0;
+                const GX2ShaderMode m = CompileVertexShader(s.glsl->c_str(), GLSL_COMPILE_BLOCK, &v, info, sizeof info, GLSL_COMPILER_FLAG_NONE);
+                busy_since = 0;
+                LOG("[glsl] test %s: mode %d, %s, %u ms: %.200s\n", s.name, (int)m, v ? "shader made" : "no shader", (u32)OSTicksToMilliseconds(OSGetSystemTime() - t0), info);
+                if (v) FreeVertexShader(v);
+            }
+        }
+    };
     for (;;) {
         Job j;
         OSLockMutex(&mutex);
@@ -285,17 +164,12 @@ int compile_thread(int, void *) {
             OSSleepTicks(OSMillisecondsToTicks(20));
             continue;
         }
-        CompileDone d{j.vs, j.key, nullptr, nullptr, j.inputs};
-        if (native_load(j, d)) {
-            if (!j.cached) cache_append(j);
-            LOG("[glsl] %s %016llx restored from native cache\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key);
-            OSLockMutex(&mutex);
-            done.push_back(d);
-            OSUnlockMutex(&mutex);
-            continue;
+        if (!initialized) {
+            initialize();
+            initialized = true;
         }
-        if (!started) { start_compiler(); started = true; }
         const OSTime t0 = OSGetSystemTime();
+        CompileDone d{j.vs, j.key, nullptr, nullptr, j.inputs};
         info[0] = 0;
         LOG("[glsl] compiling %s %016llx, %u bytes of GLSL\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, (u32)j.glsl.size());
         watched = 0;
@@ -325,7 +199,7 @@ int compile_thread(int, void *) {
             LOG("[glsl] %s %016llx came back hollow: %s\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, again ? "trying again" : "given up");
             if (again) OSSleepTicks(OSMillisecondsToTicks(250));
             OSLockMutex(&mutex);
-            if (again) jobs.push_front(std::move(j));
+            if (again) compile_queue::enqueue(jobs,std::move(j));
             else known.erase(j.key);
             OSUnlockMutex(&mutex);
             continue;
@@ -343,7 +217,6 @@ int compile_thread(int, void *) {
         }
         resources = (resources & ~0xFFu) | registers;
         LOG("[glsl] %s %016llx requires %u ordinary registers\n", j.vs ? "vertex" : "pixel", (unsigned long long)j.key, registers);
-        native_save(j, d);  // store the corrected program, before install_compiled's Cemu-only export expansion
         if (!j.cached) cache_append(j);
         OSLockMutex(&mutex);
         done.push_back(d);
@@ -352,6 +225,11 @@ int compile_thread(int, void *) {
     return 0;
 }
 }  // namespace
+
+bool shader_cache_io_stalled(OSTime timeout) {
+    const u32 start = cache_io_since_ms.load(std::memory_order_acquire);
+    return start && (u32)((u32)OSTicksToMilliseconds(OSGetSystemTime()) - (start - 1)) > (u32)OSTicksToMilliseconds(timeout);
+}
 
 bool shader_compile_on() { return compiler != nullptr; }
 
@@ -397,23 +275,25 @@ void shader_compile_watch() {
     wiiu::log_threads();  // memory only: this is the GPU thread, which never waits for the card
 }
 
-// A draw is waiting for this one, so it goes ahead of everything the cache queued at the start, and a shader the cache queued that a draw now
-// asks for moves up to the front: after a start with a few hundred cached shaders a miss used to wait its turn behind all of them, its draws
-// going through the fallback for as many seconds.
+// Prioritize demanded vertex work, then demanded pixels, then cache warm-up.
+// Repeated demand promotes a cached record without duplicating its compile.
 void shader_compile_request(bool vs, u64 key, std::string glsl, u32 inputs) {
     static std::unordered_set<u64> reported_vs;  // at most one request diagnostic per vertex key, even if a caller repeats it
     const char *disposition = "already known (no queued job)";
     OSLockMutex(&mutex);
     const bool report = vs && reported_vs.insert(key).second;
     if (known.insert(key).second) {
-        jobs.push_front(Job{vs, false, key, inputs, std::move(glsl)});
+        Job j{vs,false,key,inputs,std::move(glsl)};j.demanded=true;
+        compile_queue::enqueue(jobs,std::move(j));
         disposition = "queued";
-    } else
+    }
+    else
         for (auto it = jobs.begin(); it != jobs.end(); ++it)
             if (it->key == key && it->vs == vs) {
                 Job j = std::move(*it);
                 jobs.erase(it);
-                jobs.push_front(std::move(j));
+                j.demanded=true;
+                compile_queue::enqueue(jobs,std::move(j));
                 disposition = "promoted";
                 break;
             }

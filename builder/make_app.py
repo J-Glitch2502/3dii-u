@@ -26,16 +26,16 @@ import shaderlogs  # noqa: E402
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(HERE, 'dist')
 DEVKITPRO = 'C:/devkitPro/opt/devkitpro'
-ENGINE_DIRS = ('tools', 'phase0/tools', 'phase0/title_code', 'port','third_party/3dsrecomp/runtime', 'third_party/3dsrecomp/tools', 'third_party/3dsrecomp/games',
-               'third_party/stb', 'third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc', 'toolchain/aac_ppc')
-ENGINE_FILES = ('third_party/cafeglsl/glslcompiler.exe', 'third_party/cafeglsl/libwinpthread-1.dll', 'third_party/cafeglsl/zlib1.dll',
+ENGINE_DIRS = ('third_party/3ds-link', 'tools', 'phase0/tools', 'phase0/title_code', 'port','third_party/3dsrecomp/runtime', 'third_party/3dsrecomp/tools', 'third_party/3dsrecomp/games',
+               'third_party/cafeglsl_fallback/windows-x86_64', 'third_party/nlohmann', 'third_party/system_archives', 'toolchain/network_ppc', 'third_party/stb', 'third_party/cafeglsl_ppc/cafeglsl-1.0.0-rc1-wiiu-ppc', 'toolchain/aac_ppc')
+ENGINE_FILES = ('builder/multiplayer-defaults.json', 'third_party/cafeglsl/glslcompiler.exe', 'third_party/cafeglsl/libwinpthread-1.dll', 'third_party/cafeglsl/zlib1.dll',
                 'third_party/3dsrecomp/LICENSE')
 WORK = os.path.join(HERE, 'build_app')  # PyInstaller's own work folder, gone afterwards
 NAME = '3Dii U Builder'
 # what the build's scripts import that the window's code doesn't (they're run from the repository by path, so PyInstaller can't see them)
 SCRIPT_MODULES = ('urllib.request', 'ssl',  # covers.py, when the window is the frozen app
                   'wave',  # tools/make_boot_sound.py, for the window's start-up sound
-                  'argparse', 'bisect', 'builtins', 'concurrent.futures', 'filecmp', 'glob', 'hashlib', 'mmap', 'runpy', 'shlex', 'zlib',
+                  'argparse', 'bisect', 'builtins', 'csv', 'concurrent.futures', 'filecmp', 'glob', 'hashlib', 'mmap', 'runpy', 'shlex', 'zlib',
                   'cryptography.hazmat.primitives.ciphers')  # the last for phase0/tools/pack_wup.py, which packs the WUP
 EXCLUDE = ('numpy', 'PIL', 'tkinter', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineQuick', 'PySide6.QtPdf',
            'PySide6.QtMultimedia', 'PySide6.Qt3DCore', 'PySide6.QtCharts', 'PySide6.QtDataVisualization', 'PySide6.QtGraphs', 'PySide6.QtQuick3D')
@@ -86,10 +86,14 @@ def bundle_logs(src, dst):
     from the dump. Returns (records as recipes, records left out)."""
     logs, out = os.path.join(src, 'shader_logs'), os.path.join(dst, 'shader_logs')
     os.makedirs(out, exist_ok=True)
+    catalog = os.path.join(logs, 'observed_fragments.json')
+    if os.path.isfile(catalog): shutil.copy2(catalog, out)
     dvlb = os.path.join(logs, 'dvlb.bin')
     progs = shaderlogs.programs(dvlb) if os.path.isfile(dvlb) else set()
     stale = progs and not os.path.isfile(os.path.join(logs, 'dvlb.gsl'))  # a dvlb.bin from before dvlb_to_log.py kept geometry programs whole
     recipes, shipped = 0, set()
+    for f in [f for f in os.listdir(logs) if f.endswith('.vsf')]:
+        shutil.copy2(os.path.join(logs, f), os.path.join(out, f))
     for f in [f for f in os.listdir(logs) if f.endswith('.vsr')]:  # made from a dump this repository doesn't keep (shaderlogs.py --recipes)
         shutil.copy2(os.path.join(logs, f), os.path.join(out, f))
         with open(os.path.join(logs, f), 'rb') as h:
@@ -98,7 +102,7 @@ def bundle_logs(src, dst):
         recipes += len(made)
     srcs, cache, left = shaderlogs.sources(src), {}, 0  # a tested game's own code.bin and romfs.bin
     for f in os.listdir(logs):
-        if not f.endswith('.bin') or f == 'dvlb.bin' or f.startswith('other_'):
+        if not f.endswith('.bin') or f in ('dvlb.bin', 'neighborhood_fs.bin') or f.startswith('other_'):
             continue
         with open(os.path.join(logs, f), 'rb') as h:
             d = h.read()
@@ -133,6 +137,11 @@ def bundle_logs(src, dst):
 
 def bundle_engine(engine):
     """the build engine, in the repository's layout, so the app builds wherever it is"""
+    sys.path.insert(0, os.path.join(ROOT, 'tools'))
+    import observation_catalog
+    import setup_fallback_compiler
+    setup_fallback_compiler.ensure('windows-x86_64')
+    observation_catalog.validate(ROOT)
     def skip(folder, names):  # caches, links WSL left that Windows can't open (third_party/3dsrecomp/games/*/profile.txt), and the tools
         # for testing on this PC's own console (its address, this PC's paths), which no build runs
         console = os.path.normcase(folder) == os.path.normcase(os.path.join(ROOT, 'tools'))
@@ -143,8 +152,11 @@ def bundle_engine(engine):
     for f in ENGINE_FILES:
         os.makedirs(os.path.dirname(os.path.join(engine, f)), exist_ok=True)
         shutil.copy2(os.path.join(ROOT, f), os.path.join(engine, f))
+    observation_catalog.validate(engine)
+    import package_audit
+    package_audit.verify(ROOT, engine, (*ENGINE_DIRS, *ENGINE_FILES))
     recipes = left = 0
-    for g in sorted(os.listdir(os.path.join(ROOT, 'games'))):  # what runs learned: where code starts, the render states they met
+    for g in sorted(os.listdir(os.path.join(ROOT, 'games')) if os.path.isdir(os.path.join(ROOT, 'games')) else []):  # optional local learned data
         src, dst = os.path.join(ROOT, 'games', g), os.path.join(engine, 'games', g)
         if os.path.isfile(os.path.join(src, 'functions.txt')):
             os.makedirs(dst, exist_ok=True)
@@ -194,12 +206,13 @@ def version_resource(path, version):
         f.write(str(info))
 
 
-def unconfirmed(compat, games):
+def unconfirmed(compat, games, catalog_games=None):
     """the games compat.json calls Complete that have no confirmed shader list under games (shaderlogs.py --confirm): built without it, such a
     game could lose shaders the build it was confirmed with had"""
     def listed(slug):
-        path = os.path.join(games, slug, 'shader_logs', shaderlogs.CONFIRMED)
-        return os.path.isfile(path) and os.path.getsize(path) > 0
+        return any(os.path.isfile(path) and os.path.getsize(path) > 0 for path in
+                   (os.path.join(base, slug, 'shader_logs', shaderlogs.CONFIRMED)
+                    for base in (games, catalog_games) if base))
     return sorted(g['slug'] for k, g in compat.items() if not k.startswith('_') and g['status'] == 'Complete' and not listed(g['slug']))
 
 
@@ -229,11 +242,18 @@ def archive_app(name):
 
 
 def main():
+    import PySide6
+    if sys.platform == 'win32' and PySide6.__version__ != '6.11.3':
+        sys.exit('Windows packages require the Proton-tested Qt 6.11.3 runtime. '
+                 'Run: python -m pip install -r builder/requirements-windows.txt')
     import PyInstaller.__main__
     import gui
     release = release_tag(sys.argv, gui.VERSION)
+    sys.path.insert(0, os.path.join(ROOT, 'tools'))
+    import observation_catalog
+    observation_catalog.validate(ROOT)
     with open(os.path.join(HERE, 'compat.json'), encoding='utf-8') as f:
-        loose = unconfirmed(json.load(f), os.path.join(ROOT, 'games'))
+        loose = unconfirmed(json.load(f), os.path.join(ROOT, 'games'), str(observation_catalog.directory(ROOT) / 'games'))
     if loose:
         sys.exit('Complete in compat.json, but with no confirmed shader list (shaderlogs.py --confirm): ' + ', '.join(loose))
     os.makedirs(WORK, exist_ok=True)
@@ -246,9 +266,10 @@ def main():
             '--add-data', f'{os.path.join(HERE, "ui")}{os.pathsep}ui',
             '--add-data', f'{os.path.join(HERE, "compat.json")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "faq.json")}{os.pathsep}.',
+            '--add-data', f'{os.path.join(HERE, "HOMEBREW_GUIDE.txt")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "icon.png")}{os.pathsep}.',
             '--add-data', f'{os.path.join(HERE, "bin", "makerom.exe")}{os.pathsep}bin',
-            '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'covers', '--hidden-import', 'cia_to_decrypted_3ds']
+            '--collect-submodules', 'pyctr', '--hidden-import', 'gui', '--hidden-import', 'covers', '--hidden-import', 'cia_to_decrypted_3ds', '--hidden-import', 'wup_update']
     for m in SCRIPT_MODULES:
         args += ['--hidden-import', m]
     for m in EXCLUDE:
@@ -274,6 +295,14 @@ def main():
     with open(os.path.join(app, 'Read me first.txt'), 'w', encoding='utf-8') as f:
         f.write(readme)
     shutil.copyfile(os.path.join(HERE, 'app_notices.txt'), os.path.join(app, 'Third-party notices.txt'))
+    shutil.copyfile(os.path.join(HERE, 'HOMEBREW_GUIDE.txt'), os.path.join(app, 'Homebrew import guide.txt'))
+    import aroma_support
+    module = os.environ.get('THREEDII_AROMA_MODULE')
+    source = os.environ.get('THREEDII_AROMA_SOURCE')
+    if not module or not source:
+        sys.exit('Set THREEDII_AROMA_MODULE and THREEDII_AROMA_SOURCE to include the Homebrew update loader and corresponding source.')
+    aroma_support.bundle(app, module, source)
+
     # the app's licence (EUPL-1.2) and every bundled part's notice and full licence text, as the licences ask of a binary release
     shutil.copyfile(os.path.join(ROOT, 'LICENSE'), os.path.join(app, 'LICENSE.txt'))
     shutil.copyfile(os.path.join(ROOT, 'THIRD_PARTY_LICENSES.md'), os.path.join(app, 'THIRD_PARTY_LICENSES.md'))

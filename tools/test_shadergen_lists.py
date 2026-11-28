@@ -249,7 +249,7 @@ with tempfile.TemporaryDirectory() as tmp:
         log.write_bytes(data)
         assert list(vertex_records(data)) == list(vertex_records(first))
         assert list(keys(log)) == [(0,)]
-        assert records(log) == [bytes(4)]
+        assert records(log, allow_partial=True) == [bytes(4)]
     pipelines.write_bytes(bytes(8) + fragment + fragment[:-1])
     out = work / 'out'
     result = subprocess.run([sys.argv[1], str(pipelines), str(logs), str(out), '-'], capture_output=True, text=True, errors='replace')

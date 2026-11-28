@@ -463,6 +463,25 @@ def have_system_archives(folder, required=ESSENTIAL_ARCHIVES):
     return all(os.path.isfile(p) and is_romfs(p) for p in (os.path.join(folder, t + '.romfs') for t in required))
 
 
+def install_system_fallbacks(out_dir, required, root=None):
+    """Supply redistributable archives only where a valid user copy is absent."""
+    bundled = {'0004009b00010402'}
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    installed = []
+    for tid in required:
+        if tid not in bundled: continue
+        dst = os.path.join(out_dir, tid + '.romfs')
+        if os.path.isfile(dst) and is_romfs(dst): continue
+        src = os.path.join(root, 'third_party', 'system_archives', tid + '.romfs')
+        if not os.path.isfile(src) or not is_romfs(src):
+            raise DumpError('The bundled open-source country list is missing or damaged. Reinstall the Builder.')
+        os.makedirs(out_dir, exist_ok=True)
+        shutil.copyfile(src, dst + '.part')
+        os.replace(dst + '.part', dst)
+        installed.append(tid)
+    return installed
+
+
 def nand_titles(folder):
     """The title folder of a 3DS NAND in what the user points at: an emulator's user folder (Azahar's and Citra's user/nand/<32 zeros>/title,
     or a copy of one by any name), the nand folder in it, the title folder of a NAND dumped from a 3DS, or the 0004009b and 000400db folders

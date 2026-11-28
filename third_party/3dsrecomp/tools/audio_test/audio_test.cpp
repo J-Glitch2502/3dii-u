@@ -35,6 +35,10 @@ void rt_fatal(const char *fmt, ...) {
     abort();
 }
 
+namespace mem {
+u8 *paddr_ptr(u32 address) { return const_cast<u8 *>(audio::hle::phys_range(address, 1)); }
+}
+
 using namespace audio::hle;
 
 static int g_failures = 0, g_checks = 0;
@@ -677,6 +681,46 @@ static void test_embedded_sine() {
     printf("  embedded sine: %zu samples verified, source ended at frame %d\n", left.size(), end_frame);
 }
 
+// A buffer arriving immediately after a short frame belongs to an already
+// playing stream. Do not insert a second silent frame before consuming it.
+static void test_stream_resume_without_extra_blank() {
+    Source source;
+    SourceConfig cfg{};
+    const u32 first = 0x20200000, second = 0x20210000;
+    std::vector<s16> samples(2048, 1000);
+    memcpy(phys(first), samples.data(), 4096);
+    memcpy(phys(second), samples.data(), 4096);
+    cfg.enable = 1;
+    cfg.rate_multiplier = 44100.0f / 32728.0f;
+    cfg.interpolation_mode = (u8)Interp::Linear;
+    cfg.flags1 = 1 | ((u16)Format::PCM16 << 2);
+    cfg.buffers[0].paddr.set(first);
+    cfg.buffers[0].length.set(256);
+    cfg.buffers[0].buffer_id = 1;
+    cfg.buffers_dirty = 1;
+    cfg.dirty = SRC_RESET | SRC_ENABLE_DIRTY | SRC_RATE_DIRTY | SRC_INTERP_DIRTY |
+                SRC_FORMAT_DIRTY | SRC_MONO_STEREO_DIRTY | SRC_BUFFER_QUEUE_DIRTY;
+    source.tick(cfg, kCoeffs, true, true);
+    CHECK_EQ(source.output()[80][0], 0);  // retain the original first-start latency
+    source.tick(cfg, kCoeffs, true, true);
+    CHECK_EQ(source.output()[80][0], 1000);
+    source.tick(cfg, kCoeffs, true, true); // runs short part-way through this frame
+    CHECK_EQ(source.output()[159][0], 0);
+    cfg.buffers[0].paddr.set(second);
+    cfg.buffers[0].length.set(1280);
+    cfg.buffers[0].buffer_id = 2;
+    cfg.buffers_dirty = 1;
+    cfg.dirty = SRC_BUFFER_QUEUE_DIRTY;
+    source.tick(cfg, kCoeffs, true, true);
+    CHECK_EQ(source.output()[80][0], 1000); // ready buffer must play now, not next tick
+    source.reset();
+    cfg.dirty = SRC_ENABLE_DIRTY | SRC_FORMAT_DIRTY | SRC_MONO_STEREO_DIRTY |
+                SRC_BUFFER_QUEUE_DIRTY;
+    cfg.buffers_dirty = 1;
+    source.tick(cfg, kCoeffs, true, true);
+    CHECK_EQ(source.output()[80][0], 0); // reset restores first-start semantics
+}
+
 static void test_buffer_queue_and_gains() {
     dsp_init();
     audio::pipe_read(2, 32);
@@ -1139,6 +1183,7 @@ int main(int argc, char **argv) {
         {"unpublished_playback", test_unpublished_playback},
         {"embedded_sine", test_embedded_sine},
         {"buffer_queue_and_gains", test_buffer_queue_and_gains},
+        {"stream_resume", test_stream_resume_without_extra_blank},
         {"looping_and_play_position", test_looping_and_play_position},
         {"adpcm_source_and_rate", test_adpcm_source_and_rate},
         {"adpcm_chained", test_adpcm_chained},

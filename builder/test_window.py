@@ -68,6 +68,28 @@ try:
         return len(pills)
 
     settle('loading')
+    for parts in ('full', 'binary', 'shaders', 'both'):
+        state.setOutputFormat('homebrew')
+        state.setHomebrewParts(parts)
+        settle('Homebrew ' + parts)
+        assert state.outputFormat == 'homebrew' and state.homebrewParts == parts
+        saved = json.load(open(settings))
+        assert saved['output_format'] == 'homebrew' and saved['homebrew_parts'] == parts
+    for parts in ('binary','both'):
+        state.setOutputFormat('wup-update')
+        state.setWupUpdateParts(parts)
+        settle('WUP update '+parts)
+        assert state.outputFormat == 'wup-update' and state.wupUpdateParts == parts
+        saved = json.load(open(settings))
+        assert saved['output_format'] == 'wup-update' and saved['wup_update_parts'] == parts
+    with mock.patch.object(gui.QFileDialog, 'getOpenFileName', return_value=(os.path.join(base,'original.base.json'),'')):
+        state.chooseWupBase()
+    assert state.hasWupBase and state.wupBaseText.endswith('original.base.json')
+    assert json.load(open(settings))['wup_base_manifest'].endswith('original.base.json')
+    state.clearWupBase()
+    assert not state.hasWupBase and 'wup_base_manifest' not in json.load(open(settings))
+    state.setOutputFormat('wup')
+    settle('returning to WUP')
     # Selected save folders must remain readable, including names with no spaces.
     save_name = '20520623-074459_Animal_Crossing_New_Leaf_Checkpoint_backup_for_import'
     state.set(saveText=save_name, hasSave=True)
@@ -621,13 +643,13 @@ try:
     # Queue selection is a snapshot. Only a completed worker, including a failed launch, can advance it.
     kept_st = dict(state.st)
     kept_game, kept_update, kept_save = state.game, state.update, state.save_in
-    kept_flags = {key: state._s[key] for key in ('rootOk', 'target', 'gameName', 'gameLanguage', 'gameMenu', 'menuShortcut', 'building', 'view', 'updateState')}
+    kept_flags = {key: state._s[key] for key in ('rootOk', 'target', 'gameName', 'gameLanguage', 'gameMenu', 'menuStyle', 'menuShortcut', 'building', 'view', 'updateState')}
     card = os.path.join(base, 'test card')
     os.makedirs(card)
 
     def enqueue(name, target='folder', language='Console default'):
         state.game = SimpleNamespace(path=os.path.join(base, name + '.3ds'), name=name,
-                                     title_id=int.from_bytes(name.encode()[:8], 'little'), encrypted=lambda: False)
+                                     title_id=0x0004000000054500, encrypted=lambda: False)
         state.set(gameName=name, target=target)
         state.setGameLanguage(language)
         state.enqueueBuild()
@@ -650,7 +672,7 @@ try:
         state.set(rootOk=True, building=False, view='form', updateState='')
         with mock.patch.object(gui, 'otp_ok', return_value=True), mock.patch.object(state, 'find_system'), \
              mock.patch.object(gui.dumps, 'have_system_archives', return_value=True), \
-             mock.patch.object(gui.pipeline, 'profile_for', side_effect=lambda game: {'folder': game.name}), \
+             mock.patch.object(gui.pipeline, 'profile_for', side_effect=lambda game: {'folder': game.name, 'title_id': '000500003D000545'}), \
              mock.patch.dict(os.environ, THREEDII_BUILD='first work folder', BOOT9_PATH='first keys'), \
              mock.patch.object(gui.threading, 'Thread'), \
              mock.patch.object(gui.subprocess, 'Popen', side_effect=[worker, OSError('launch failed'), worker, worker]) as launch:
@@ -658,7 +680,9 @@ try:
             state.save_in = 'queued save folder'
             state.setMenuShortcut('L+R')
             assert json.load(open(settings))['menu_shortcut'] == 'L+R'
+            state.setMenuStyle('classic')
             enqueue('First', language='French')
+            state.setMenuStyle('new')
             assert json.load(open(settings))['game_languages'][f'{state.game.title_id:016x}'] == 'French'
             enqueue('First', language='German')
             assert state.queuePending == 1 and state.dialog['title'] == 'That output is already queued'
@@ -689,6 +713,7 @@ try:
             assert first_args[first_args.index('--save') + 1] == 'queued save folder'
             assert first_args[first_args.index('--language') + 1] == 'French'
             assert first_args[first_args.index('--menu-shortcut') + 1] == 'L+R'
+            assert first_args[first_args.index('--menu-style') + 1] == 'classic'
             assert first_env['THREEDII_BUILD'] == 'first work folder' and first_env['BOOT9_PATH'] == 'first keys'
             state.build()
             state.clearQueue()
@@ -701,7 +726,7 @@ try:
             assert queue_status() == ['Done', 'Failed', 'Building', 'Queued']
             assert state.queueItems[1]['detail'] == 'launch failed'
             third_args = launch.call_args.args[0]
-            assert third_args[third_args.index('--card') + 1] == card and '--save' not in third_args and '--language' not in third_args
+            assert third_args[third_args.index('--card') + 1] == card and '--save' not in third_args and third_args[third_args.index('--language') + 1] == state.system_language
             assert '--no-menu' in third_args and '--menu-shortcut' not in third_args
             with mock.patch.object(gui, 'WIN', True), mock.patch.object(gui.subprocess, 'run'):
                 gui.App.stop_for_close(state)
@@ -711,13 +736,46 @@ try:
             assert queue_status() == ['Done', 'Failed', 'Cancelled', 'Queued']
             state.startQueue()
             assert launch.call_count == 4 and state.buildName == 'Fourth'
-            assert all(flag not in launch.call_args.args[0] for flag in ('--no-menu', '--menu-shortcut'))
+            assert all(flag not in launch.call_args.args[0] for flag in ('--no-menu', '--menu-shortcut', '--menu-style'))
             complete('@error build failed')
             settle('queue finished')
             assert not state.busy() and state.queuePending == 0 and state.queueItems[-1]['detail'] == 'build failed'
             assert state.gameName == 'Still editing'
             state.clearQueue()
             assert state.queueItems == []
+            # A queued partial Homebrew export must keep its original format
+            # and progress stages after the user changes the form back to WUP.
+            state.setOutputFormat('homebrew')
+            state.setHomebrewParts('both')
+            enqueue('Homebrew update')
+            job = state.jobs[0]
+            state.setOutputFormat('wup')
+            assert job.output_format == 'homebrew' and job.homebrew_parts == 'both'
+            assert '--otp' not in job.argv and job.argv[job.argv.index('--homebrew-parts') + 1] == 'both'
+            with mock.patch.object(gui.subprocess, 'Popen', return_value=worker):
+                state.startQueue()
+                assert state.stages == [name for name, _ in gui.pipeline.stages_for('homebrew', 'both') if name != 'Copying']
+                complete('@done homebrew update')
+            state.clearQueue()
+            # Update choices and CLI flags belong to the queued job, not the form.
+            for parts in ('binary', 'both'):
+                state.setOutputFormat('wup-update')
+                state.setWupUpdateParts(parts)
+                state.st['wup_base_manifest'] = 'matching.base.json'
+                enqueue('Native update')
+                job = state.jobs[0]
+                assert job.output.endswith(os.path.normcase('Native update_NativeWUP_Update'))
+                assert job.argv[job.argv.index('--output-format') + 1] == 'wup-update'
+                assert job.argv[job.argv.index('--wup-update-parts') + 1] == parts
+                assert job.argv[job.argv.index('--wup-base-manifest') + 1] == 'matching.base.json'
+                assert '--otp' in job.argv and '--homebrew-parts' not in job.argv
+                state.setOutputFormat('wup')
+                with mock.patch.object(gui.subprocess, 'Popen', return_value=worker):
+                    state.startQueue()
+                    assert state.stages == [name for name, _ in gui.pipeline.stages_for('wup-update', parts) if name != 'Copying']
+                    complete('@done native update')
+                assert 'same device' in state.resultText and 'delete that first' not in state.resultText
+                state.clearQueue()
     finally:
         state.timer.stop()
         state.st, state.game, state.update, state.save_in = kept_st, kept_game, kept_update, kept_save
@@ -786,6 +844,19 @@ try:
     simple = engine.rootObjects()[-1]
     assert simple.objectName() == 'simple' and not simple.property('visible'), 'the simple window did not load, or showed itself'
     settle('the simple window')
+    state.setOutputFormat('homebrew')
+    for parts in ('full', 'binary', 'shaders', 'both'):
+        state.setHomebrewParts(parts)
+        settle('simple Homebrew ' + parts)
+    state.setOutputFormat('wup')
+    settle('simple WUP')
+    for parts in ('binary', 'both'):
+        state.setOutputFormat('wup-update')
+        state.setWupUpdateParts(parts)
+        settle('simple WUP update ' + parts)
+        assert state.wupUpdateParts == parts
+    state.setOutputFormat('wup')
+    settle('simple WUP after updates')
     check_shortcut_picker(simple)
     state.tell('A message', 'In the simple window.')
     settle('a message in the simple window')

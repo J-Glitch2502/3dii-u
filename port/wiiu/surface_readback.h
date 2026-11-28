@@ -6,7 +6,10 @@
 #include <vector>
 
 namespace surface_readback {
-struct Span { uint64_t lo, hi; };
+struct Span {
+    uint64_t lo, hi;
+    template<class Archive> void state_fields(Archive &a) { a.fields(lo, hi); }
+};
 using Spans = std::vector<Span>;
 inline Span bounds(uint32_t addr, uint32_t size) { return {addr, std::min(uint64_t(addr) + size, uint64_t(1) << 32)}; }
 inline bool overlaps(Span a, Span b) { return a.lo < a.hi && b.lo < b.hi && a.lo < b.hi && b.lo < a.hi; }
@@ -43,6 +46,10 @@ void guest_wrote(Surface &s, uint32_t addr, uint32_t size) {
     s.written_after = s.drawn;
     add(s.written, {std::max(write.lo, target.lo), std::min(write.hi, target.hi)});
     s.guest_newer = true;
+    if (write.lo <= target.lo && write.hi >= target.hi) {
+        s.gpu_newer = false;
+        s.first_use = true;
+    }
 }
 
 template<class Surface, class Surfaces>

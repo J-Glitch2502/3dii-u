@@ -1,5 +1,6 @@
 #undef NDEBUG
 #include "latte_program.h"
+#include "gfd_index.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
@@ -132,9 +133,7 @@ static void* memalign(size_t, size_t) {
     return nullptr;
 }
 #include "shader_budget_install.inc"
-struct GfdShader {
-    u32 head_at, head_len, prog_at, prog_len;
-};
+using GfdShader = gfd_index::Shader;
 constexpr u32 kShaderIndexMagic = 0x53484458, kShaderIndexVersion = 1;
 static std::vector<GfdShader> gfd_vs, gfd_ps;
 static std::vector<u8> gfd_file_head, gfd_end;
@@ -184,7 +183,9 @@ static std::vector<u8> index_file() {
 static void scan(const std::vector<u8>& v, const std::vector<u8>& idx = index_file()) {
     gfd_vs.clear();
     gfd_ps.clear();
-    gfd_scan(v.data(), (u32)v.size(), idx.data(), (u32)idx.size());
+    auto complete = v;
+    block(complete, 1, {});  // Synthetic fixtures include the END block required by the production loader.
+    gfd_scan(complete.data(), (u32)complete.size(), idx.data(), (u32)idx.size());
 }
 static std::vector<u8> current_file;
 static std::vector<u8> read_file(const std::string&) {

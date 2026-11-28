@@ -55,6 +55,11 @@ static void native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
     u.out_bank ^= 16;
 }
 
+static unsigned long long hash_word(unsigned long long h, unsigned w) {
+    for (unsigned i = 0; i < 4; i++) h = (h ^ ((w >> (8 * i)) & 255)) * 0x100000001b3ull;
+    return h;
+}
+
 int main(int argc, char **argv) {
     int failures = 0, checked = 0;
     size_t prims = 0;
@@ -79,7 +84,17 @@ int main(int argc, char **argv) {
             s.dirty = true;
             p += 16 + (nc + ns) * 4;
             for (u32 t = 0; t < gs_native_count; t++) {
-                if (gs_native_table[t].entry != entry) continue;
+                const auto &native = gs_native_table[t];
+                if (native.entry != entry || native.end > nc) continue;
+                unsigned long long h = 0xcbf29ce484222325ull;
+                for (u32 i = entry; i < native.end; i++) h = hash_word(h, s.code[i]);
+                if (h != native.code_hash) continue;
+                h = 0xcbf29ce484222325ull;
+                for (u32 i = 0; i < native.nswizzles; i++) {
+                    const u32 index = native.swizzles[i];
+                    h = hash_word(h, index < ns ? s.swizzle[index] : 0);
+                }
+                if (h != native.swizzle_hash) continue;
                 const ShaderProgram *prog = shader_get_program(s);
                 int bad = 0;
                 for (int run = 0; run < 2000 && bad < 5; run++) {
@@ -90,11 +105,14 @@ int main(int argc, char **argv) {
                     for (u32 i = 0; i < 16; i++) s.b[i] = (rng() & 1) != 0;
                     s.b[14] = run % 3 != 0;  // the bool that picks between its two ways (the plain quads, or the loop)
                     for (u32 k = 0; k < 4; k++) {  // loops: a count of 1 to 6, from a small start, in steps of 1 to 3
-                        s.i[k][0] = (u8)(rng() % 6);
+                        s.i[k][0] = run >= 1984 ? (u8)((run & 3) == 3 ? 255 : run & 3) : (u8)(rng() % 6);
                         s.i[k][1] = (u8)(rng() % 4);
                         s.i[k][2] = (u8)(1 + rng() % 3);
                         s.i[k][3] = 0;
                     }
+                    V4 inputs[16];
+                    for (auto &v : inputs)
+                        for (float &lane : v.v) lane = big(rng);
                     std::vector<Prim> want, got;
                     // the third way: native again, on a register file full of another run's leavings, which a program the generator
                     // calls independent must not notice (the runtime then runs it on two threads: vertex.cpp's gs_run_shared)
@@ -104,6 +122,7 @@ int main(int argc, char **argv) {
                         memset(&u, 0, sizeof u);
                         memset(&e, 0, sizeof e);
                         shader_unit_init(u, s);
+                        memcpy(u.r + REG_IN, inputs, sizeof inputs);
                         if (way == 2) {
                             for (u32 i = REG_TMP; i < REG_UNI; i++)
                                 for (u32 k = 0; k < 4; k++) u.r[i].v[k] = (float)(rng() % 1000) - 500.0f;
@@ -112,7 +131,16 @@ int main(int argc, char **argv) {
                             u.out_bank = (rng() & 1) * 16;
                             got.clear();
                         }
-                        e.output_mask = 0x3f & gs_native_table[t].outmask;
+                        // Dependent programs still need all output lanes checked. Their
+                        // independence mask can be zero because they read input registers.
+                        e.output_mask = native.independent ? native.outmask : 0xffff;
+                        if (way == 2) {
+                            // Independent invocations must not consume a prior
+                            // invocation's unfilled emitter vertex slots either.
+                            const unsigned nout=__builtin_popcount(e.output_mask);
+                            for(auto &vertex:e.buf) for(unsigned o=0;o<nout;o++)
+                                for(float &lane:vertex[o].v) lane=(float)(rng()%1000)-500.0f;
+                        }
                         e.emit_prim = capture;
                         u.emitter = &e;
                         sink = way ? &got : &want;

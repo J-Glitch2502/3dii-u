@@ -1,0 +1,365 @@
+diff --git a/.gitignore b/.gitignore
+index 98a796f..90fb045 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,5 @@ cmake-build-debug/
+ CMakeLists.txt
+ *.wms
+ *.zip
++
++/build_generic_dev/
+diff --git a/README.md b/README.md
+index d3b0cf4..4554f3d 100644
+--- a/README.md
++++ b/README.md
+@@ -38,3 +38,61 @@ docker run -it --rm -v ${PWD}:/project rpxloadingmodule-builder make clean
+ ## Format the code via docker
+ 
+ `docker run --rm -v ${PWD}:/src ghcr.io/wiiu-env/clang-format:13.0.0-2 -r ./src -i`
++
++## Generic homebrew development updates
++
++This local fork supports an opt-in companion directory for any `.wuhb` under
++`sd:/wiiu/apps/`, including subdirectories. There is no per-game registration.
++Keep the original WUHB at the same path: its path and metadata continue to select
++its save directory, and its content remains the fallback for unchanged files.
++
++Example:
++
++```text
++sd:/wiiu/apps/Kirby Triple Deluxe.wuhb
++sd:/wiiu/apps/Kirby Triple Deluxe.wuhb.dev/
++  active.txt                         # contains: build-20261118-1
++  builds/build-20261118-1/
++    root.rpx                         # rebuilt executable, any original RPX name
++    content/
++      shaders.idx                    # optional changed content files only
++      shaders.gsh
++```
++
++At launch, the module reads the companion's `active.txt`, validates the release
++component and RPX header, prepares that RPX, and mounts the original WUHB.
++A content **merge** layer overrides only files present in the selected release.
++Missing files still come from the WUHB; saves use the original bundle's path and
++metadata. An executable-only update needs no `content` directory. This does not
++load an entire OS, patch an installed retail title, or convert executable formats.
++A merge cannot express deletion of a file already present in the bundle.
++
++Use `tools/ftp_homebrew_dev.py` in our 3Dii U checkout to publish an update:
++
++```sh
++python3 tools/ftp_homebrew_dev.py WII_U_IP \
++  'wiiu/apps/Kirby Triple Deluxe.wuhb' rebuilt/g_bale.rpx \
++  --content changed-content --release build-20261118-1
++```
++
++The publisher uploads to a new immutable release directory, checks every file by
++SHA-256 readback, and publishes `active.txt` last. It checks that both shader files
++are supplied together. If activation fails, it restores the old marker. Upload or
++verification failures leave the prior active release selected. Existing releases
++are never overwritten; use a new release ID to retry an interrupted transfer.
++The original WUHB and save folders are never uploaded, renamed, or deleted.
++A brief gap during FTP's two-step marker rename uses the original bundle.
++
++The updated module must be loaded by reloading Aroma once. Future data updates
++take effect on the next launch, without rebuilding the module. Reloading Aroma is
++not required after each RPX/content update. Treat content as read-only; a homebrew
++application's mutable state belongs in its save directory.
++
++Keep shader files and their RPX from the same build. Versioned upload mechanics
++prevent partially uploaded releases from activating; they cannot establish whether
++an arbitrary rebuilt binary is compatible with its original game assets.
++
++For compatibility, the older Brain Age and Mario Party override paths still work
++when no companion `active.txt` is present. They are not an allowlist for the new
++system. Remove or rename `active.txt` to launch the bundled executable (except for
++those legacy titles, which will then use their older override if present).
+diff --git a/src/RPXLoading.cpp b/src/RPXLoading.cpp
+index 9b19c03..6db0751 100644
+--- a/src/RPXLoading.cpp
++++ b/src/RPXLoading.cpp
+@@ -1,4 +1,6 @@
+ #include "RPXLoading.h"
++#include "DevBundlePaths.h"
++#include <cerrno>
+ #include "data/defaultIcon.h"
+ #include "globals.h"
+ #include "utils/FileReader.h"
+@@ -9,6 +11,7 @@
+ #include <coreinit/debug.h>
+ #include <coreinit/ios.h>
+ #include <coreinit/title.h>
++#include <cstdio>
+ #include <cstring>
+ #include <mocha/mocha.h>
+ #include <mutex>
+@@ -138,7 +141,73 @@ static int parseINIhandler(void *user, const char *section, const char *name,
+     return 1;
+ }
+ 
++// The companion directory belongs to the full bundle path, so equal names in
++// different app directories cannot collide. active.txt is published only after
++// every file of an immutable release has been uploaded and verified.
++static std::string devExecutableOverride(const char *bundlePath) {
++    if (!bundlePath || !dev_bundle::valid_bundle(bundlePath)) return {};
++    const std::string active = std::string("fs:/vol/external01/") + bundlePath + ".dev/active.txt";
++    std::string selected;
++    FILE *manifest = fopen(active.c_str(), "rb");
++    if (manifest) {
++        char text[67];
++        const size_t n = fread(text, 1, sizeof(text), manifest);
++        const bool good = !ferror(manifest) && n < sizeof(text);
++        fclose(manifest);
++        std::string release(text, n);
++        while (!release.empty() && (release.back() == '\n' || release.back() == '\r')) release.pop_back();
++        selected = good ? dev_bundle::release_root(bundlePath, release) : std::string();
++        if (selected.empty()) {
++            OSReport("[homebrew dev] Invalid active.txt for %s; using bundle\n", bundlePath);
++            return {};
++        }
++        selected += "/root.rpx";
++    } else {
++        if (errno != ENOENT) return {};
++        // Compatibility with existing development installs. New titles never
++        // need an entry here: the companion directory above works for any WUHB.
++        const char *overridePath;
++        if (strcmp(bundlePath, "wiiu/apps/Brain Age Dev.wuhb") == 0) {
++            overridePath = "3dii-u/dev/brain-age/g_asre.rpx";
++        } else if (strcmp(bundlePath, "wiiu/apps/Mario Party Island Tour.wuhb") == 0) {
++            overridePath = "3dii-u/dev/island-tour/g_atse.rpx";
++        } else if (strcmp(bundlePath, "wiiu/apps/Mario Party Star Rush.wuhb") == 0) {
++            overridePath = "3dii-u/dev/star-rush/g_baae.rpx";
++        } else if (strcmp(bundlePath, "wiiu/apps/Mario Party The Top 100.wuhb") == 0) {
++            overridePath = "3dii-u/dev/top-100/g_bhre.rpx";
++        } else {
++            return {};
++        }
++        selected = overridePath;
++    }
++    MochaRPXLoadInfo request {};
++    if (selected.size() >= sizeof(request.path)) return {};
++    const std::string fsPath = "fs:/vol/external01/" + selected;
++    struct stat info {};
++    if (stat(fsPath.c_str(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 52) return {};
++    FILE *file = fopen(fsPath.c_str(), "rb");
++    if (!file) return {};
++    uint8_t header[52];
++    const size_t read = fread(header, 1, sizeof(header), file);
++    fclose(file);
++    constexpr uint8_t elfPrefix[] = {0x7f, 'E', 'L', 'F', 1, 2, 1, 0xca, 0xfe};
++    constexpr uint8_t rpxTypeAndMachine[] = {0xfe, 0x01, 0, 0x14};
++    if (read != sizeof(header) || memcmp(header, elfPrefix, sizeof(elfPrefix)) != 0 ||
++        memcmp(header + 16, rpxTypeAndMachine, sizeof(rpxTypeAndMachine)) != 0) {
++        OSReport("[homebrew dev] Invalid SD RPX header; using bundled executable\n");
++        return {};
++    }
++    const std::string content = "/vol/external01/" + selected.substr(0, selected.rfind('/')) + "/content";
++    const std::string contentFS = "fs:" + content;
++    if (stat(contentFS.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
++        if (content.size() >= sizeof(gDevContentPath)) return {};
++        snprintf(gDevContentPath, sizeof(gDevContentPath), "%s", content.c_str());
++    }
++    return selected;
++}
++
+ RPXLoaderStatus RL_PrepareLaunchFromSD(const char *bundle_path) {
++    gDevContentPath[0] = 0;
+     MochaRPXLoadInfo request;
+     memset(&request, 0, sizeof(request));
+ 
+@@ -222,15 +291,24 @@ RPXLoaderStatus RL_PrepareLaunchFromSD(const char *bundle_path) {
+     strncat(request.path, bundle_path, sizeof(request.path) - 1);
+ 
+     OSMemoryBarrier();
+-    bool success = false;
+-    MochaUtilsStatus res;
+-    if ((res = Mocha_PrepareRPXLaunch(&request)) == MOCHA_RESULT_SUCCESS) {
+-        success = true;
+-    } else {
+-        DEBUG_FUNCTION_LINE_ERR("Failed to prepare rpx launch: %s", Mocha_GetStatusStr(res));
++    const std::string overridePath = isBundle ? devExecutableOverride(bundle_path) : std::string();
++    bool usingOverride = false;
++    if (!overridePath.empty()) {
++        MochaRPXLoadInfo overrideRequest = request;
++        overrideRequest.filesize = 0;
++        overrideRequest.fileoffset = 0;
++        snprintf(overrideRequest.path, sizeof(overrideRequest.path), "%s", overridePath.c_str());
++        usingOverride = Mocha_PrepareRPXLaunch(&overrideRequest) == MOCHA_RESULT_SUCCESS;
++        if (usingOverride) {
++            OSReport("[3dii-u dev] Launching SD RPX %s with bundle %s\n", overridePath.c_str(), bundle_path);
++        } else {
++            gDevContentPath[0] = 0;
++            OSReport("[3dii-u dev] SD RPX request rejected; using bundled executable\n");
++        }
+     }
+-
+-    if (!success) {
++    const auto res = usingOverride ? MOCHA_RESULT_SUCCESS : Mocha_PrepareRPXLaunch(&request);
++    if (res != MOCHA_RESULT_SUCCESS) {
++        DEBUG_FUNCTION_LINE_ERR("Failed to prepare rpx launch: %s", Mocha_GetStatusStr(res));
+         request.target = LOAD_RPX_TARGET_EXTRA_REVERT_PREPARE;
+         Mocha_PrepareRPXLaunch(&request);
+ 
+@@ -305,37 +383,19 @@ RPXLoaderStatus RL_LaunchHomebrew(const char *bundle_path) {
+ 
+ std::mutex mutex;
+ 
+-RPXLoaderStatus RL_DisableContentRedirection() {
+-    std::lock_guard<std::mutex> lock(mutex);
+-    if (contentLayerHandle != 0) {
+-        if (ContentRedirection_SetActive(contentLayerHandle, false) != CONTENT_REDIRECTION_RESULT_SUCCESS) {
+-            return RPX_LOADER_RESULT_UNKNOWN_ERROR;
+-        }
+-    }
+-    if (saveLayerHandle != 0) {
+-        if (ContentRedirection_SetActive(saveLayerHandle, false) != CONTENT_REDIRECTION_RESULT_SUCCESS) {
+-            ContentRedirection_SetActive(contentLayerHandle, true);
+-            return RPX_LOADER_RESULT_UNKNOWN_ERROR;
+-        }
+-    }
+-    return RPX_LOADER_RESULT_SUCCESS;
+-}
+-
+-RPXLoaderStatus RL_EnableContentRedirection() {
+-    std::lock_guard<std::mutex> lock(mutex);
+-    if (contentLayerHandle != 0) {
+-        if (ContentRedirection_SetActive(contentLayerHandle, true) != CONTENT_REDIRECTION_RESULT_SUCCESS) {
+-            return RPX_LOADER_RESULT_UNKNOWN_ERROR;
+-        }
+-    }
+-    if (saveLayerHandle != 0) {
+-        if (ContentRedirection_SetActive(saveLayerHandle, true) != CONTENT_REDIRECTION_RESULT_SUCCESS) {
+-            ContentRedirection_SetActive(contentLayerHandle, false);
++static RPXLoaderStatus setContentRedirection(bool active) {
++    const CRLayerHandle handles[] = {contentLayerHandle, saveLayerHandle, devContentLayerHandle};
++    for (size_t i = 0; i < 3; ++i) {
++        if (handles[i] && ContentRedirection_SetActive(handles[i], active) != CONTENT_REDIRECTION_RESULT_SUCCESS) {
++            for (size_t j = 0; j < i; ++j)
++                if (handles[j]) ContentRedirection_SetActive(handles[j], !active);
+             return RPX_LOADER_RESULT_UNKNOWN_ERROR;
+         }
+     }
+     return RPX_LOADER_RESULT_SUCCESS;
+ }
++RPXLoaderStatus RL_DisableContentRedirection() { return setContentRedirection(false); }
++RPXLoaderStatus RL_EnableContentRedirection() { return setContentRedirection(true); }
+ 
+ RPXLoaderStatus RL_UnmountCurrentRunningBundle() {
+     std::lock_guard<std::mutex> lock(mutex);
+@@ -343,6 +403,11 @@ RPXLoaderStatus RL_UnmountCurrentRunningBundle() {
+         return RPX_LOADER_RESULT_SUCCESS;
+     }
+ 
++    if (devContentLayerHandle) {
++        if (ContentRedirection_RemoveFSLayer(devContentLayerHandle) != CONTENT_REDIRECTION_RESULT_SUCCESS)
++            OSFatal("Could not remove homebrew development overlay");
++        devContentLayerHandle = 0;
++    }
+     int outRes = -1;
+     if (ContentRedirection_RemoveDevice(WUHB_ROMFS_PATH, &outRes) == CONTENT_REDIRECTION_RESULT_SUCCESS) {
+         if (outRes < 0) {
+diff --git a/src/globals.cpp b/src/globals.cpp
+index d7438f5..133ae7c 100644
+--- a/src/globals.cpp
++++ b/src/globals.cpp
+@@ -3,4 +3,6 @@
+ RPXLoader_ReplacementInformation gReplacementInfo = {};
+ CRLayerHandle contentLayerHandle                  = 0;
+ CRLayerHandle saveLayerHandle                     = 0;
+-std::string gActiveSaveRedirectionPath;
+\ No newline at end of file
++std::string gActiveSaveRedirectionPath;
++CRLayerHandle devContentLayerHandle = 0;
++char gDevContentPath[640] = {};
+diff --git a/src/globals.h b/src/globals.h
+index 03246f4..df21a12 100644
+--- a/src/globals.h
++++ b/src/globals.h
+@@ -54,4 +54,6 @@ extern RPXLoader_ReplacementInformation gReplacementInfo;
+ 
+ extern CRLayerHandle contentLayerHandle;
+ extern CRLayerHandle saveLayerHandle;
+-extern std::string gActiveSaveRedirectionPath;
+\ No newline at end of file
++extern std::string gActiveSaveRedirectionPath;
++extern CRLayerHandle devContentLayerHandle;
++extern char gDevContentPath[640];
+diff --git a/src/main.cpp b/src/main.cpp
+index 5994c3f..3b15337 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -148,6 +148,15 @@ WUMS_APPLICATION_STARTS() {
+                     gReplacementInfo.contentReplacementInfo.bundleMountInformation.isMounted      = true;
+                     gReplacementInfo.contentReplacementInfo.bundleMountInformation.toMountPath[0] = '\0';
+ 
++                    // The merge layer overrides only files present in this
++                    // release. Everything else still comes from the same WUHB.
++                    if (gDevContentPath[0]) {
++                        auto overlayResult = ContentRedirection_AddFSLayer(&devContentLayerHandle,
++                            "Homebrew development content", gDevContentPath, FS_LAYER_TYPE_CONTENT_MERGE);
++                        if (overlayResult != CONTENT_REDIRECTION_RESULT_SUCCESS)
++                            OSFatal("Cannot mount homebrew development content; refusing a mixed build");
++                        OSReport("[homebrew dev] content overlay: %s\n", gDevContentPath);
++                    }
+                     gActiveSaveRedirectionPath = relativePath;
+ 
+                     OSMemoryBarrier();
+diff --git a/src/version.h b/src/version.h
+index 66a2c7e..7369484 100644
+--- a/src/version.h
++++ b/src/version.h
+@@ -1,2 +1,2 @@
+ #pragma once
+-#define VERSION_EXTRA ""
+\ No newline at end of file
++#define VERSION_EXTRA "-generic-dev1"
+diff --git a/src/DevBundlePaths.h b/src/DevBundlePaths.h
+new file mode 100644
+index 0000000..f34de3f
+--- /dev/null
++++ b/src/DevBundlePaths.h
+@@ -0,0 +1,28 @@
++#pragma once
++#include <string>
++
++namespace dev_bundle {
++inline bool valid_bundle(const std::string &path) {
++    if (!path.starts_with("wiiu/apps/") || !path.ends_with(".wuhb")) return false;
++    size_t begin = 0;
++    while (begin < path.size()) {
++        size_t end = path.find('/', begin);
++        if (end == std::string::npos) end = path.size();
++        const auto part = path.substr(begin, end - begin);
++        if (part.empty() || part == "." || part == "..") return false;
++        for (unsigned char c : part) if (c < 32 || c == 127 || c == ':' || c == '\\') return false;
++        begin = end + 1;
++    }
++    return true;
++}
++inline bool valid_release(const std::string &release) {
++    if (release.empty() || release.size() > 64) return false;
++    for (unsigned char c : release)
++        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
++    return true;
++}
++inline std::string release_root(const std::string &bundle, const std::string &release) {
++    if (!valid_bundle(bundle) || !valid_release(release)) return {};
++    return bundle + ".dev/builds/" + release;
++}
++} // namespace dev_bundle
+diff --git a/tests/dev_bundle_paths.cpp b/tests/dev_bundle_paths.cpp
+new file mode 100644
+index 0000000..204fe3d
+--- /dev/null
++++ b/tests/dev_bundle_paths.cpp
+@@ -0,0 +1,10 @@
++#include "DevBundlePaths.h"
++#include <cassert>
++int main() {
++    using namespace dev_bundle;
++    assert(release_root("wiiu/apps/Kirby Triple Deluxe.wuhb", "20261118-1") == "wiiu/apps/Kirby Triple Deluxe.wuhb.dev/builds/20261118-1");
++    assert(release_root("wiiu/apps/Other/App.wuhb", "v2") == "wiiu/apps/Other/App.wuhb.dev/builds/v2");
++    for (const auto *bad : {"", "../bad", "/root", "a/b", "a\\b", "a:b", "a\nb", ".."}) assert(!valid_release(bad));
++    assert(!valid_release(std::string(65, 'a')));
++    for (const auto *bad : {"wiiu/apps/../bad.wuhb", "wiiu/apps//bad.wuhb", "/wiiu/apps/a.wuhb", "wiiu/apps/a.rpx", "wiiu/apps/a:b.wuhb", "wiiu/apps/a\\b.wuhb"}) assert(!valid_bundle(bad));
++}

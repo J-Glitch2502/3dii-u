@@ -36,3 +36,7 @@ The boot movie every game's title carries comes from shinyquagsire23's woomïnst
 
 3Dii U is not affiliated with, endorsed by or sponsored by Nintendo. It is for games and system files you dumped
 yourself from consoles you own, and for homebrew.
+
+Homebrew update loader: RPXLoadingModule (wiiu-env and this fork's contributors), GPL-3.0.
+The optional Aroma support folder includes the loader binary, corresponding project source archive and full licence.
+https://github.com/wiiu-env/RPXLoadingModule

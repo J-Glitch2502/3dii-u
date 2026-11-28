@@ -202,7 +202,7 @@ try:
     installer.__main__.run = collect
     with mock.patch.dict(sys.modules, {'PyInstaller': installer, 'PyInstaller.__main__': installer.__main__,
                                       'gui': types.SimpleNamespace(VERSION='1.0')}), \
-            mock.patch.dict(os.environ, {'PATH': 'unrelated-tools', 'WINDIR': os.environ.get('WINDIR', 'C:/Windows')}), \
+            mock.patch.dict(os.environ, {'PATH': 'unrelated-tools', 'WINDIR': os.environ.get('WINDIR', os.path.join(base, 'Windows'))}), \
             mock.patch.object(make_app, 'make_icon'), mock.patch.object(make_app, 'version_resource'), \
             mock.patch.object(make_app, 'unconfirmed', return_value=[]), \
             mock.patch.object(make_app.os, 'makedirs'):

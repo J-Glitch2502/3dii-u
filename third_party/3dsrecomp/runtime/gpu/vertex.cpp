@@ -2,6 +2,7 @@
 // and primitive assembly.
 #include <algorithm>
 #include <atomic>
+#include <array>
 
 #include "gpu/pica.h"
 
@@ -11,13 +12,18 @@ u64 g_cpu_route[4];
 #endif
 
 VtxCpuStats vtx_cpu;
+GpuFallbackWhy gpu_fallback_why=GPUF_MISSING_VS;
+u64 gpu_fallback_key=0;
+u64 gpu_fallback_draws[GPUF_COUNT]{};
+std::atomic<bool> g_cpu_vs_simd{true};
+std::atomic<bool> g_cpu_timing{false};
 bool g_gs_shared = false;  // measured on a console in Dark Moon's rain (2026-11-14): no faster than one thread, so off unless asked
 // adds the time to the end of its scope to one of vtx_cpu's reasons
 struct VtxCpuTimer {
     VtxCpuWhy why;
-    double t0 = kMeasure ? now_ms() : 0;
+    double t0 = cpu_timing_enabled() ? now_ms() : 0;
     ~VtxCpuTimer() {
-        if (kMeasure) vtx_cpu.ms[why] += now_ms() - t0;
+        if (t0 != 0) vtx_cpu.ms[why] += now_ms() - t0;
     }
 };
 
@@ -266,6 +272,10 @@ void gs_reconfigure() {
 // (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame (2026-11-13). The game's build can bring its programs as C
 // (tools/pica_to_c.py, from the programs its runs logged: its own code, so only in a build made from the user's logs), which this finds by
 // entry and a hash of the words each was made from, and runs instead; with none, the interpreter runs everything as before.
+// These optional C symbols must have external linkage. Declaring them
+// inside the anonymous namespace leaves GCC looking for namespace-mangled
+// weak symbols instead of the generated C table, silently disabling it.
+}  // namespace
 extern "C" {
 typedef void (*gs_emit_fn)(void *ctx, unsigned vid, unsigned prim, unsigned wind);
 typedef int (*gs_native_fn)(float (*r)[4], unsigned *bank, unsigned char *cond, const unsigned char *b, const unsigned char (*ui)[4], gs_emit_fn emit,
@@ -282,6 +292,7 @@ extern const unsigned gs_native_count __attribute__((weak));
 }
 static_assert(sizeof(V4) == 16 && sizeof(bool) == 1, "the generated code takes the register file as floats, and bools as bytes");
 
+namespace {
 static u64 gs_fnv(u64 h, u32 w) {
     for (int i = 0; i < 4; i++) h = (h ^ ((w >> (8 * i)) & 0xff)) * 0x100000001b3ull;
     return h;
@@ -319,7 +330,9 @@ const gs_native *gs_native_find(const ShaderProgram *p, const ShaderSetup &s, u3
 void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
     ShaderUnit &u = *(ShaderUnit *)ctx;
     static u32 sampled;
-    const bool timed = kMeasure && (sampled++ & 15) == 0;
+    // Parallel emitters have private buffers and must not update this shared
+    // sampled timing accumulator. Their whole job is timed on the GPU thread.
+    const bool timed = cpu_timing_enabled() && u.emitter && u.emitter->emit_prim == gs_emit_prim && (sampled++ & 15) == 0;
     const double t0 = timed ? now_ms() : 0;
     if (Emitter *e = u.emitter) {
         e->vertex_id = vid;
@@ -340,7 +353,7 @@ void gs_native_emit(void *ctx, unsigned vid, unsigned prim, unsigned wind) {
                         }
                     if (wind) g.pa.winding = true;
                     pa_submit3(gs_mapped[0], gs_mapped[1], gs_mapped[2]);
-                    if (kMeasure) vtx_cpu.geometry_prims++;
+                    if (cpu_timing_enabled()) vtx_cpu.geometry_prims++;
                 }
             } else if (prim && e->emit_prim) {
                 e->emit_prim(e);
@@ -357,12 +370,12 @@ void gs_run() {
     const u32 entry = g.regs[R::GS + R::SH_ENTRY] & 0xffff;
     const gs_native *fn = gs_native_find(p, g.gs, entry);
     ShaderUnit &u = g.gs_unit;
-    const double t0 = kMeasure ? now_ms() : 0;
+    const double t0 = cpu_timing_enabled() ? now_ms() : 0;
     if (!fn || !fn->fn((float (*)[4])u.r, &u.out_bank, (unsigned char *)u.cond, (const unsigned char *)g.gs.b, (const unsigned char (*)[4])g.gs.i, gs_native_emit, &u)) {
         gs_mapped_ok = 0;
         shader_run(p, u, g.gs, entry);
     }
-    if (kMeasure) vtx_cpu.geometry_gs_ms += now_ms() - t0;
+    if (t0 != 0) vtx_cpu.geometry_gs_ms += now_ms() - t0;
     g.gs.b[15] = true;
 }
 
@@ -396,6 +409,9 @@ bool gs_run_shared(const V4 *vs_out, u32 n) {
     const ShaderProgram *p = shader_get_program(g.gs);
     const gs_native *t = gs_native_find(p, g.gs, g.regs[R::GS + R::SH_ENTRY] & 0xffff);
     if (!t || !t->independent || (g.gs_emitter.output_mask & ~t->outmask)) return false;
+    static bool reported;
+    if (!reported) { reported=true; LOG("[vtx] independent geometry shared across %u workers, %u invocations\n",pool_threads(),n/per); }
+    const double started = cpu_timing_enabled() ? now_ms() : 0;
     const u32 runs = n / per;
     constexpr u32 kRuns = 16;
     const u32 chunks = (runs + kRuns - 1) / kRuns;
@@ -439,11 +455,18 @@ bool gs_run_shared(const V4 *vs_out, u32 n) {
     if (declined) return false;  // its bools say another path: nothing has reached the assembler yet
     for (u32 c = 0; c < chunks; c++)
         for (const GsPrim &pr : made[c]) {
+            if (cpu_timing_enabled()) vtx_cpu.geometry_prims++;
             if (pr.winding) g.pa.winding = true;
             for (u32 i = 0; i < 3; i++) pa_submit(pr.v[i]);
         }
+    // Serial submission leaves the last complete primitive's inputs in the
+    // shared GS uniforms. Later draws and checkpoints must see the same data.
+    for (u32 v = 0; v < per; v++)
+        for (u32 k = 0; k < vs_out_num; k++)
+            g.gs.f[begin + v * vs_out_num + k] = vs_out[(size_t)((runs - 1) * per + v) * 16 + k];
     g.gs.b[15] = true;
     for (u32 i = runs * per; i < n; i++) gs_submit_vertex(vs_out + (size_t)i * 16);  // the start of a primitive the next draw goes on with
+    if (started) vtx_cpu.geometry_gs_ms += now_ms() - started;
     return true;
 }
 
@@ -549,6 +572,29 @@ static void immediate_cpu_vertex(const V4 *inputs) {
     }
 }
 
+namespace {
+struct FallbackHotspot {u64 key=0,vertices=0,tasks=0;u32 entry=0;GpuFallbackWhy why=GPUF_MISSING_VS;double task_ms=0,max_task_ms=0;};
+std::array<FallbackHotspot,64> fallback_hotspots{};
+u32 fallback_hotspot_count=0,fallback_hotspot_dropped=0;
+void note_fallback_hotspot(u64 key,u32 entry,GpuFallbackWhy why,u32 vertices,double ms) {
+    u32 i=0;
+    for(;i<fallback_hotspot_count;++i)if(fallback_hotspots[i].key==key&&fallback_hotspots[i].entry==entry&&fallback_hotspots[i].why==why)break;
+    if(i==fallback_hotspot_count){
+        if(i==fallback_hotspots.size()){++fallback_hotspot_dropped;return;}
+        ++fallback_hotspot_count;fallback_hotspots[i]={};fallback_hotspots[i].key=key;fallback_hotspots[i].entry=entry;fallback_hotspots[i].why=why;
+    }
+    auto &h=fallback_hotspots[i];h.vertices+=vertices;++h.tasks;h.task_ms+=ms;h.max_task_ms=std::max(h.max_task_ms,ms);
+}
+}
+void vtx_report_hotspots() {
+    std::sort(fallback_hotspots.begin(),fallback_hotspots.begin()+fallback_hotspot_count,[](const auto &a,const auto &b){return a.task_ms>b.task_ms;});
+    for(u32 i=0;i<std::min<u32>(fallback_hotspot_count,6);++i){const auto &h=fallback_hotspots[i];
+        LOG("[fallback-hot] key %016llx entry %u reason %u vertices %llu tasks %llu summed-task-ms %.2f max-task-ms %.2f\n",(unsigned long long)h.key,h.entry,(u32)h.why,(unsigned long long)h.vertices,(unsigned long long)h.tasks,h.task_ms,h.max_task_ms);
+    }
+    if(fallback_hotspot_dropped)LOG("[fallback-hot] bounded report omitted %u task samples\n",fallback_hotspot_dropped);
+    fallback_hotspot_count=fallback_hotspot_dropped=0;
+}
+
 #ifdef __WIIU__
 namespace {
 V4 immediate_inputs[96][16];
@@ -627,6 +673,8 @@ struct DrawJob {
     OutMap m;
     const ShaderProgram *prog;
     u32 entry, outmask, in_maxi;
+    u64 fallback_key;
+    GpuFallbackWhy fallback_why;
     u64 in_map;
     V4 f[96];
     bool b[16];
@@ -646,6 +694,7 @@ u32 pending_indices = 0;
 struct Task {
     u32 job, begin, end;
     TriSink out;
+    double shade_ms=0;
 };
 std::vector<Task> shade_tasks, setup_tasks;
 
@@ -671,7 +720,7 @@ void shade_range(DrawJob &j, u32 begin, u32 end, u32 tid) {
     ShaderUnit &u = unit_for_job(tid, j);
     V4 in[16], buf[16];
     u32 k = begin;
-    if (shader_program_simd(j.prog)) {
+    if (g_cpu_vs_simd.load(std::memory_order_relaxed) && shader_program_simd(j.prog)) {
         ShaderUnit4 &u4 = *junits4[tid];
         if (fresh) shader_unit4_reset(&u4);
         u32 inmask = 0;
@@ -752,10 +801,19 @@ void vtx_finish_jobs() {
         j.outcode.resize(nu);
         for (u32 b = 0; b < nu; b += VCHUNK) shade_tasks.push_back({ji, b, std::min(nu, b + VCHUNK), {}});
     }
+    const bool collect_hotspots=cpu_timing_enabled();
     parallel_for((u32)shade_tasks.size(), [&](u32 i, u32 tid) {
         Task &t = shade_tasks[i];
+        const double started=collect_hotspots ? now_ms() : 0;
         shade_range(*jobs[t.job], t.begin, t.end, tid);
+        t.shade_ms=collect_hotspots ? now_ms()-started : 0;
     });
+    if(collect_hotspots)for(const auto &task:shade_tasks) {
+        if (task.shade_ms>0) {
+            const DrawJob &job=*jobs[task.job];
+            note_fallback_hotspot(job.fallback_key,job.entry,job.fallback_why,task.end-task.begin,task.shade_ms);
+        }
+    }
     double t1 = g_stats ? now_ms() : 0;
     if (metal_active()) {
         // the Metal backend clips and sets up triangles itself: hand it the shaded vertices
@@ -1146,7 +1204,7 @@ void vtx_draw(bool indexed) {
             // rain is drawn this way, 1600 vertices a frame, and took 30 ms of each frame on the GPU thread alone (2026-11-13).
             static std::vector<V4> vs_out;
             if (vs_out.size() < (size_t)n * 16) vs_out.resize((size_t)n * 16);
-            const double t0 = kMeasure ? now_ms() : 0;
+            const double t0 = cpu_timing_enabled() ? now_ms() : 0;
             constexpr u32 kChunk = 64;
             parallel_for((n + kChunk - 1) / kChunk, [&](u32 c, u32 tid) {
                 ShaderUnit &u = unit_for(tid);
@@ -1158,7 +1216,7 @@ void vtx_draw(bool indexed) {
                     gather_outputs(u, outmask, &vs_out[(size_t)i * 16]);
                 }
             });
-            if (kMeasure) vtx_cpu.geometry_vs_ms += now_ms() - t0;
+            if (t0 != 0) vtx_cpu.geometry_vs_ms += now_ms() - t0;
             if (!gs_run_shared(vs_out.data(), n))
                 for (u32 i = 0; i < n; i++) gs_submit_vertex(&vs_out[(size_t)i * 16]);
             return;
@@ -1228,6 +1286,7 @@ void vtx_draw(bool indexed) {
             d.slot_src[i] = s >= 0 && (u32)(s >> 2) < nout ? (s8)(out_reg[s >> 2] * 4 + (s & 3)) : -1;
         }
         if (gx2_draw(d)) return;
+        ++gpu_fallback_draws[gpu_fallback_why];
         vtx_cpu.draws[VCPU_NO_SHADER]++;
         vtx_cpu.verts[VCPU_NO_SHADER] += n;
         if (!fill_ids()) return;
@@ -1267,6 +1326,7 @@ void vtx_draw(bool indexed) {
     setup_outmap(j.m);
     j.prog = prog;
     j.entry = entry;
+    j.fallback_key=gpu_fallback_key;j.fallback_why=gpu_fallback_why;
     j.outmask = outmask;
     j.in_maxi = regs[R::VS + R::SH_INPUT_CFG] & 0xf;
     j.in_map = (u64)regs[R::VS + R::SH_PERM_LO] | ((u64)regs[R::VS + R::SH_PERM_HI] << 32);

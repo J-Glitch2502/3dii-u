@@ -36,6 +36,13 @@ def screen_layouts():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_screen_layouts.cpp', '-o', exe], [exe]]
 
 
+def gfd_index():
+    """Shader file extents, missing programs, and truncated index tables."""
+    exe = build3ds.WORK + '/selftest/test_gfd_index.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', f'-I{build3ds.PORT}/wiiu', '-static', ROOT + '/tools/test_gfd_index.cpp', '-o', exe], [exe]]
+
+
 def depth_viewport():
     exe = build3ds.WORK + '/selftest/test_depth_viewport.exe'
     os.makedirs(os.path.dirname(exe), exist_ok=True)
@@ -210,6 +217,13 @@ def unanswered():
     return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', '-static', ROOT + '/tools/test_unanswered.cpp', '-lpthread', '-o', exe], [exe]]
 
 
+def room_wire():
+    exe = build3ds.WORK + '/selftest/test_uds_wire.exe'
+    os.makedirs(os.path.dirname(exe), exist_ok=True)
+    return [build3ds.HOST_CXX + ['-std=c++20', '-O1', '-static', '-I' + ROOT + '/third_party/3ds-link/include',
+            ROOT + '/tools/tests/test_uds_wire.cpp', ROOT + '/third_party/3ds-link/src/room_proto.cpp', '-o', exe], [exe]]
+
+
 def uds_room():
     exe = build3ds.WORK + '/selftest/test_uds_room.exe'
     os.makedirs(os.path.dirname(exe), exist_ok=True)
@@ -262,11 +276,18 @@ def main():
         'module memory ownership': [[py, '-B', ROOT + '/tools/test_module_memory.py'],
                                     [py, '-B', ROOT + '/tools/test_cro_modules.py']],
         'offline UDS IPC': uds_room(),
+        'room packet encoding': room_wire(),
+        'Wii U UDP adapter': [[py, ROOT + '/tools/test_room_udp.py']],
+        'multiplayer configuration': [[py, ROOT + '/builder/test_multiplayer.py']],
+        'Builder package inventory': [[py, ROOT + '/builder/test_package_audit.py']],
         'relative callbacks': [[py, ROOT + '/tools/test_relative_callbacks.py']],
         'multiply wrap': [[py, ROOT + '/tools/test_multiply_wrap.py']],
         'object cache safety': [[py, ROOT + '/tools/test_objcache_safety.py']],
         'generated object cache': [[py, ROOT + '/tools/test_generated_objects.py']],
         'camera': camera(),
+        'compiler policy': [[py, ROOT + '/builder/test_compiler_policy.py']],
+        'trial tools': [[py, ROOT + '/tools/test_trial_tools.py']],
+        'homebrew dev publisher': [[py, ROOT + '/tools/test_ftp_homebrew_dev.py']],
         'vertex arrays': vertex_arrays(),
         'vertex cache': [[py, ROOT + '/tools/test_vertex_cache.py'], [py, ROOT + '/tools/test_native_immediate.py']],
         'Wii U vertex worker scheduling': [[py, ROOT + '/tools/test_wiiu_pool_idle.py']],
@@ -280,9 +301,14 @@ def main():
         'Wii U Mii database and picker': [[py, ROOT + '/tools/test_wiiu_miis.py']],
         'native shader cache': shader_native_cache() + [[py, ROOT + '/tools/test_shader_cache_check.py'],
                                                        [py, ROOT + '/tools/test_shader_install.py']],
+        'draw-state cache eviction': [[py, ROOT + '/tools/test_draw_state_cache.py']],
+        'fragment cache transitions': [[py, ROOT + '/tools/test_fragment_requests.py']],
         'shader learning': [[py, ROOT + '/tools/test_shader_learning.py']],
         'shader budget': [[py, ROOT + '/tools/test_shader_budget.py']],
         'memory fills': memory_fills(),
+        'surface retirement': [[py, ROOT + '/tools/test_surface_retirement.py']],
+        'handwriting latency log': [[py, ROOT + '/tools/wiiu_diagnostics/test_handwriting_latency.py']],
+        'shader file validation': gfd_index(),
         'motion input': motion_input(),
         'audio DSP': audio_dsp(),
         'GamePad microphone': microphone(),
@@ -290,10 +316,14 @@ def main():
         'legacy extra data': [[py, ROOT + '/tools/test_fs_extdata.py']],
         'game languages': languages(),
         'CPU byte operations': cpu_parallel(),
+        'Wii U audio ring': [[py, ROOT + '/tools/test_wiiu_audio_ring.py']],
+        'RomFS read-ahead': [[py, ROOT + '/tools/test_romfs_readahead.py']],
+        'filesystem delete errors': [[py, ROOT + '/tools/test_fs_delete_file.py']],
         'compiled programs': latte_program(),
         'open bools': open_bools(),
         'geometry shaders': gsx() + [[py, ROOT + '/tools/gsx_to_gsl.py', '--self-check']],
         'tagged shader materials': [[py, ROOT + '/tools/test_tagged_materials.py']],
+        'native geometry conditionals': [[py, ROOT + '/tools/test_gs_native_conditionals.py']],
         'command lists': [[py, ROOT + '/tools/test_shadergen_lists.py', shadergen()]],
         'program rules': [[py, ROOT + '/tools/gsh_rules.py', '--self-check']],
         'fragment variants': [[py, ROOT + '/tools/fs_variants.py', '--self-check']],
@@ -309,6 +339,11 @@ def main():
         'failure categories': [[py, ROOT + '/tools/test_failure_categories.py']],
         'missed code': [[py, ROOT + '/tools/test_learn_missed.py']],
         'switch through a helper': [[py, ROOT + '/tools/test_recomp_switch.py']],
+        'mixed indirect safe callback': [[py, ROOT + '/tools/test_recomp_mixed_icall.py']],
+        'ARM bulk copy equivalence': [[py, ROOT + '/tools/test_recomp_bulk_copy.py']],
+        'VFP modified immediates': [[py, ROOT + '/tools/test_vfp_immediate.py']],
+        'Y2R coefficient replies': [[py, ROOT + '/tools/test_y2r_coefficients.py']],
+        'Y2R tiled movie blocks': [[py, ROOT + '/tools/test_y2r_movie_blocks.py']],
         'dispatcher transitions': [[py, ROOT + '/tools/test_transition_contract.py']],
         'fallback instruction groups': [[py, ROOT + '/tools/test_fallback_groups.py']],
         'build markers': [[py, ROOT + '/tools/test_mark_built.py']],

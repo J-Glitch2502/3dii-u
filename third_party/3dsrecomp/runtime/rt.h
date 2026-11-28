@@ -103,6 +103,9 @@ void set_game_cros(const GuestCro *cros, u32 count);       // (RECOMP_MODULES) i
 void set_game_classes(const GuestClass *c, u32 count);     // (RECOMP_MODULES) its classes, if any
 u32 function_start(u32 addr);  // the recompiled function that contains addr (0: none)
 void run_guest(CPU *c);  // runs until the thread returns to EXIT_MAGIC
+#ifdef RECOMP_RESUMABLE
+void run_guest_step(CPU *c);  // one generated continuation, with no suspended guest C frame
+#endif
 constexpr u32 EXIT_MAGIC = 0xFFFF0000u;
 // Guest calls made by the host, on a guest thread: the hook runs when a thread dispatches to <addr> (an indirect
 // call, such as a virtual method, is about to run there), and may call guest functions with rt_guest_call, which

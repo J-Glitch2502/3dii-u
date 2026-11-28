@@ -47,12 +47,19 @@
 #include "kernel.h"
 #include "loader.h"
 #include "menu_shortcut.h"
+#include "network_menu.h"
+#include "network_keyboard.h"
+#include "network_settings.h"
+#include "wup_update_guard.h"
 #include "motion_input.h"
 #include "service.h"
 #include "services/services.h"
 #include "settings.h"
 #include "save_backup.h"
 #include "wiiu.h"
+#include "physical_file.h"
+#include "shader_compile.h"
+#include "checkpoint.h"
 
 static const char *const CONTENT_DIR = "fs:/vol/content";
 void rt_log_sync();
@@ -88,7 +95,9 @@ static void start_mark(const char *what) {
 
 static void stage(const char *name) {
     trace_stage = name;
-    LOG("[stage] %s at %u ms\n", name, (u32)OSTicksToMilliseconds(OSGetSystemTime() - trace_start));
+    const u32 elapsed = OSTicksToMilliseconds(OSGetSystemTime() - trace_start);
+    OSReport("[3dii-u startup] %s at %u ms\n", name, elapsed);
+    LOG("[stage] %s at %u ms\n", name, elapsed);
     start_mark(name);
 }
 
@@ -172,7 +181,7 @@ void frontend_init() {
 static OSThread *spawn(OSThreadEntryPointFn fn, int core, int prio, u32 stack_size, const char *name) {
     auto *t = (OSThread *)memalign(16, sizeof(OSThread));
     void *stack = memalign(16, stack_size);
-    const OSThreadAttributes attr = core == 0 ? OS_THREAD_ATTRIB_AFFINITY_CPU0 : core == 1 ? OS_THREAD_ATTRIB_AFFINITY_CPU1 : OS_THREAD_ATTRIB_AFFINITY_CPU2;
+    const OSThreadAttributes attr = core < 0 ? OS_THREAD_ATTRIB_AFFINITY_ANY : core == 0 ? OS_THREAD_ATTRIB_AFFINITY_CPU0 : core == 1 ? OS_THREAD_ATTRIB_AFFINITY_CPU1 : OS_THREAD_ATTRIB_AFFINITY_CPU2;
     if (!OSCreateThread(t, fn, 0, nullptr, (u8 *)stack + stack_size, stack_size, prio, attr)) FATAL("cannot create thread %s\n", name);
     OSSetThreadName(t, name);
     OSResumeThread(t);
@@ -180,6 +189,35 @@ static OSThread *spawn(OSThreadEntryPointFn fn, int core, int prio, u32 stack_si
 }
 
 static volatile bool quitting, gpu_parked, audio_parked, gfx_may_close, gpu_done;
+static OSEvent video_job, video_done;
+static OSMutex video_mutex;
+static void (*video_work)(void *);
+static void *video_context;
+static std::atomic<bool> video_worker_enabled{false};
+
+void wiiu::set_video_worker(bool enabled) { video_worker_enabled.store(enabled); }
+
+static int video_thread(int, void *) {
+    for (;;) {
+        OSWaitEvent(&video_job);
+        video_work(video_context);
+        OSSignalEvent(&video_done);
+    }
+    return 0;
+}
+
+bool wiiu::video_conversion_worker(void (*work)(void *), void *context) {
+    if (!video_worker_enabled.load()) return false;
+    // Called outside the guest kernel lock. The caller's context stays alive
+    // until conversion completes; serialize requests before publishing it.
+    OSLockMutex(&video_mutex);
+    video_work = work;
+    video_context = context;
+    OSSignalEvent(&video_job);
+    OSWaitEvent(&video_done);
+    OSUnlockMutex(&video_mutex);
+    return true;
+}
 static volatile bool gpu_pause, foreground_back;
 #ifdef LAYTON_PROF
 extern "C" BOOL GfxHeapInitMEM1();
@@ -226,6 +264,49 @@ static void gpu_trip() {
     longjmp(gpu_restart, 1);
 }
 
+// Opt-in hardware sample. Keep timing and reporting on the GPU thread.
+static bool perf_trace;
+static bool cpu_summary;  // per-title diagnostic marker; heavy kernel tracing remains opt-in
+static std::atomic<bool> av_timing{false};
+void wiiu::set_av_timing(bool on) { av_timing.store(on, std::memory_order_relaxed); }
+bool wiiu::av_timing_enabled() { return av_timing.load(std::memory_order_relaxed); }
+static std::atomic<OSTime> diagnostics_deadline{0};
+void wiiu::set_diagnostics_level(u32 level) {
+    level = std::min(level, 3u);
+    kernel::set_diagnostics_level(level);
+    set_av_timing(level != 0);
+    gfx_set("cputime", level >= 2 || (cpu_summary && level != 0));
+    gfx_set("gputime", level >= 3);
+    diagnostics_deadline.store(level >= 2 ? OSGetSystemTime() + OSSecondsToTicks(10) : 0);
+    LOG("[diag] level %u: summaries %u, all-thread/SVC/CPU timing %u, GPU stamps %u; detailed capture expires after 10 seconds\n",
+        level, level != 0, level >= 2, level >= 3);
+}
+
+static void report_gpu_timing(OSTime begin) {
+    static OSTime start, last_flip;
+    static u64 previous_flips;
+    static u32 count, longest_gap, longest_pump;
+    const OSTime now = OSGetSystemTime();
+    const u64 flips = wiiu::gfx_flips();
+    if (!start) { start = last_flip = now; previous_flips = flips; return; }
+    if (flips != previous_flips) {
+        if (last_flip)
+            longest_gap = std::max(longest_gap, (u32)OSTicksToMicroseconds(now - last_flip));
+        last_flip = now;
+        count += (u32)(flips - previous_flips);
+        previous_flips = flips;
+    }
+    longest_pump = std::max(longest_pump, (u32)OSTicksToMicroseconds(now - begin));
+    if (now - start < OSSecondsToTicks(2)) return;
+    const auto elapsed = (u32)OSTicksToMilliseconds(now - start);
+    LOG("[perf] presents=%u window_ms=%u max_present_gap_us=%u max_gpu_work_us=%u\n",
+        count, elapsed, longest_gap, longest_pump);
+    OSReport("[3dii-u perf] presents=%u window_ms=%u max_present_gap_us=%u max_gpu_work_us=%u\n",
+        count, elapsed, longest_gap, longest_pump);
+    start = now;
+    count = longest_gap = longest_pump = 0;
+}
+
 static int gpu_thread(int, void *) {
     wiiu::profile_this_core();
     wiiu::gfx_thread_init();
@@ -233,6 +314,14 @@ static int gpu_thread(int, void *) {
     setjmp(gpu_restart);
     bool drained = false;
     while (!quitting) {
+        const OSTime deadline = diagnostics_deadline.load();
+        if (deadline && OSGetSystemTime() >= deadline) {
+            // Expensive probes run only for a bounded sample. The summaries
+            // stay active so the before/after measurements remain available.
+            wiiu::set_diagnostics_level(1);
+            kernel::diagnostics_report();
+            wiiu::gfx_report();
+        }
         if (gpu_pause) {
             if (gpu_tripped) LOG("[home] the GPU thread was still drawing when GX2 went away\n");
             else { wiiu::gfx_shutdown(); drained = true; }
@@ -249,10 +338,26 @@ static int gpu_thread(int, void *) {
         // finished frame may be shown
         const bool waited = !OSWaitEventWithTimeout(&gpu_event, 2000000);  // nanoseconds
         const u64 done = kernel::gx_stats.cmdlists + kernel::gx_stats.transfers;
-        const OSTime t0 = kMeasure ? OSGetSystemTime() : 0;
-        kernel::gsp_process_gx();
-        if (!gpu_pause) wiiu::gfx_pump(waited && done == kernel::gx_stats.cmdlists + kernel::gx_stats.transfers);
-        if (kMeasure) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
+        const bool timed = perf_trace || av_timing.load(std::memory_order_relaxed);
+        const OSTime t0 = (kMeasure || timed) ? OSGetSystemTime() : 0;
+        {
+            checkpoint::Scope state_lock(checkpoint::gate());
+            kernel::gsp_process_gx();
+            if (!gpu_pause) wiiu::gfx_pump(waited && done == kernel::gx_stats.cmdlists + kernel::gx_stats.transfers);
+        }
+#ifdef RECOMP_RESUMABLE
+        checkpoint::pump(); // never upgrade a reader into an exclusive capture
+#endif
+        if (kMeasure || timed) wiiu::gfx_note_busy((u32)OSTicksToMicroseconds(OSGetSystemTime() - t0));
+        if (timed) report_gpu_timing(t0);
+        if (cpu_summary && av_timing.load(std::memory_order_relaxed)) {
+            static OSTime report_at;
+            const OSTime now = OSGetSystemTime();
+            if (now >= report_at) {
+                wiiu::gfx_report();
+                report_at = now + OSSecondsToTicks(2);
+            }
+        }
     }
     if (!gpu_parked) { wiiu::gfx_shutdown(); drained = true; }
     if (kMeasure && drained) wiiu::gfx_report_final();
@@ -379,13 +484,16 @@ static int hid_thread(int, void *) {
     VPADTouchData cal{};
     u32 buttons = 0, pad_held = 0, pro_hold[4] = {};
     float pad_x = 0, pad_y = 0, pro_x[4] = {}, pro_y[4] = {};
-    float pad_rx = 0, pad_ry = 0, pro_rx[4] = {}, pro_ry[4] = {};
+    float pad_rx = 0, pad_ry = 0, pro_rx[4] = {}, pro_ry[4] = {};  // the right sticks: the C-stick
     s16 cx = 0, cy = 0;
     bool touch = false;
     u16 tx = 0, ty = 0;
+    u16 network_px=0,network_py=0;
+    bool network_touch=false;
     for (;;) {
         u32 presses = 0;  // the GamePad's way, from either, for the options menu
         bool toggle_menu = false;
+        float network_ry = pad_ry;
         bool tap = false;  // a touch on the GamePad began, at px, py
         u16 px = 0, py = 0;
         VPADReadError err = VPAD_READ_SUCCESS;
@@ -395,12 +503,15 @@ static int hid_thread(int, void *) {
             pad_held = 0;
             pad_x = pad_y = pad_rx = pad_ry = 0;
             touch = touch_was = false;
+            network_touch=false;
             wiiu::mic_blow(false);
         }
         if (err == VPAD_READ_SUCCESS) {
             pad_held = st.hold;
             pad_rx = st.rightStick.x;
             pad_ry = st.rightStick.y;
+            wiiu::network_keyboard::input(st);
+            network_ry = st.rightStick.y;
             presses |= st.trigger;
             toggle_menu = overlay_pressed(st.trigger, st.hold);
             wiiu::mic_blow(st.hold & VPAD_BUTTON_STICK_R);
@@ -418,6 +529,8 @@ static int hid_thread(int, void *) {
                 down = true;
                 wiiu::touch_to_bottom(px, py, touch, tx, ty);
             }
+            if(down){network_px=px;network_py=py;}
+            network_touch = down;
             tap = down && !touch_was;
             touch_was = down;
         }
@@ -434,6 +547,7 @@ static int hid_thread(int, void *) {
                 pro_y[ch] = ks.pro.leftStick.y;
                 pro_rx[ch] = ks.pro.rightStick.x;
                 pro_ry[ch] = ks.pro.rightStick.y;
+                if(std::abs(pro_ry[ch])>std::abs(network_ry))network_ry=pro_ry[ch];
                 const u32 down = pro_as_gamepad(ks.pro.trigger);
                 presses |= down;
                 toggle_menu |= overlay_pressed(down, pro_as_gamepad(pro_hold[ch]));
@@ -447,12 +561,12 @@ static int hid_thread(int, void *) {
                 sy = pro_y[ch];
             }
         }
-        // The right stick pushed further wins; either controller can hold the extra triggers.
         float rx = pad_rx, ry = pad_ry;
         bool zl = pad_held & VPAD_BUTTON_ZL, zr = pad_held & VPAD_BUTTON_ZR, r = pad_held & VPAD_BUTTON_R;
         for (int ch = 0; ch < 4; ch++) {
             if (std::fabs(pro_rx[ch]) + std::fabs(pro_ry[ch]) > std::fabs(rx) + std::fabs(ry)) {
-                rx = pro_rx[ch]; ry = pro_ry[ch];
+                rx = pro_rx[ch];
+                ry = pro_ry[ch];
             }
             zl |= (pro_hold[ch] & WPAD_PRO_BUTTON_ZL) != 0;
             zr |= (pro_hold[ch] & WPAD_PRO_BUTTON_ZR) != 0;
@@ -461,9 +575,16 @@ static int hid_thread(int, void *) {
         cx = (s16)(sx * 156.0f);
         cy = (s16)(sy * 156.0f);
         const bool menu_was_open = wiiu::menu_open();
+        if(wiiu::network_menu::active()) {
+            static OSTime last_network_input;
+            const auto now=OSGetSystemTime();
+            float seconds=last_network_input?OSTicksToMicroseconds(now-last_network_input)/1000000.f:0.016f;
+            last_network_input=now;
+            wiiu::network_menu::pointer(network_touch,network_px,network_py,network_ry,seconds);
+        }
         wiiu::menu_input(presses, toggle_menu);
         const bool menu_took_input = menu_was_open || wiiu::menu_open();
-        if (!menu_took_input) {
+        if (!menu_took_input || wiiu::network_keyboard::active()) {
             wiiu::keyboard_input(presses, tap, px, py);
             wiiu::mii_selector_input(presses, tap, px, py);
         }
@@ -518,6 +639,8 @@ static int audio_thread(int, void *) {
     OSTime gaps_logged = 0;
     // for the report of a gap, since the last one: the longest this thread went between two rounds, and the longest a frame took to make
     OSTime round = OSGetSystemTime(), away = 0, making = 0;
+    OSTime timing_report = round;
+    OSTime timing_away = 0, timing_making = 0;
     while (!quitting) {
         if (gpu_pause != silent) {
             silent = gpu_pause;
@@ -530,7 +653,16 @@ static int audio_thread(int, void *) {
         }
         const OSTime now = OSGetSystemTime();
         away = std::max(away, now - round);
+        timing_away = std::max(timing_away, now - round);
         round = now;
+        if (av_timing.load(std::memory_order_relaxed) && now - timing_report >= OSSecondsToTicks(2)) {
+            LOG("[audio-time] max wake gap %u us; max DSP tick %u us\n",
+                (u32)OSTicksToMicroseconds(timing_away), (u32)OSTicksToMicroseconds(timing_making));
+            audio::report_output_timing();
+            audio::report_dsp_timing();
+            timing_report = now;
+            timing_away = timing_making = 0;
+        }
         if (const int queued = audio::hle::host_queued(); queued >= 0) {
             // Once the voices play, a frame is made whenever what's queued falls under the cushion, so the sound keeps to the console's audio
             // clock. Made by the timer alone, production ran half a percent behind what the voices played, and the queue ran dry about once
@@ -547,8 +679,11 @@ static int audio_thread(int, void *) {
         // Nearly nothing left queued: this thread came too late, and the voices are about to play old sound again. Every time is on the log, so
         // a run can be held to none (tools/check_ports.py).
         if (const int queued = audio::hle::host_queued(); queued >= 0 && queued < 160) gaps++;
+        const OSTime tick_begin = OSGetSystemTime();
         kernel::dsp_tick();
-        making = std::max(making, OSGetSystemTime() - now);
+        const OSTime tick_time = OSGetSystemTime() - tick_begin;
+        making = std::max(making, tick_time);
+        timing_making = std::max(timing_making, tick_time);
         if (gaps && now - gaps_logged > (OSTime)OSSecondsToTicks(1)) {
             LOG("[audio] %u gaps: the sound ran out before the next frame of it was made (this thread was away for up to %u ms, a frame took up to %u ms)\n", gaps,
                 (u32)OSTicksToMilliseconds(away), (u32)OSTicksToMilliseconds(making));
@@ -661,6 +796,7 @@ static int watchdog_thread(int, void *) {
     for (;;) {
         OSSleepTicks(OSMillisecondsToTicks(200));
         if (crash_pending) {
+            OSReport("[3dii-u crash] %s\n", crash_msg);
             LOG("[crash] %s\n", crash_msg);
             wiiu::log_threads();
             rt_log_sync();  // the log to the card too: a crash took everything that led up to it with it (Super Mario 3D Land in Cemu, 2026-11-08)
@@ -702,6 +838,9 @@ static int watchdog_thread(int, void *) {
             next_dump = 10;
         } else if (drawn) {
             if (++still == next_dump) {
+                OSReport("[3dii-u watchdog] no new GX2 lists for %u s, frame=%llu, lists=%llu, shown=%llu, file op=%x, shaders=%08x/%08x\n",
+                    still, (unsigned long long)g_frame, (unsigned long long)lists,
+                    (unsigned long long)wiiu::gfx_flips(), (u32)file_op, wiiu::last_vs, wiiu::last_ps);
                 next_dump *= 2;
                 want_hang_dump = still + 1;
             }
@@ -734,6 +873,8 @@ static std::string log_path() {
 static int card_thread(int, void *) {
     for (u32 pass = 1;; pass++) {
         OSSleepTicks(OSMillisecondsToTicks(200));
+        checkpoint::Scope state_lock(checkpoint::gate());
+        wiiu::gfx_report_draw_trace();
         const auto backup = wiiu::save_backup::requests.take();
         if (backup != wiiu::save_backup::Action::None) {
             std::string message;
@@ -744,7 +885,13 @@ static int card_thread(int, void *) {
         if (want_hang_dump) {
             const u32 seconds = want_hang_dump - 1;
             want_hang_dump = 0;
+            if (perf_trace && seconds) {
+                OSReport("[3dii-u perf] no new GPU command lists for %u s\n", seconds);
+                wiiu::log_status();
+                rt_log_sync();
+            }
             dump_hang(seconds);
+            if (perf_trace && seconds) rt_log_sync();
         }
         if (wiiu::settings_due) {  // before the flush below, and so before the one a quit asks for
             wiiu::settings_due = false;
@@ -778,6 +925,110 @@ static int card_thread(int, void *) {
         }
     }
     return 0;
+}
+
+// A recovery report uses a separate, pre-opened physical SD file. No log mutex,
+// redirected fopen, heap allocation, thread cancellation or forced lock release.
+extern "C" { volatile u32 g_3dii_safe_fault_test = 0; }
+extern "C" const char g_build_stamp[];
+static wiiu::PhysicalFile recovery_file;
+static std::atomic<u32> recovery_kind{0};
+static std::atomic<bool> recovery_report_done{false};
+static OSContext recovery_fault_context;
+// Capture the faulting thread's own stack while it is stopped, including
+// Aroma module stacks in mapped memory. Never follow an arbitrary address.
+static u32 recovery_stack_count, recovery_stack_frames[32][3];
+static u32 recovery_stack_low, recovery_stack_high;
+static void recovery_capture_stack(const OSContext *ctx) {
+    recovery_stack_count = 0;
+    const auto *thread = OSGetCurrentThread();
+    recovery_stack_low = (u32)thread->stackEnd;
+    recovery_stack_high = (u32)thread->stackStart;
+    u32 sp = ctx->gpr[1];
+    while (recovery_stack_count < 32 && !(sp & 3) &&
+           recovery_stack_high >= 8 && sp >= recovery_stack_low && sp <= recovery_stack_high - 8) {
+        const auto *frame = reinterpret_cast<const u32 *>(sp);
+        const u32 next = frame[0];
+        auto *out = recovery_stack_frames[recovery_stack_count++];
+        out[0] = sp; out[1] = next; out[2] = frame[1];
+        if (next <= sp) break;
+        sp = next;
+    }
+}
+alignas(64) static u8 recovery_bytes[8192];
+static_assert(320 + 5 * sizeof(OSContext) + 16 + sizeof recovery_stack_frames <= sizeof recovery_bytes);
+static char recovery_path[192];
+static bool recovery_file_open;
+
+static void recovery_prepare() {
+    snprintf(recovery_path, sizeof recovery_path,
+        "/vol/external01/wiiu/3dii-u/reports/%016llx_%016llx.bin",
+        (unsigned long long)g_game.program_id, (unsigned long long)OSGetSystemTime());
+    recovery_file_open = recovery_file.open(recovery_path, "w");
+    OSReport("[3dii-u safety] report storage %s: %s\n", recovery_file_open ? "ready" : "unavailable", recovery_path);
+}
+
+static void recovery_write_report(u32 kind) {
+    memset(recovery_bytes, 0, sizeof recovery_bytes);
+    memcpy(recovery_bytes, "3DSAFE1", 7);
+    auto *words = (u32 *)recovery_bytes;
+    words[2] = 2; words[3] = kind;
+    words[4] = (u32)(g_game.program_id >> 32); words[5] = (u32)g_game.program_id;
+    const u64 time = OSGetSystemTime(), frame = g_frame, lists = kernel::gx_stats.cmdlists;
+    words[6] = (u32)(time >> 32); words[7] = (u32)time;
+    words[8] = (u32)(frame >> 32); words[9] = (u32)frame;
+    words[10] = (u32)(lists >> 32); words[11] = (u32)lists;
+    words[13] = file_op; words[14] = wiiu::last_vs; words[15] = wiiu::last_ps;
+    strncpy((char*)recovery_bytes + 64, g_build_stamp, 63);
+    const char *reason = kind == 1 ? "SYNTHETIC fault requested by debugger" :
+                         kind == 2 ? "physical shader-cache I/O stalled" : "CPU exception; native dump handler follows";
+    strncpy((char*)recovery_bytes + 128, reason, 159);
+    words[72] = sizeof(OSContext);
+    unsigned contexts = 0;
+    if (kind == 3) {
+        memcpy(recovery_bytes + 320, &recovery_fault_context, sizeof(OSContext)); contexts++;
+    }
+    for (unsigned i = 0; i < 4; i++) {
+        if (!host_threads[i]) continue;
+        memcpy(recovery_bytes + 320 + contexts * sizeof(OSContext), &host_threads[i]->context, sizeof(OSContext));
+        contexts++;
+    }
+    words[12] = contexts;
+    unsigned size = 320 + contexts * sizeof(OSContext);
+    if (kind == 3) {
+        auto *stack = reinterpret_cast<u32 *>(recovery_bytes + size);
+        stack[0] = 0x53544B31; // STK1: bounded native stack records
+        stack[1] = recovery_stack_count;
+        stack[2] = recovery_stack_low; stack[3] = recovery_stack_high;
+        memcpy(stack + 4, recovery_stack_frames, recovery_stack_count * sizeof recovery_stack_frames[0]);
+        size += 16 + recovery_stack_count * sizeof recovery_stack_frames[0];
+    }
+    words[73] = size;
+    const bool saved = recovery_file_open && recovery_file.write(recovery_bytes, size) && recovery_file.flush();
+    recovery_file.close();
+    recovery_file_open = false;
+    OSReport("[3dii-u safety] kind=%u frame=%llu contexts=%u report=%s path=%s\n", kind,
+        (unsigned long long)frame, contexts, saved ? "SAVED" : "FAILED", recovery_path);
+    recovery_report_done.store(true, std::memory_order_release);
+}
+
+static int recovery_thread(int, void*) {
+    for (;;) {
+        OSSleepTicks(OSMillisecondsToTicks(100));
+        u32 kind = recovery_kind.load(std::memory_order_acquire);
+        if (g_3dii_safe_fault_test == 1) { g_3dii_safe_fault_test = 0; kind = 1; }
+        const bool cache_stalled = gpu::shader_cache_io_stalled(OSSecondsToTicks(4));
+        if (!kind && cache_stalled) kind = 2;
+        if (!kind) continue;
+        recovery_write_report(kind);
+        if (kind != 3) {
+            OSReport("[3dii-u safety] requesting Wii U Menu; no fatal exception was raised\n");
+            SYSLaunchMenu();
+        }
+        // Actual exceptions retain the native handler and its normal crash dump.
+        // A wedged kernel/core cannot be guaranteed to honor a menu request.
+        return 0;
+    }
 }
 
 // the last of the saves and what led up to the end are still in memory: give the card thread a moment, but the screen comes first. A save the game made that isn't
@@ -865,6 +1116,16 @@ static void read_console_mii_maker() {
 
 void frontend_run() {
     wiiu::profile_this_core();
+    OSInitEvent(&video_job, FALSE, OS_EVENT_MODE_AUTO);
+    OSInitEvent(&video_done, FALSE, OS_EVENT_MODE_AUTO);
+    OSInitMutex(&video_mutex);
+    spawn(video_thread, 0, 18, 256 << 10, "video converter");
+    LOG("[diag] comprehensive capture available: set diag 0..3, diag, stats, ps, bounded mem, screenshots and renderer switches\n");
+    if (FILE *f = fopen("fs:/vol/content/video-worker-enable", "rb")) {
+        fclose(f);
+        wiiu::set_video_worker(true);
+        LOG("[video] conversion worker enabled from content marker\n");
+    }
     OSThread *gpu = spawn(gpu_thread, 2, 16, 2 << 20, "gpu");
     host_threads[1] = gpu;
     host_threads[2] = spawn(hid_thread, 0, 16, 256 << 10, "hid");
@@ -893,7 +1154,7 @@ void frontend_run() {
         GX2WaitForVsync();  // the guest's VBlank is the TV's, so frames line up with its refresh
         kernel::timers_poke();  // a timer whose wake-up went missing, whatever the reason, costs a frame rather than the game: frames carry on even when everything else waits
         // the game waits for VBlank, so it pauses while the menu is open; faster speeds get more VBlanks per TV frame
-        if (!wiiu::menu_open()) {
+        if (!wiiu::menu_open() || wiiu::network_menu::active() || wiiu::network::connected()) {
             const int extra = wiiu::game_speed() / 100 - 1;
             for (int i = 0; i < extra; i++) {
                 kernel::gsp_vblank();
@@ -939,6 +1200,7 @@ void frontend_run() {
             if (quiet == 4) want_dump = true;
         }
     }
+    kernel::shutdown_room_uds();
     want_hang_dump = 1;  // a player who shuts down a frozen game shows what it was stuck on
     for (int i = 0; i < 100 && want_hang_dump; i++) OSSleepTicks(OSMillisecondsToTicks(10));
     let_card_catch_up();
@@ -949,6 +1211,9 @@ void frontend_run() {
     // 2 s, as the sound does, and the game closes either way; GX2 then goes with the process, as when HOME gives up on it (on_release).
     for (int i = 0; i < 1000 && !gpu_done; i++) OSSleepTicks(OSMillisecondsToTicks(2));
     if (gpu_done) OSJoinThread(gpu, nullptr);
+#ifdef RECOMP_RESUMABLE
+    checkpoint::finish_pending_write();
+#endif
     // The sound system is always shut down before the game goes: left running, its voices play from memory the system is about to take back, and
     // the Wii U Menu hangs as it starts (testers' NSMB2 and 3D Land, 2026-11-09). The audio thread used to get 100 ms to stop, and a late one
     // meant no shutdown at all, with nothing logged. A busy game's can be late, so it gets 2 s, and the shutdown happens either way.
@@ -958,10 +1223,13 @@ void frontend_run() {
     audio::shutdown();
     wiiu::camera_shutdown();
     LOG("[quit] sound system shut down\n");
+    OSReport("[3dii-u quit] entering final log sync\n");
     wiiu::fs_begin(0xC001);
     rt_log_sync();  // the lines since the card thread's last look, these [quit] ones among them: they never reached the file before
     wiiu::fs_end();
+    OSReport("[3dii-u quit] final log sync complete; flushing streams\n");
     fflush(nullptr);
+    OSReport("[3dii-u quit] streams flushed; returning from frontend\n");
 }
 
 // a crash shows what happened on the screen, so it can be reported: the addresses can be looked up against build/game.nm
@@ -988,10 +1256,14 @@ static BOOL on_exception(OSContext *ctx, const char *what) {
     snprintf(msg, sizeof msg, "The game crashed: %s\npc %08x lr %08x\ncalled from %08x %08x\ndar %08x sp %08x\nframe %llu\n", what, ctx->srr0, ctx->lr, lr1, lr2, ctx->dar, ctx->gpr[1], (unsigned long long)g_frame);
     // the watchdog thread logs it: the exception's own stack is small, and this thread may hold the log's lock
     memcpy(crash_msg, msg, sizeof crash_msg);
-    crash_pending = true;
-    for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(4000); crash_pending && OSGetSystemTime() < until;) {}
-    OSFatal(msg);
-    return FALSE;
+    memcpy(&recovery_fault_context, ctx, sizeof(OSContext));
+    recovery_capture_stack(ctx);
+    recovery_kind.store(3, std::memory_order_release);
+    OSReport("[3dii-u crash] %s", msg);
+    for (const OSTime until = OSGetSystemTime() + OSMillisecondsToTicks(1500);
+         !recovery_report_done.load(std::memory_order_acquire) && OSGetSystemTime() < until;) {}
+    return FALSE;  // native exception/crash-dump policy; never hide a real CPU fault
+
 }
 static BOOL on_dsi(OSContext *c) { return on_exception(c, "bad memory access"); }
 static BOOL on_isi(OSContext *c) { return on_exception(c, "bad jump"); }
@@ -1000,6 +1272,7 @@ static BOOL on_program(OSContext *c) { return on_exception(c, "program exception
 extern "C" const char g_build_stamp[];  // tools/win/build3ds.py writes it at every link
 
 int main(int argc, char **argv) {
+    OSReport("[3dii-u startup] main entered, build %s\n", g_build_stamp);
     LOG("[loader] build %s\n", g_build_stamp);
     g_argv = argv;
     OSInitMutex(&file_m);
@@ -1017,10 +1290,9 @@ int main(int argc, char **argv) {
     };
     host_threads[0] = OSGetCurrentThread();
     start_mark(g_build_stamp);
-    trace_stage = "starting the watchdog";
+    stage("starting the watchdog");
     spawn(watchdog_thread, 0, 13, 64 << 10, "watchdog");
-    if (kMeasure) spawn(wiiu::net_thread, 0, 12, 64 << 10, "net");
-    trace_stage = "system libraries";
+    stage("initializing system libraries");
     WHBProcInit();
     start_mark("system libraries up");
     // WHB registers its own at priority 100 from the GPU thread, on core 2. Each core has its own list, highest first: the GPU stops before WHB's goes, and starts after WHB's has made the screens again.
@@ -1028,20 +1300,48 @@ int main(int argc, char **argv) {
     ProcUIRegisterCallbackCore(PROCUI_CALLBACK_ACQUIRE, on_acquire, nullptr, 50, 2);
     VPADInit();
     OSEnableHomeButtonMenu(TRUE);
-    trace_stage = "save storage";
+    stage("mounting save storage");
     wiiu::save_mount();
+    const auto update_match = wiiu::wup_update::check(CONTENT_DIR);
+    if (update_match == wiiu::wup_update::Match::Invalid || update_match == wiiu::wup_update::Match::WrongBase)
+        report_stuck("This WUP update does not match the installed base. Install the matching full base and update on the same device. Your saves have not been replaced.");
     start_mark(last_note);  // what the save storage said
     stage("system up");
+    // A physical SD marker enables the lightweight console independently of the
+    // per-frame profiling counters controlled by RECOMP_MEASURE.
+    bool remote_console = kMeasure;
+    {
+        wiiu::PhysicalFile marker;
+        remote_console |= marker.open("/vol/external01/wiiu/3dii-u/debug/console-enable", "r");
+    }
+    if (remote_console) {
+        OSReport("[3dii-u debug] lightweight console enabled on TCP 4405\n");
+        spawn(wiiu::net_thread, -1, 12, 64 << 10, "net");
+    }
     std::error_code no_save;
     g_save_base = wiiu::save_folder();
     std::filesystem::create_directories(g_save_base, no_save);
     // better now than after hours of play that couldn't be kept
     if (no_save) report_stuck("Can't use this game's save storage on the console.");
     OSSetThreadPriority(OSGetCurrentThread(), 14);
+    stage("initializing guest memory");
     mem::init();
     stage("memory up");
+    stage("loading game content");
     load_game(CONTENT_DIR);
     stage("game loaded");
+#ifdef RECOMP_RESUMABLE
+    checkpoint::initialize_persistent();
+#endif
+#ifdef RECOMP_RESUMABLE
+    if (FILE *state_check = fopen("fs:/vol/content/state-heap-check", "rb")) {
+        fclose(state_check);
+        checkpoint::set_heap_checks(true);
+        OSReport("[state-heap] phased mapped-heap validation enabled\n");
+    }
+#endif
+    recovery_prepare();
+    spawn(recovery_thread, -1, 12, 128 << 10, "safety guard");
     std::filesystem::create_directories(kernel::save_root(), no_save);
     if (!wiiu::test_run()) {  // before services/guest file handles, including cached save files
         std::string message;
@@ -1056,9 +1356,24 @@ int main(int argc, char **argv) {
             wiiu::save_from_content(std::string(CONTENT_DIR) + "/save_import", kernel::save_root() + "/savedata", kernel::save_root() + "/save_imported");
     }
     struct stat no_menu;
-    if (stat((std::string(CONTENT_DIR) + "/no_menu").c_str(), &no_menu) == 0) wiiu::menu_disable();  // built with "In-game menu: Off"
+    if (!wiiu::wup_update::menu_enabled(CONTENT_DIR, stat((std::string(CONTENT_DIR) + "/no_menu").c_str(), &no_menu) != 0)) wiiu::menu_disable();
     else load_overlay_combo();
     rt_log_open(log_path());
+    perf_trace = wiiu::debug_flag("perftrace");
+    // An immutable diagnostic release can enable timing before its opening
+    // movie, without relying on a PC command arriving after boot.
+    if (FILE *timing = fopen("fs:/vol/content/avtiming-enable", "rb")) {
+        fclose(timing);
+        wiiu::set_av_timing(true);
+        LOG("[timing] audio/source and GPU-pump timing enabled by content marker\n");
+    }
+    if (FILE *timing = fopen("fs:/vol/content/cpu-timing-enable", "rb")) {
+        fclose(timing);
+        cpu_summary = true;
+        wiiu::set_av_timing(true);
+        wiiu::gfx_set("cputime", 1);
+        LOG("[timing] CPU render phases and two-second summaries enabled by content marker; detailed thread/SVC capture remains bounded\n");
+    }
     if (FILE *f = fopen((wiiu::data_dir() + "/logsync").c_str(), "rb")) {  // debug aid: each line to the card as it's logged (core.cpp)
         fclose(f);
         extern bool g_log_each_line;
@@ -1137,7 +1452,9 @@ int main(int argc, char **argv) {
     kernel::start(bi);
     stage("game started");
     frontend_run();
+    OSReport("[3dii-u quit] entering WHBProcShutdown\n");
     WHBProcShutdown();
+    OSReport("[3dii-u quit] WHBProcShutdown complete; exiting process\n");
     if (route_quit) OSExitThread(0);  // Cemu 2.6 spins in process exit, which prevents the runner from closing it.
     _exit(0);
     return 0;

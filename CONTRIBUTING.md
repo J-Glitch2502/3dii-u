@@ -25,6 +25,12 @@ it that way, and don't add exceptions for any of these:
 Machine-specific settings, such as paths and your console's address, belong in arguments or environment variables,
 never in the code.
 
+The exception for portable shader metadata is `tools/shader_observations/`: it
+contains fragment render-state records and vertex fingerprints/reconstruction
+recipes, not raw vertex programs or game assets. Its checked inventory must be
+included in source archives and Windows packages. See its README for the
+coverage-preservation checks and how predictions differ from observations.
+
 ## Setting up
 
 You need Windows 10 or 11 and [Python](https://www.python.org/) 3.10 or newer. Contributions are welcome under the

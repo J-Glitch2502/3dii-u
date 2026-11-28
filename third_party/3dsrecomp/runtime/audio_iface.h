@@ -15,4 +15,5 @@ void set_volume(float v);  // host output gain (0..1), from the in-game menu
 // one audio frame (160 samples at 32728 Hz), which the game takes or not (dsp_core.cpp); true if the DSP is running. fresh: the game took it, and it
 // worked on a frame the game submitted since the last one (or the game hasn't submitted any yet): only then an interrupt
 bool tick(bool seen, bool *fresh = nullptr);
+void report_dsp_timing();  // audio thread: try-lock only, never waits for IPC
 }  // namespace audio

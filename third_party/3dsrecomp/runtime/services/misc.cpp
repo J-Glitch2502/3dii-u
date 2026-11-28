@@ -10,6 +10,9 @@
 #include "../loader.h"
 #include "../service.h"
 #include "services.h"
+#ifdef __WIIU__
+#include "uds_service.h"
+#endif
 
 // The host's microphone: silence, unless a port provides one
 __attribute__((weak)) void mic_host_start() {}
@@ -135,6 +138,7 @@ std::array<u8, 0x60> player_mii() {
 }
 
 struct Ptm : Service {
+    SERVICE_CHECKPOINT(Ptm)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -178,6 +182,7 @@ struct Ptm : Service {
 };
 
 struct Ac : Service {
+    SERVICE_CHECKPOINT(Ac)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -195,13 +200,20 @@ struct Ac : Service {
         case 0x0005:  // GetConnectResult
             ipc.result(0xE0A09D2E);  // not connected
             break;
-        case 0x000D:  // GetStatus
-        case 0x000F:  // GetWifiStatus
+        case 0x000C:  // GetStatus
         case 0x003E:  // IsConnected
             ipc.ok(2);
             ipc.set(2, 0);
             break;
-        case 0x000E:  // GetLastErrorCode
+        case 0x000D:  // GetWifiStatus
+            ipc.ok(2);
+#ifdef __WIIU__
+            ipc.set(2, room_wireless_available() ? 1 : 0);
+#else
+            ipc.set(2, 0);
+#endif
+            break;
+        case 0x000A:  // GetLastErrorCode
             ipc.ok(2);
             ipc.set(2, 0);
             break;
@@ -212,6 +224,7 @@ struct Ac : Service {
 };
 
 struct Frd : Service {
+    SERVICE_CHECKPOINT(Frd)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -274,6 +287,7 @@ struct Frd : Service {
 };
 
 struct Ndm : Service {
+    SERVICE_CHECKPOINT(Ndm)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -289,6 +303,7 @@ struct Ndm : Service {
 };
 
 struct Cecd : Service {
+    SERVICE_CHECKPOINT(Cecd, info, state)
     using Service::Service;
     std::shared_ptr<Event> info = make_event(ONESHOT, "cecd info");
     std::shared_ptr<Event> state = make_event(ONESHOT, "cecd state");
@@ -364,6 +379,7 @@ struct Cecd : Service {
 };
 
 struct Boss : Service {
+    SERVICE_CHECKPOINT(Boss)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -395,6 +411,30 @@ struct Boss : Service {
 struct Mic : Service {
     using Service::Service;
     static constexpr u64 tick_period = 10000000;
+#ifdef RECOMP_RESUMABLE
+    bool persistent_supported() const override { return true; }
+    bool capture(checkpoint::Image &im) override {
+        // Host microphone input stays live. Rewind the guest buffer/cursor and
+        // its saved timeout, then reopen/close the host stream to match it.
+        // Do not copy a native microphone handle or enqueue a second tick.
+        bool saved_sampling = sampling;
+        if (im.archive) im.archive->io(saved_sampling);
+        im.restore.push_back([this, saved_sampling] {
+            // Microphone input is live host state. An already-running stream
+            // does not need teardown/reinitialization when rewinding the game.
+            if (sampling && !saved_sampling) mic_host_stop();
+            else if (!sampling && saved_sampling) mic_host_start();
+        });
+        im.take(buf_full); im.take(mem);
+        im.take(next_tick); im.take(start); im.take(end); im.take(pos); im.take(rate); im.take(generation);
+        im.take(encoding); im.take(gain); im.take(power); im.take(clamp);
+        im.take(loop); im.take(sampling);
+        return true;
+    }
+#endif
+#ifdef RECOMP_RESUMABLE
+    void persistent_timeout(u64 g, u32) override { tick(static_cast<u32>(g)); }
+#endif
     std::shared_ptr<Event> buf_full = make_event(ONESHOT, "mic");
     std::shared_ptr<SharedMem> mem;
     u64 next_tick = 0;
@@ -435,7 +475,7 @@ struct Mic : Service {
             // Keep the sampling clock across a late callback, with bounded catch-up after a long pause.
             const u64 now = now_ns(), catch_up = 9 * tick_period;
             next_tick = std::max(next_tick + tick_period, now > catch_up ? now - catch_up : 0);
-            add_timeout(next_tick, [this, g] { tick(g); });
+            add_timeout(next_tick, [this, g] { tick(g); } STATE_TIMEOUT(TimeoutKind::Service, nullptr, shared_from_this(), g));
         }
     }
     void handle(IPC &ipc) override {
@@ -468,7 +508,7 @@ struct Mic : Service {
                 mic_host_start();
                 const u32 g = generation;
                 next_tick = now_ns() + tick_period;
-                add_timeout(next_tick, [this, g] { tick(g); });
+                add_timeout(next_tick, [this, g] { tick(g); } STATE_TIMEOUT(TimeoutKind::Service, nullptr, shared_from_this(), g));
             }
             ipc.ok();
             break;
@@ -540,6 +580,26 @@ void hid_extra_pad_live(u32 buttons) {
 // Keep queue accounting private: shared memory belongs to the guest and cannot supply trusted write offsets.
 struct Ir : Service {
     using Service::Service;
+#ifdef RECOMP_RESUMABLE
+    bool persistent_supported() const override { return true; }
+    bool capture(checkpoint::Image &im) override {
+        // Avoid copying this resource-owning service: its destructor adjusts
+        // the global count used to detect a connected Circle Pad Pro.
+        im.take(conn); im.take(recv); im.take(send); im.take(mem);
+        im.take(shared_size); im.take(packets_max); im.take(data_max);
+        im.take(first); im.take(next); im.take(used); im.take(head); im.take(lengths);
+        im.take(period_ms); im.take(generation);
+        bool saved_connected = connected;
+        if (im.archive) im.archive->io(saved_connected);
+        im.restore.push_back([this, saved_connected] { connection(saved_connected); });
+        // The kernel snapshot already owns the matching poll timeout. Physical
+        // stick/button input remains live; do not create a duplicate poll.
+        return true;
+    }
+#endif
+#ifdef RECOMP_RESUMABLE
+    void persistent_timeout(u64 g, u32) override { poll(static_cast<u32>(g)); }
+#endif
     std::shared_ptr<Event> conn = make_event(ONESHOT, "ir conn");
     std::shared_ptr<Event> recv = make_event(ONESHOT, "ir recv");
     std::shared_ptr<Event> send = make_event(ONESHOT, "ir send");
@@ -652,7 +712,7 @@ struct Ir : Service {
         const u32 g = generation;
         add_timeout(now_ns() + period_ms * 1000000ull, [weak, g] {
             if (auto service = weak.lock()) static_cast<Ir *>(service.get())->poll(g);
-        });
+        } STATE_TIMEOUT(TimeoutKind::Service, nullptr, shared_from_this(), g));
     }
     void poll(u32 g) {  // (kernel lock held)
         if (g != generation || !connected || !period_ms || !mapped()) return;
@@ -790,6 +850,7 @@ struct Iru : Service {
 // Offline local wireless: games can obtain their status/bind events and scan, but there is no transport or peer.
 // Command IDs and reply layouts: Azahar nwm_uds.cpp / nwm_uds.h, commit11eceda5e0e682a1f44e396bf954a1b9137097ca.
 struct Uds : Service {
+    SERVICE_CHECKPOINT(Uds, status, bind)
     using Service::Service;
     std::shared_ptr<Event> status = make_event(ONESHOT, "uds status");
     // shortcut: one offline bind event; use per-bind events when a transport is added.
@@ -889,6 +950,7 @@ struct Uds : Service {
 };
 
 struct Generic : Service {
+    SERVICE_CHECKPOINT(Generic)
     using Service::Service;
     void handle(IPC &ipc) override { unimplemented(ipc); }
 };
@@ -896,6 +958,7 @@ struct Generic : Service {
 // ssl:C has no network behind it, but games take their random numbers from it: Pokemon Ultra Sun seeds its own generator with them at
 // every start and save. Unanswered, the buffer stayed as the game left it, and every start rolled the same.
 struct Ssl : Service {
+    SERVICE_CHECKPOINT(Ssl)
     using Service::Service;
     void handle(IPC &ipc) override {
         if (ipc.cmd() != 0x0011) return unimplemented(ipc);
@@ -917,9 +980,23 @@ struct Ssl : Service {
     }
 };
 
+// Disabled networking must fail initialization rather than claim a lobby is
+// starting. In particular, MK7 polls GetServerState after a successful init.
+static constexpr u32 DLP_WIRELESS_OFF = 0xC940AC04;
+struct DlpFkcl : Service {
+    SERVICE_CHECKPOINT(DlpFkcl)
+    using Service::Service;
+    void handle(IPC &ipc) override {
+        // Cleanup must still succeed after an initialization failure.
+        const u32 cmd = ipc.cmd();
+        ipc.result(cmd == 2 || cmd == 6 || cmd == 0x10 ? 0 : DLP_WIRELESS_OFF);
+    }
+};
+
 // Download Play children are a separate 3DS title category. Use the current guest
 // program ID so retail games take their normal startup path.
 struct DlpSrvr : Service {
+    SERVICE_CHECKPOINT(DlpSrvr)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -927,8 +1004,11 @@ struct DlpSrvr : Service {
             ipc.ok(2);
             ipc.set(2, (g_game.program_id >> 32) == 0x00040001);
             break;
+        case 0x0002:  // Finalize must succeed even when wireless is unavailable.
+            ipc.ok();
+            break;
         default:
-            unimplemented(ipc);
+            ipc.result(DLP_WIRELESS_OFF);
         }
     }
 };
@@ -937,6 +1017,7 @@ struct DlpSrvr : Service {
 // holds the DLC title's content infos (index, type, id, size, ownership; 0x18 bytes each), dlc_title.bin and update_title.bin a title info
 // each (title id, size, version, type), dlc_ticket.bin a ticket info. With none of them nothing is installed.
 struct Am : Service {
+    SERVICE_CHECKPOINT(Am)
     using Service::Service;
     static std::vector<u8> records(const char *name) {
         std::vector<u8> d;
@@ -1065,15 +1146,23 @@ void register_misc() {
     register_service(std::make_shared<Mic>("mic:u"));
     register_service(std::make_shared<Ir>("ir:USER"));
     register_service(std::make_shared<Iru>("ir:u"));
+#ifdef __WIIU__
+    if (!register_room_uds())
+#endif
     register_service(std::make_shared<Uds>("nwm::UDS"));
     register_service(std::make_shared<Am>("am:app"));  // was Generic: NSMB2's Coin Rush read its own request back as thousands of DLC tickets (2026-11-07)
     register_service(std::make_shared<DlpSrvr>("dlp:SRVR"));
+    register_service(std::make_shared<DlpFkcl>("dlp:FKCL"));
     register_y2r();
     register_cam();
     register_service(std::make_shared<Ssl>("ssl:C"));
-    for (const char *n : {"news:u", "soc:U", "http:C", "dlp:FKCL",
+    for (const char *n : {"news:u", "soc:U", "http:C",
                           "pxi:dev", "act:u", "nim:aoc", "qtm:u", "csnd:SND", "nfc:u"})
         register_service(std::make_shared<Generic>(n));
+#ifdef __WIIU__
+    register_room_dlp();
+    start_room_uds();
+#endif
 }
 
 void register_all_services() {
@@ -1185,3 +1274,16 @@ std::shared_ptr<SharedMem> load_shared_font() {
 }
 
 }  // namespace kernel
+
+#ifdef RECOMP_RESUMABLE
+namespace kernel {
+u32 persistent_sharedmem_callback(const SharedMem &sm) {
+    return !sm.on_move ? 0 : sm.on_move == relocate_shared_font ? 1 : 0xffffffffu;
+}
+bool persistent_sharedmem_callback(SharedMem &sm, u32 kind) {
+    if (kind > 1) return false;
+    sm.on_move = kind ? relocate_shared_font : nullptr;
+    return true;
+}
+}
+#endif

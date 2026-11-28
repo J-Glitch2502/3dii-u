@@ -147,6 +147,9 @@ pipeline.copy_to(sys.argv[1], sys.argv[2])
         engine, build = self.root / 'engine', self.root / 'build'
         fake_builder = engine / 'tools' / 'win' / 'build3ds.py'
         fake_builder.parent.mkdir(parents=True)
+        (engine/'builder').mkdir(parents=True)
+        (engine/'builder/multiplayer-defaults.json').write_text(
+            Path(__file__).with_name('multiplayer-defaults.json').read_text())
         (fake_builder.parent / 'gcc.exe').touch()
         fake_builder.write_text('''
 import os, threading
@@ -196,6 +199,7 @@ def build_shaders(*args): pass
                                       (pipeline.dumps, 'archives_named', []), (pipeline.shaderlogs, 'restore', (0, 0)),
                                       (pipeline.shutil, 'disk_usage', mock.Mock(free=1 << 40))):
                 stack.enter_context(mock.patch.object(owner, name, return_value=value))
+            stack.enter_context(mock.patch.object(pipeline.wup_update, 'remember_base', return_value={}))
             stack.enter_context(mock.patch.object(pipeline, 'make_title'))
             stack.enter_context(mock.patch.object(pipeline.mods, 'apply'))
             extraction = stack.enter_context(mock.patch.object(pipeline.dumps, 'extract_program', side_effect=extract))
@@ -220,6 +224,9 @@ def build_shaders(*args): pass
         engine = self.root / 'engine'
         fake_builder = engine / 'tools/win/build3ds.py'
         fake_builder.parent.mkdir(parents=True)
+        (engine/'builder').mkdir(parents=True)
+        (engine/'builder/multiplayer-defaults.json').write_text(
+            Path(__file__).with_name('multiplayer-defaults.json').read_text())
         fake_builder.with_name('gcc.exe').touch()
         fake_builder.write_text('''
 import os, threading
@@ -244,11 +251,6 @@ def build_shaders(*args): pass
         upstream = engine / 'tools/upstream.txt'
         learned = engine / 'games' / profile['slug'] / 'functions.txt'
         learned.parent.mkdir(parents=True)
-        observations = learned.parent / 'shader_logs'
-        observations.mkdir()
-        (observations / 'observed.bin').write_bytes(b'base shaders')
-        console_log = self.root / 'console.bin'
-        console_log.write_bytes(b'console shaders')
 
         class Dump:
             path, kind, size, version = 'made-up.3ds', 'game', 0, 1
@@ -287,7 +289,7 @@ def build_shaders(*args): pass
                 with ExitStack() as stack:
                     for owner, name, value in ((pipeline, 'ROOT', str(engine)), (pipeline, 'WORK', str(engine)),
                             (pipeline, 'BUILD', str(build)), (pipeline, 'WORK_GAMES', str(build / 'builder_work')),
-                            (pipeline, 'ARCHIVES', str(build / 'archives')), (pipeline.sys, 'argv', argv)):
+                            (pipeline, 'ARCHIVES', str(build / 'archives')), (pipeline.sys, 'argv', argv), (pipeline.sys, 'platform', 'win32')):
                         stack.enter_context(mock.patch.object(owner, name, value))
                     for owner, name, value in ((pipeline, 'profile_for', profile), (pipeline.user_files, 'check_otp', None),
                             (pipeline.dumps, 'have_system_archives', True), (pipeline.dumps, 'archives_named', []),
@@ -298,9 +300,9 @@ def build_shaders(*args): pass
                     stack.enter_context(mock.patch.object(pipeline.dumps, 'extract_program', side_effect=lambda d, p, _: (Path(p) / 'code.bin').write_bytes(b'code')))
                     stack.enter_context(mock.patch.object(pipeline.mods, 'Mod', return_value=types.SimpleNamespace(changes_code=lambda: changed, close=lambda: None)))
                     stack.enter_context(mock.patch.object(pipeline.mods, 'apply'))
+                    stack.enter_context(mock.patch.object(pipeline.wup_update, 'remember_base', return_value={}))
                     stack.enter_context(mock.patch.object(pipeline, 'make_title'))
                     stack.enter_context(mock.patch.object(pipeline, 'pack_wup'))
-                    console_learned = stack.enter_context(mock.patch.object(pipeline, 'console_learned', return_value=[str(console_log)]))
                     commands = stack.enter_context(mock.patch.object(pipeline.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '')))
                     pipeline.main()
                     built = pipeline.sys.modules['build3ds'].built
@@ -308,9 +310,6 @@ def build_shaders(*args): pass
                     self.assertEqual([Path(c.args[0][1]).name for c in commands.call_args_list],
                                      ['find_entries.py', 'cro_entries.py'] if discover else [])
                     self.assertEqual(Path(built.extra_functions).exists(), local is not None and bool(local) and not (cold or updated or changed))
-                    self.assertEqual(console_learned.called, not (cold or changed))
-                    for file in ('observed.bin', console_log.name):
-                        self.assertEqual((Path(built.dir) / 'shader_logs' / file).exists(), not (cold or changed))
                     if cold or updated or changed:
                         self.assertIsNone(built.upstream_functions)
                     if cold:

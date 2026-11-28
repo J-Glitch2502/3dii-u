@@ -1601,9 +1601,10 @@ struct SpecGen {
             }
             case OP_IFU:
             case OP_IFC: {
+                // Only a taken IFU pushes the PICA stack. A known-false
+                // IFU can run at depth eight without consuming a ninth slot.
                 const bool known = I.op == OP_IFU && decided(I);
                 const bool taken = !known || ((b >> I.bid) & 1);
-                // Only the taken branch pushes one of the PICA's eight IF slots.
                 if (dst < i + 1 || dst + num > e || (taken && ifs >= 8) || !ends_plain(i + 1, dst) || !ends_plain(dst, dst + num)) {
                     fail = true; why = __LINE__; at = i;
                     return false;
@@ -1627,6 +1628,8 @@ struct SpecGen {
                     if (num) {
                         w.o += "    } else {\n";
                         ends.pop_back();
+                        // A false IFC/IFU jumps straight to its else branch;
+                        // it never pushes the then branch's IF stack entry.
                         ifs--;
                         r2 = block(dst, dst + num, false, 0);
                         ifs++;
@@ -1635,10 +1638,7 @@ struct SpecGen {
                     w.o += "    }\n";
                     join(then, r1, now(), r2);
                 }
-                if (taken) {
-                    ends.pop_back();
-                    ifs--;
-                }
+                if (taken) { ends.pop_back(); ifs--; }
                 if (cont == e && cont != i + 1 && region_end(e)) {
                     fail = true; why = __LINE__; at = i;
                     return false;

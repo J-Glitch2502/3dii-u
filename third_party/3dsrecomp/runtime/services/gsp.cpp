@@ -8,6 +8,10 @@
 #include "../loader.h"
 #include "../service.h"
 #include "services.h"
+#ifdef __WIIU__
+#include <coreinit/time.h>
+namespace wiiu { bool av_timing_enabled(); }
+#endif
 
 namespace kernel {
 
@@ -74,8 +78,10 @@ static void signal_irq_now(Irq id) {
 // block at a VBlank). A change of what a screen shows is the game's swap, which a 3DS's screens take at the next VBlank (gsp_swaps); games
 // that write those registers themselves swap in write_hw_regs, counted the same way. (fb_mutex held)
 static u32 swap_count[2];
+static u32 swap_requests[2], vblank_count;
 static unsigned swapped;  // the screens swapped since the last VBlank
 static void lcd_record(int screen, u32 select, u32 left, u32 right) {
+    swap_requests[screen]++;
     auto &l = gsp.lcd[screen];
     const u32 paddr = mem::vaddr_to_paddr(left);
     const u32 slot = select & 1;
@@ -88,6 +94,11 @@ static void lcd_record(int screen, u32 select, u32 left, u32 right) {
 u32 gsp_swaps(int screen) {
     std::lock_guard<std::mutex> lk(fb_mutex);
     return swap_count[screen & 1];
+}
+
+GspFrameStats gsp_frame_stats() {
+    std::lock_guard<std::mutex> lk(fb_mutex);
+    return {vblank_count, {swap_requests[0], swap_requests[1]}, {swap_count[0], swap_count[1]}};
 }
 
 // framebuffer update from the shared memory (at VBlank), like the GSP module does
@@ -163,6 +174,7 @@ static void no_gpu_timeout() {
 
 void gsp_frame_boundary();
 void gsp_vblank() {
+    checkpoint::Scope state_lock(checkpoint::gate());
     gsp_frame_boundary();
     Lock lk(kmutex);
     no_gpu_timeout();
@@ -170,6 +182,7 @@ void gsp_vblank() {
     update_framebuffer(1);
     {
         std::lock_guard<std::mutex> fl(fb_mutex);
+        vblank_count++;
         for (int s = 0; s < 2; s++) swap_count[s] += swapped >> s & 1;
         swapped = 0;
     }
@@ -187,6 +200,33 @@ bool gsp_gx_pending() {
 static u32 va2pa(u32 va) { return mem::vaddr_to_paddr(va); }
 
 GxStats gx_stats;
+#ifdef __WIIU__
+// Submission and pickup share the queue mutex. These are diagnostic clocks,
+// never part of a checkpoint or used to decide when to render.
+static OSTime last_submission, last_pickup, max_submission_gap, max_list_work;
+
+void gsp_report_frame_gap() {
+    const OSTime now = OSGetSystemTime();
+    OSTime submitted, picked, submission_gap;
+    size_t queued;
+    {
+        std::lock_guard<std::mutex> lock(gsp.qm);
+        submitted = last_submission;
+        picked = last_pickup;
+        submission_gap = max_submission_gap;
+        max_submission_gap = 0;
+        queued = gsp.queue.size();
+    }
+    const auto age = [now](OSTime at) {
+        return at && at <= now ? (unsigned long long)OSTicksToMicroseconds(now - at) : 0ULL;
+    };
+    LOG("[pace-gx] queued=%zu submit-age-us=%llu pickup-age-us=%llu max-submit-gap-us=%llu max-list-work-us=%llu\n",
+        queued, age(submitted), age(picked),
+        (unsigned long long)OSTicksToMicroseconds(submission_gap),
+        (unsigned long long)OSTicksToMicroseconds(max_list_work));
+    max_list_work = 0;
+}
+#endif
 
 // ---- GX dumps for the GPU replay tool: RECOMP_DUMP=<frame> dumps the GX work of that frame
 static u64 dump_frame = ~0ull, cur_frame;
@@ -244,6 +284,9 @@ void gsp_process_gx() {
             if (gsp.queue.empty() || gx_hold) return;
             c = gsp.queue.front();
             gsp.queue.pop_front();
+#ifdef __WIIU__
+            if ((c[0] & 0xff) == 1 && wiiu::av_timing_enabled()) last_pickup = OSGetSystemTime();
+#endif
         }
         std::vector<Irq> irqs;
         if (dump_state == 1) dump_begin();
@@ -269,6 +312,8 @@ void gsp_process_gx() {
             gpu::process_command_list(va2pa(c[1]), c[2]);
 #ifdef __WIIU__
             gpu::gx2_finish_list();
+            if (wiiu::av_timing_enabled() && last_pickup)
+                max_list_work = std::max(max_list_work, OSGetSystemTime() - last_pickup);
 #endif
             gx_stats.cmdlists++;
             if (kMeasure) gx_stats.gpu_ns += real_ns() - t0;
@@ -319,7 +364,7 @@ void gsp_process_gx() {
         if ((c[0] & 0xFF) == 0x04) {
             // Texture copies complete late: Super Mario 3D Land hangs after the title screen otherwise
             // (the same workaround as Citra's delay_texture_copy_completion).
-            add_timeout(now_ns() + 1000000, [] { signal_irq(PPF); });
+            add_timeout(now_ns() + 1000000, [] { signal_irq(PPF); } STATE_TIMEOUT(TimeoutKind::GspIrq, nullptr, nullptr, 0, PPF));
             irqs.clear();
         }
         for (Irq i : irqs) signal_irq(i);
@@ -334,6 +379,7 @@ void gsp_process_gx() {
 void frontend_wake();
 
 struct GspGpu : Service {
+    SERVICE_CHECKPOINT(GspGpu)
     using Service::Service;
     // GSP's register offsets count from 0x1EB00000: the LCDs' framebuffer registers are at 0x400400 (top screen) and 0x400500 (bottom)
     static u32 *lcd_register(u32 reg) {
@@ -506,6 +552,13 @@ struct GspGpu : Service {
             if ((c[0] & 0xFF) >= CPU_WRITE) continue;  // Internal notifications do not come from guest command memory.
             {
                 std::lock_guard<std::mutex> lk(gsp.qm);
+#ifdef __WIIU__
+                if ((c[0] & 0xff) == 1 && wiiu::av_timing_enabled()) {
+                    const OSTime now = OSGetSystemTime();
+                    if (last_submission) max_submission_gap = std::max(max_submission_gap, now - last_submission);
+                    last_submission = now;
+                }
+#endif
                 gsp.queue.push_back(c);
                 gsp.busy++;
             }
@@ -518,5 +571,20 @@ struct GspGpu : Service {
 void register_gsp() {
     register_service(std::make_shared<GspGpu>("gsp::Gpu"));
 }
+
+
+#ifdef RECOMP_RESUMABLE
+void persistent_gsp_irq(u32 id) { signal_irq(static_cast<Irq>(id)); }
+void checkpoint_gsp(checkpoint::Image &im) {
+    im.take(gsp.shm); im.take(gsp.rights_thread); im.take(gsp.next_thread);
+    for (auto &event : gsp.irq_event) im.take(event);
+    im.memory(gsp.registered, sizeof gsp.registered);
+    im.memory(gsp.fb, sizeof gsp.fb); im.memory(gsp.lcd, sizeof gsp.lcd);
+    im.take(gsp.queue); im.take(gsp.busy);
+    im.memory(swap_count, sizeof swap_count); im.memory(swap_requests, sizeof swap_requests);
+    im.take(vblank_count); im.take(swapped);
+    if (!im.archive) capture_object(im, gsp.shm);
+}
+#endif
 
 }  // namespace kernel

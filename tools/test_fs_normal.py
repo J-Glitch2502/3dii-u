@@ -76,7 +76,7 @@ def main():
                 assert key is not None and azahar_to_log.normalize_logged(key) == key
                 normalized = tev_to_log.normal(tev_to_log.decode(key))
                 assert tev_to_log.encode(normalized) == key
-                assert normalized['lsel'][2] == (3 | (selector if mask else 0) << 2)
+                assert normalized['lsel'][2] == (3 | selector << 2)
                 spot_configs += 1
     assert spot_configs == 4088
     print(f'Azahar active-light spotlight configurations: {spot_configs}')

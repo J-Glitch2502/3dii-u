@@ -1,0 +1,1802 @@
+{
+  "version": 1,
+  "description": "Portable render-state records and vertex fingerprints/recipes. Preserved/confirmed files retain prior build coverage; they are not proof that gameplay exercised each state. No vertex program words, ROM data, keys or console logs.",
+  "files": {
+    "games/bowsers_inside/shader_logs/abi_fs_log.bin": {
+      "bytes": 35008,
+      "sha256": "5c417d227810f50460a1ce2e1a0ce1eefb075dbc9f43a91fb389d42feef81051"
+    },
+    "games/bowsers_inside/shader_logs/abi_vs_log.vsf": {
+      "bytes": 4480,
+      "sha256": "67bd27bee15b5b8f3d71eaff92329c3aa48c3bf021e9fc8e7b5c9ecb9e73d239"
+    },
+    "games/bowsers_inside/shader_logs/abi_vs_log.vsr": {
+      "bytes": 672,
+      "sha256": "01a944894798b80ec5fefea1f7e51edf4f3f555e5dbbca9e5b6710312912d38a"
+    },
+    "games/bowsers_inside/shader_logs/cemu_144912.bin": {
+      "bytes": 140,
+      "sha256": "75519e412d2b88473e1eba58c51bdebb79c54ec4b82906eeb5700cb3f47b8cb2"
+    },
+    "games/bowsers_inside/shader_logs/console_1108_0025.bin": {
+      "bytes": 45400,
+      "sha256": "dfb65d8fc6e3199ce2defddbccab726eff517c8696e22a94716952471eecb3ce"
+    },
+    "games/bowsers_inside/shader_logs/console_1108_0025.vsf": {
+      "bytes": 160,
+      "sha256": "af34930558381724d1f394a70babb4ad376aab1e04a14f8132293ca4d7ddaeee"
+    },
+    "games/bowsers_inside/shader_logs/console_run1.bin": {
+      "bytes": 1352,
+      "sha256": "d072b56620bf8b4ecbca4376796a29603c6d2c3d2978e4a8f7ca25d0b324334c"
+    },
+    "games/bowsers_inside/shader_logs/fs_log.bin": {
+      "bytes": 23336,
+      "sha256": "1155628532dbc2719c1fb0726d36217ea54a5297f02e38430fc6de4888dcc743"
+    },
+    "games/bowsers_inside/shader_logs/models_fs.bin": {
+      "bytes": 556268,
+      "sha256": "38b0b5e8674b5fcaf81b805c0b52fc92cedaf87ec58a9ba076d02c557b678d46"
+    },
+    "games/bowsers_inside/shader_logs/variants.bin": {
+      "bytes": 263400,
+      "sha256": "9001bd30d5a6ebea9a93db2fb19f6e4265dd0cf3b8b696f76f49a56832b4793c"
+    },
+    "games/bowsers_inside/shader_logs/vs_log.vsf": {
+      "bytes": 2640,
+      "sha256": "d529b58f56b4af36081b2e4d355e21a029f8a65bca6198919d40f79641645690"
+    },
+    "games/bowsers_inside/shader_logs/vs_log.vsr": {
+      "bytes": 336,
+      "sha256": "05f684eccc4ff7851873383161599883057bdcf1f670a16d026ce727a54ecc01"
+    },
+    "games/bowsers_inside/shader_logs/walk_3101_fs.bin": {
+      "bytes": 36204,
+      "sha256": "418bde040351bf8023317b8dcf59e0505e18f47196eec429e3b7f2de9bd17ea3"
+    },
+    "games/bowsers_inside/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 3040,
+      "sha256": "999f7fd24edc87f9e47784ca07456330753cdfb512664af195aebbb3bea0c59c"
+    },
+    "games/bowsers_inside/shader_logs/walk_3101_vs.vsr": {
+      "bytes": 1188,
+      "sha256": "dcd6045129ebf5d1451c849aa1601d2d23785e842d94d9838583effcb842a4fa"
+    },
+    "games/bowsers_inside/shader_logs/walk_3102_fs.bin": {
+      "bytes": 36384,
+      "sha256": "6a11dbd44a31b05ad5396022491d337d96370dc041a4a6be8a7ae39aac4bf77a"
+    },
+    "games/bowsers_inside/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 3040,
+      "sha256": "999f7fd24edc87f9e47784ca07456330753cdfb512664af195aebbb3bea0c59c"
+    },
+    "games/bowsers_inside/shader_logs/walk_3102_vs.vsr": {
+      "bytes": 1188,
+      "sha256": "dcd6045129ebf5d1451c849aa1601d2d23785e842d94d9838583effcb842a4fa"
+    },
+    "games/darkmoon/shader_logs/observed_fragments.json": {
+      "bytes": 1868987,
+      "sha256": "fa9dd8741294656f071b3909a9a43bfa21b692d53896d75276306087d1d57896"
+    },
+    "games/darkmoon/shader_logs/opening_hardware.vsr": {
+      "bytes": 3672,
+      "sha256": "0dd8b54060a1aab036adf915ffdec34d8cf276be298a9e0187f6604026467eda"
+    },
+    "games/darkmoon/shader_logs/opening_hardware_fs.bin": {
+      "bytes": 33288,
+      "sha256": "be3ef37f97f9ee18ff51d327e6ee8fb8c9b59a18fa543f29e86d9163f61910a5"
+    },
+    "games/dream_team/shader_logs/abi_fs_log.bin": {
+      "bytes": 14024,
+      "sha256": "a7ce37bacb23eb3194a5bfbbe8bcd0588bc1d105a7596ad73640117a89fb6264"
+    },
+    "games/dream_team/shader_logs/abi_vs_log.vsf": {
+      "bytes": 4320,
+      "sha256": "af5d272f50fbea2f5fc07ab90193878f8ce8a2d2b6322eb9f0ad8cfc94b5e1a2"
+    },
+    "games/dream_team/shader_logs/abi_vs_log.vsr": {
+      "bytes": 2748,
+      "sha256": "af1614d68da786a2e61f00a29ecb8de2e85da49207b8aa1de051a7cb893d699b"
+    },
+    "games/dream_team/shader_logs/cemu_015334.bin": {
+      "bytes": 260,
+      "sha256": "770b13d60397d8465d7832f56963035d521d00d1ceb27352e0e0abdc1ad0e756"
+    },
+    "games/dream_team/shader_logs/cemu_long_094930.bin": {
+      "bytes": 3192,
+      "sha256": "ab54f4a53408407500982214c69964ead61a4f945b44094d74b40f9511014e2e"
+    },
+    "games/dream_team/shader_logs/cemu_long_094930.vsf": {
+      "bytes": 400,
+      "sha256": "870c396da7362b06630c3f8ec3828969fd7ea1931a8a69b46dff850dcc1be2b7"
+    },
+    "games/dream_team/shader_logs/console_1108_0025.bin": {
+      "bytes": 45400,
+      "sha256": "dfb65d8fc6e3199ce2defddbccab726eff517c8696e22a94716952471eecb3ce"
+    },
+    "games/dream_team/shader_logs/console_1108_0025.vsf": {
+      "bytes": 240,
+      "sha256": "562172ad1712337755b0ce6ac1f5e1c7c0683a9a321121df38425d5a5890eae3"
+    },
+    "games/dream_team/shader_logs/console_b1.bin": {
+      "bytes": 14660,
+      "sha256": "8285e9514754bdd03edbe8234d418c25571fa0d9032d3eeed1377c685d15692b"
+    },
+    "games/dream_team/shader_logs/console_b1.vsf": {
+      "bytes": 560,
+      "sha256": "d5773c5f24fc42df0a095f357a8ba5f4223a9e316c1af740c36e2c63b09c9b2c"
+    },
+    "games/dream_team/shader_logs/console_b1_fs.bin": {
+      "bytes": 14660,
+      "sha256": "8285e9514754bdd03edbe8234d418c25571fa0d9032d3eeed1377c685d15692b"
+    },
+    "games/dream_team/shader_logs/console_b2.bin": {
+      "bytes": 21096,
+      "sha256": "4452f092ea8d5208d919d2f53024348d0140dc2c27514b3a3a8c0efe3f1c652d"
+    },
+    "games/dream_team/shader_logs/console_b2.vsf": {
+      "bytes": 880,
+      "sha256": "51e79b232962b0c168b28ebced0df2760cee504261e21ee6c68b9a989c188f93"
+    },
+    "games/dream_team/shader_logs/console_b2_fs.bin": {
+      "bytes": 21096,
+      "sha256": "4452f092ea8d5208d919d2f53024348d0140dc2c27514b3a3a8c0efe3f1c652d"
+    },
+    "games/dream_team/shader_logs/fs_log.bin": {
+      "bytes": 6372,
+      "sha256": "2a0736dfb9f7b6741375e560c040095b9cef3789bbd84b599ba50e8b156542b5"
+    },
+    "games/dream_team/shader_logs/models_fs.bin": {
+      "bytes": 382300,
+      "sha256": "f5d614455fe75c1387b199b0489933cfd2fe61e3155785314f5eabbcff248eed"
+    },
+    "games/dream_team/shader_logs/variants.bin": {
+      "bytes": 270248,
+      "sha256": "d987971d36fd529ecfb2487f531806e8d4ba5ed6a35459164b9f97dd3f296788"
+    },
+    "games/dream_team/shader_logs/vs_log.vsf": {
+      "bytes": 1840,
+      "sha256": "c474e24bf325742c91922c53bfced30c0b6950c0c6a0e5d6f4b234b8198513f5"
+    },
+    "games/dream_team/shader_logs/vs_log.vsr": {
+      "bytes": 1452,
+      "sha256": "ae5ecd5192234d0d94f4a6819755d9feb25fef15e42416c1893de6df9c0fab79"
+    },
+    "games/dream_team/shader_logs/walk_3101_fs.bin": {
+      "bytes": 12604,
+      "sha256": "0a7f6f169a4aa8d4fd9f383726d97f45447b29c777c0889062c2dd8e40cbdff6"
+    },
+    "games/dream_team/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 2320,
+      "sha256": "0301fd61236a95ca4d25272d1ca97c6314d878956a571241b43b8943e12b8d25"
+    },
+    "games/dream_team/shader_logs/walk_3101_vs.vsr": {
+      "bytes": 1632,
+      "sha256": "fea1205c9faad8a6603519265aaeb6879c723219f1b8513ffedba3a35c82a93b"
+    },
+    "games/dream_team/shader_logs/walk_3102_fs.bin": {
+      "bytes": 14116,
+      "sha256": "506d499402da7f1fc98bb4fa5f55b3a76fb868ed3311db44c59d5e93ce42cb05"
+    },
+    "games/dream_team/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 2480,
+      "sha256": "e11da59136c122759b4d0ba14595fd44768a83cd7926a68fdebc8b9f89741450"
+    },
+    "games/dream_team/shader_logs/walk_3102_vs.vsr": {
+      "bytes": 1788,
+      "sha256": "db1a6b0f724ff222924878136488c1f8e463fa5baa0f5f40336b7c88438b5644"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_080335.bin": {
+      "bytes": 11928,
+      "sha256": "428df9ff15406546bb1646b59768e2cfeca67fb3756b7b6a8190d632a214454b"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_080335.vsf": {
+      "bytes": 2000,
+      "sha256": "ff5efd7b630efc07300a7987f474e651a8d43d8561d56f90b25c35186f2ac078"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_112941.bin": {
+      "bytes": 560,
+      "sha256": "da2050d92e69a73e6dea766248d46698bc2b513ac568d7b294f5e2e9508e8704"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_115909.bin": {
+      "bytes": 10648,
+      "sha256": "4be068a13b07993cbfeacacb6fa818a99796c147d272cf671a1a1feb3e4da05d"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_115909.vsf": {
+      "bytes": 560,
+      "sha256": "5f24600e2fb75cbe486fdce8cad30f0c0d8b4ca7c9539abd1fcdb4aff27e80b6"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_121601.bin": {
+      "bytes": 4972,
+      "sha256": "4135b6884701d5700bc09e65936bbb99647a35d9260093da46af84cc7409523f"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_121601.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_121726.bin": {
+      "bytes": 4972,
+      "sha256": "4135b6884701d5700bc09e65936bbb99647a35d9260093da46af84cc7409523f"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_121726.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_121906.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_122032.bin": {
+      "bytes": 4972,
+      "sha256": "301eed40cd21f57b7b7d9acbb671038ad7d51e3cf1b4feb36f11ee0e916289bc"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_122819.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_124648.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_124648.vsf": {
+      "bytes": 1920,
+      "sha256": "fc68c1e446f5031745fe142b1307338c5e935d210bc1cfa239edc5cfe9fc6eed"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_124834.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_125056.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_125056.vsf": {
+      "bytes": 1920,
+      "sha256": "a44d9a022571b2909fa5f6fe2ce83955456b919f11ba65a5044519320bc04a8a"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_135625.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_135625.vsf": {
+      "bytes": 1920,
+      "sha256": "a44d9a022571b2909fa5f6fe2ce83955456b919f11ba65a5044519320bc04a8a"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_135811.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_135811.vsf": {
+      "bytes": 1920,
+      "sha256": "fc68c1e446f5031745fe142b1307338c5e935d210bc1cfa239edc5cfe9fc6eed"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140027.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140027.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140212.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140212.vsf": {
+      "bytes": 1840,
+      "sha256": "8fe27c7606c7a3d78ed98b33161b0e44ea2aad7a77eb1ee4549e24c5b6e2087f"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140504.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_140504.vsf": {
+      "bytes": 1920,
+      "sha256": "fc68c1e446f5031745fe142b1307338c5e935d210bc1cfa239edc5cfe9fc6eed"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_141445.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_141445.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_141832.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_141832.vsf": {
+      "bytes": 80,
+      "sha256": "068d620b2a6a7b5a0068dff1e8ea530e684cd2a7086b40a9d9ade4957f4b6051"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_142708.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_143424.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_143424.vsf": {
+      "bytes": 1920,
+      "sha256": "fc68c1e446f5031745fe142b1307338c5e935d210bc1cfa239edc5cfe9fc6eed"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_143610.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144158.bin": {
+      "bytes": 9504,
+      "sha256": "0de864f2a6c1be759f1e35c11992030127670ab7d43cf8c99329474cdc1ed492"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144158.vsf": {
+      "bytes": 1360,
+      "sha256": "0858c9faf4e4312d5a4d7cb7d6b54a12c0e05e0755ac269a18caa865f0d86c03"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144435.bin": {
+      "bytes": 10144,
+      "sha256": "55522051b91369ac42600c37a0f1865405a198de4da422f50b26a9947109214e"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144617.bin": {
+      "bytes": 136,
+      "sha256": "c637a6a5256681bf7db2bd4d3999203d812643ccbf286df6a50d416146ee0e01"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144747.bin": {
+      "bytes": 9664,
+      "sha256": "24ead70dad83c135fa8f5d7244fea9a318b74df5ad5c775e678c0c9335df021e"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_144918.bin": {
+      "bytes": 4772,
+      "sha256": "165937433addf31e516eecd98a28c19938d6dba3a5b59a9a37feb6d93421fd59"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145034.bin": {
+      "bytes": 2452,
+      "sha256": "11d21cb60fbeb6706e6cf0552998402ef4b1ecef40b42e256bed6a04d9e842e1"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145149.bin": {
+      "bytes": 1216,
+      "sha256": "9c624c5dfcf91055e911506c0b3caec3175d5c1450c9f544b7a805cfc06adee1"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145305.bin": {
+      "bytes": 804,
+      "sha256": "c840ac996bf2a961d4c9d96984ff3910a65c10d3e0849baf686c47bcefea9ab3"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145421.bin": {
+      "bytes": 412,
+      "sha256": "b0a1393267c2d14895386ea0f67e3dedcd7ea26efe4a37b64a610538cfef7a9a"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145537.bin": {
+      "bytes": 292,
+      "sha256": "a5d56950496ff53f8a94b2d0781c7522468569baa19fdd65ab03a9a1a48e1914"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145652.bin": {
+      "bytes": 272,
+      "sha256": "222b39aefa07a62419c4d7a9c35c111ed1f2ce2f02adbbd250adf2e7fd6d2fd6"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_145808.bin": {
+      "bytes": 9848,
+      "sha256": "99732acb72cafcf8d815e71dbadabffe089f8c9cebb4334d3fe311fa344f86ff"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_150017.bin": {
+      "bytes": 292,
+      "sha256": "a5d56950496ff53f8a94b2d0781c7522468569baa19fdd65ab03a9a1a48e1914"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_150208.bin": {
+      "bytes": 9988,
+      "sha256": "9f7306def00ea25cc15c86021fc21dfe383dbf7606119048f5a10757d35b9c33"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_150436.bin": {
+      "bytes": 292,
+      "sha256": "a5d56950496ff53f8a94b2d0781c7522468569baa19fdd65ab03a9a1a48e1914"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_155353.bin": {
+      "bytes": 648,
+      "sha256": "af36b1c40c1fc50b91a22e028d5e222083168d8cbd3ebf3e50b25c02108131ee"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_160628.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_161210.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_161210.vsf": {
+      "bytes": 3760,
+      "sha256": "1a8674e1347fde02a3da0e1f9306d4a5ce5e267e3d565bbb93791d94ebc46bf5"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_161919.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_161919.vsf": {
+      "bytes": 4080,
+      "sha256": "26e5e164e1acc4ce0a4dbf25d5e1c2d38b2ec136346d241e9881446056b9ce05"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_162831.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_163244.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_163553.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_163956.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_164329.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_164934.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_165335.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_170054.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_170312.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_170545.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_171548.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_171943.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_172417.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_172629.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_172841.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_173637.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_173903.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1113_183759.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2aa/shader_logs/cemu_1114_025053.bin": {
+      "bytes": 50988,
+      "sha256": "dff14496c29a0ddd8ce7b886c446990e9f748ea26b505d859e8e65a72dd32859"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_080832.bin": {
+      "bytes": 11832,
+      "sha256": "d0ce02797e62dea110e7507c8520554bac36a1cd3ab36257502dc01019b1590f"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_080832.vsf": {
+      "bytes": 2000,
+      "sha256": "ff5efd7b630efc07300a7987f474e651a8d43d8561d56f90b25c35186f2ac078"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_135211.bin": {
+      "bytes": 10940,
+      "sha256": "cabd6b75b9328b3cd0672b6f35241eeed3409638d25c41cadbeddccae42d5199"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_135211.vsf": {
+      "bytes": 400,
+      "sha256": "576e1c7b536b6b62ee07c0fa8849cd705af1959c0a1766d22bbbec7c2423eb19"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_152006.bin": {
+      "bytes": 11724,
+      "sha256": "89b39670273b5d23479fd7dec5d8c2857a8c571912bb9b70107b57a965a9b17f"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_152006.vsf": {
+      "bytes": 320,
+      "sha256": "d49099e54f2eddda0820a2953babecb3550b10a2f32dcee52f66aec2ba402e53"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_160113.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2ba/shader_logs/cemu_1113_185424.bin": {
+      "bytes": 352,
+      "sha256": "23d5301378d1e7bba9fd2cf86f9f78c3f4be12328509871b9b522bd67e248b99"
+    },
+    "games/g_a2ba/shader_logs/ultra_sun_emulator_cache.bin": {
+      "bytes": 50988,
+      "sha256": "dff14496c29a0ddd8ce7b886c446990e9f748ea26b505d859e8e65a72dd32859"
+    },
+    "games/g_adqe/shader_logs/cemu_1111_013550.bin": {
+      "bytes": 460,
+      "sha256": "b6a699a398790cbe4931f1f71e979a9420accde4bbcec7b1f5f61e45f5ec6dd1"
+    },
+    "games/g_adqe/shader_logs/cemu_w0338.bin": {
+      "bytes": 48372,
+      "sha256": "78271df0f21d60412dc49716f60c692dc48e3c2b6539e75412ce9b936febcb3b"
+    },
+    "games/g_adqe/shader_logs/cemu_w0338.vsf": {
+      "bytes": 880,
+      "sha256": "31f6541db2643295f24cdd95649d20c7da13c4f18be8c4d32449db53e3d1b2ad"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_141001.bin": {
+      "bytes": 2996,
+      "sha256": "4a23181e3c5e9539b82110e7c405c2ec1735fb58a1c1e642d5335f976cd519f5"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_141001.vsf": {
+      "bytes": 240,
+      "sha256": "1b7d99707b1989077fb84edb424e66724f81abe7c94043f2e3710a4494fc5204"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_143447.bin": {
+      "bytes": 62168,
+      "sha256": "855e66560e29e5af4f665e8f62f6ee87129b7fdfc476b8b5c0fe74ebcff709a1"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_143447.vsf": {
+      "bytes": 1280,
+      "sha256": "bd3211d5ce26b781ae765bcfd0545eb1e42ca5aecea41f40aa789c4feb4c7d85"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_181617.bin": {
+      "bytes": 1104,
+      "sha256": "4b04cee60770e6cd5b727389692d3d9cdb456295e7bdea7a188aee0bc68d36a2"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_191134.bin": {
+      "bytes": 408,
+      "sha256": "f4074a5dd16fe9c88f65489c944bf3e51e0774da038fdf6451c001b58e51259a"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_194156.bin": {
+      "bytes": 220,
+      "sha256": "714d2fe42cb5d6e06a0c6cd24cfd7a5618a0d9788266005ca88ba98d103f7606"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_194156.vsf": {
+      "bytes": 80,
+      "sha256": "d205ee30f5e240def46e1425bcaca90b0df10c9b24c3f79303b8c9ca342ee09a"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_220142.bin": {
+      "bytes": 20996,
+      "sha256": "80ea546eb4392e01ece54a58fc0bee53b17f3a6e4ecd30fcba18086498cf1f5f"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_220142.vsf": {
+      "bytes": 312,
+      "sha256": "ffe98a1629cfebce1e7d754c098cdfe46af31548e0daa8ec092c239063c258c7"
+    },
+    "games/g_aggp/shader_logs/cemu_1114_232109.bin": {
+      "bytes": 13248,
+      "sha256": "dc4d255e2e3f3a1b8c955042313ce99583cfb076a2b322847f76da1815e900dd"
+    },
+    "games/g_akde/shader_logs/cemu_1108.bin": {
+      "bytes": 25672,
+      "sha256": "9833a17d50a6c34a731bfe275557a50038b53f7fbd37f25e34546228bbf5d797"
+    },
+    "games/g_akde/shader_logs/cemu_1108.vsf": {
+      "bytes": 1600,
+      "sha256": "d010aefd24ea36f8eb07de086f208be7bd7e7d3ece8a19a483b110d95d355119"
+    },
+    "games/g_akde/shader_logs/cemu_1108b.bin": {
+      "bytes": 4316,
+      "sha256": "7f0a0c515e25e7b23855981af28fe2fd96b00d7f30f550557f110568604f9d14"
+    },
+    "games/g_akde/shader_logs/cemu_1108b.vsf": {
+      "bytes": 400,
+      "sha256": "8c99053116d4512ca1cfcc80d93801fba49514dd8aff7561d6454db9a13c742b"
+    },
+    "games/g_akde/shader_logs/cemu_1108c.bin": {
+      "bytes": 2820,
+      "sha256": "71ef6f6f0c2d6aabe2525341d80d0ec22ad0bce59bca6611e715570e1d7dd278"
+    },
+    "games/g_akde/shader_logs/cemu_1108c.vsf": {
+      "bytes": 80,
+      "sha256": "412d8761278a6cb48b591bad89c70c9258129b8b572bede561e8ff14dc70293e"
+    },
+    "games/g_akde/shader_logs/cemu_1111_164117.bin": {
+      "bytes": 37568,
+      "sha256": "4b385a2e2711405dc2f333c848413b54975830fdb8bd701abe8400a965bb08a0"
+    },
+    "games/g_akde/shader_logs/cemu_1111_164117.vsf": {
+      "bytes": 880,
+      "sha256": "e117ae546c6b08e1fc142909cab3198e321d6aa887e3ae6ba84308049adb93e1"
+    },
+    "games/g_akde/shader_logs/cemu_1111_165632.bin": {
+      "bytes": 1268,
+      "sha256": "eeff00d6796f710128e10d674c5df0b6752f9fe10d453cf8140a6b59cb90a36e"
+    },
+    "games/g_akde/shader_logs/cemu_1111_171234.bin": {
+      "bytes": 25320,
+      "sha256": "435b2bc6a23df2f3f388efc9db2abd66a77e98a69a966db0f48174e094e4f2f0"
+    },
+    "games/g_akde/shader_logs/cemu_1111_171234.vsf": {
+      "bytes": 80,
+      "sha256": "7785b9435cc33c6fd353363b63f02531005c349dc01ae75a5b40c3a840a3aac1"
+    },
+    "games/g_akde/shader_logs/cemu_1111_173209.bin": {
+      "bytes": 38764,
+      "sha256": "bb11150ee2c7af5889d29d475672b6752114a6c5eb8f804aab6dc7dc602b5d14"
+    },
+    "games/g_akde/shader_logs/cemu_1111_173209.vsf": {
+      "bytes": 880,
+      "sha256": "4dcdab9756b58c6735ba8a66a2ca2fbbd948e7c05290cfb66d6e85f646b2793b"
+    },
+    "games/g_akde/shader_logs/cemu_w0309.bin": {
+      "bytes": 292,
+      "sha256": "ff396cd782b0d7c2aafb057fa81b16002231b557b1e9584ddae2ff95fa6d919a"
+    },
+    "games/g_akde/shader_logs/cemu_w0632.bin": {
+      "bytes": 11464,
+      "sha256": "7629b560831850efbc432532b0738db7779ad2228c3a65689d8b20db5bd736b5"
+    },
+    "games/g_akde/shader_logs/cemu_w0632.vsf": {
+      "bytes": 240,
+      "sha256": "d812c1390edf3c892c604141c4567e8eecdeb0a54e28d301e8906f3ef606b785"
+    },
+    "games/g_akde/shader_logs/console_1108_1500.bin": {
+      "bytes": 57428,
+      "sha256": "3a1e84cd3983c33b9cec87bf3984cce822861cfd13205df23bbd295686c85d7b"
+    },
+    "games/g_akde/shader_logs/console_1108_1500.vsf": {
+      "bytes": 480,
+      "sha256": "677f962fdf7ce5c2e6beeb2673c7c66f9a29b1522f08a7a7e9629c35438749aa"
+    },
+    "games/g_akde/shader_logs/recipes.vsr": {
+      "bytes": 108,
+      "sha256": "f9aefceb70270394ed75811c0ad6da247e0661c4f0cba9e6673ed8dce306213c"
+    },
+    "games/g_amke/shader_logs/cemu_1110_223502.bin": {
+      "bytes": 3636,
+      "sha256": "50b42bfb34a210e6f82c2f0e81fc838676cfd14f3598bb7e90806dc670532bc8"
+    },
+    "games/g_amke/shader_logs/cemu_1111_004408.bin": {
+      "bytes": 120,
+      "sha256": "7226b15e7525b1f0ce70e4f0aec0d2eb8a3a67d7160e2190e05ad9b8b52d1913"
+    },
+    "games/g_amke/shader_logs/cemu_1114_025758.bin": {
+      "bytes": 61888,
+      "sha256": "8e4d6b56e09ce68e690292c89562fb708b78acc048591a036ee7ca7eda4f0af6"
+    },
+    "games/g_amke/shader_logs/cemu_1114_025912.bin": {
+      "bytes": 61888,
+      "sha256": "8e4d6b56e09ce68e690292c89562fb708b78acc048591a036ee7ca7eda4f0af6"
+    },
+    "games/g_amke/shader_logs/cemu_1114_120417.vsf": {
+      "bytes": 608,
+      "sha256": "09516522947d2b3c46ddd2e64f1167669e3a3043d931b42ce76c5a4effe13026"
+    },
+    "games/g_amke/shader_logs/cemu_1114_120815.vsf": {
+      "bytes": 304,
+      "sha256": "4100c4b1b417e2f13a4b480efa392a15d7aab75bf4ecc1ee845492ee07474fc4"
+    },
+    "games/g_amke/shader_logs/cemu_w0324.bin": {
+      "bytes": 3480,
+      "sha256": "cc79c8039ae86143bb29562706079baf048abaa43bc6506024ae81a62a7da979"
+    },
+    "games/g_amke/shader_logs/cemu_w0324.vsf": {
+      "bytes": 80,
+      "sha256": "134abece89fcd6988455c3d483064283ac4cedee1ba903689028494ba3d8dac5"
+    },
+    "games/g_aree/shader_logs/cemu_1112_181025.vsf": {
+      "bytes": 1520,
+      "sha256": "e3b979ffa466030062db24a5a8921aec9608ea3474c3eb2eea6f784f9c2e6cd8"
+    },
+    "games/g_aree/shader_logs/cemu_1112_184912.vsf": {
+      "bytes": 1520,
+      "sha256": "e3b979ffa466030062db24a5a8921aec9608ea3474c3eb2eea6f784f9c2e6cd8"
+    },
+    "games/g_aree/shader_logs/cemu_1113_033353.bin": {
+      "bytes": 120,
+      "sha256": "cd1db616236e5472b7fc900fc62dc8648e5e3ce20ae3dd7a6d3900055af344e8"
+    },
+    "games/g_aree/shader_logs/cemu_1113_033717.bin": {
+      "bytes": 120,
+      "sha256": "cd1db616236e5472b7fc900fc62dc8648e5e3ce20ae3dd7a6d3900055af344e8"
+    },
+    "games/g_aree/shader_logs/cemu_1113_034038.bin": {
+      "bytes": 1188,
+      "sha256": "c3191142e13632a501e206670634b34c4fdd569e1bfb510dbd35383cec7d71a6"
+    },
+    "games/g_aree/shader_logs/cemu_1113_034333.bin": {
+      "bytes": 412,
+      "sha256": "5e1ae213fc999dfd1b8d1dfbce25f8516887868cc40606b3f7d6e9bdd4c74c1c"
+    },
+    "games/g_aree/shader_logs/cemu_1113_034907.bin": {
+      "bytes": 96,
+      "sha256": "338e17c13980917e6b042e57cb48016a3e36b62c68185e118c4c8ddfc838fbe4"
+    },
+    "games/g_aree/shader_logs/cemu_1113_035203.bin": {
+      "bytes": 708,
+      "sha256": "d49cfa67f9a40bd776c542f65dd90dcc87488baea959f497e9ab0df3c363c97f"
+    },
+    "games/g_aree/shader_logs/cemu_1113_035458.bin": {
+      "bytes": 924,
+      "sha256": "2f0a9017058fb8895b9dea9ba9303f9b019e80f6ecc15fb085d0fd85b3eed83f"
+    },
+    "games/g_aree/shader_logs/cemu_1113_035738.bin": {
+      "bytes": 940,
+      "sha256": "50ce0df9321774a75d7813bc15fcb3f2669a4ce1115029f017c4d64a242e17b5"
+    },
+    "games/g_aree/shader_logs/cemu_1113_040033.bin": {
+      "bytes": 1136,
+      "sha256": "badacf6a12e786d4fbe68c3333fa280a997b86615aa5ab15970fa416ae09231f"
+    },
+    "games/g_aree/shader_logs/cemu_1113_040328.bin": {
+      "bytes": 1200,
+      "sha256": "3d153ab28159bc30ec1e37a7f3b908c081640ad952891c5670d4b464981a575e"
+    },
+    "games/g_aree/shader_logs/cemu_1113_040608.bin": {
+      "bytes": 864,
+      "sha256": "1204fec5ee06f9a8a7a26f485da3e3a09e7f0f9d1f00738c67a5144386700dc4"
+    },
+    "games/g_aree/shader_logs/cemu_1113_040848.bin": {
+      "bytes": 1724,
+      "sha256": "9d7f62fdf3758f6c4eb64b579c8a588615f0b2f4305fada106cc6f506fd658a6"
+    },
+    "games/g_aree/shader_logs/cemu_1113_041127.bin": {
+      "bytes": 1212,
+      "sha256": "78a472164cf49fe0e9e9d59c48913975be17a933e07467cbdacbd4e22fee041d"
+    },
+    "games/g_aree/shader_logs/cemu_1113_041422.bin": {
+      "bytes": 176,
+      "sha256": "e2c912bfc13cdec81a17487a8411b8169d890958ee89fac373899012c71d1e9a"
+    },
+    "games/g_aree/shader_logs/cemu_1113_041718.bin": {
+      "bytes": 664,
+      "sha256": "78a566993a6b1c6e175fec72ad9300f535236543a85b23d2c15e70a81293f4fd"
+    },
+    "games/g_aree/shader_logs/cemu_1113_041959.bin": {
+      "bytes": 408,
+      "sha256": "7544c40ccfdedf0c5efda07e7b9cd87742ada2b00ab69922f7100b19bab6590e"
+    },
+    "games/g_aree/shader_logs/cemu_1113_042548.bin": {
+      "bytes": 408,
+      "sha256": "03ee499fcc2b28e3c349d25a1f99ed679ed3454cf60cac421b9d64d5c380c157"
+    },
+    "games/g_aree/shader_logs/cemu_1113_042843.bin": {
+      "bytes": 1844,
+      "sha256": "a536aa5881061ab9feeea0a41b42547fef3408e3d728c38156953dbb0d5964f7"
+    },
+    "games/g_aree/shader_logs/cemu_1113_043122.bin": {
+      "bytes": 1196,
+      "sha256": "180f3772750d70bbcf95e4da04cca7d558b9837132308b76441d4716a77d0580"
+    },
+    "games/g_aree/shader_logs/cemu_1113_043938.bin": {
+      "bytes": 1824,
+      "sha256": "40ab9a8884ebeccd7c92e0d4282f59c4de0f77b37fc4f2365ff4d5fa14c8e2f6"
+    },
+    "games/g_aree/shader_logs/cemu_1113_044218.bin": {
+      "bytes": 96,
+      "sha256": "338e17c13980917e6b042e57cb48016a3e36b62c68185e118c4c8ddfc838fbe4"
+    },
+    "games/g_aree/shader_logs/cemu_1113_044457.bin": {
+      "bytes": 1604,
+      "sha256": "1252fca1ca5a3c9169c61919a6cadb007a14f97c7dbdbe813119819c1d7647ed"
+    },
+    "games/g_aree/shader_logs/cemu_1113_044738.bin": {
+      "bytes": 176,
+      "sha256": "aa50e1e80c0c874fc5c468edc23d62feb0a3cecbf41d6bdf76dd7d315772cb7f"
+    },
+    "games/g_aree/shader_logs/cemu_1113_045017.bin": {
+      "bytes": 904,
+      "sha256": "de09be09aa9015a2ac4c3654fe5c6d5d50bdbbf24df9a93a57aac8032f789366"
+    },
+    "games/g_aree/shader_logs/cemu_1113_045257.bin": {
+      "bytes": 568,
+      "sha256": "e8422dace8c7b86f38427fd2def18a2324aab2db296a400a53d1c6182152af5e"
+    },
+    "games/g_aree/shader_logs/cemu_1113_045537.bin": {
+      "bytes": 96,
+      "sha256": "338e17c13980917e6b042e57cb48016a3e36b62c68185e118c4c8ddfc838fbe4"
+    },
+    "games/g_aree/shader_logs/cemu_1113_045818.bin": {
+      "bytes": 296,
+      "sha256": "3e36aba9530d90f0c2cfb8672bbd8ba7c3931bc4dc664e582b93895e9faa3c2b"
+    },
+    "games/g_aree/shader_logs/cemu_1113_050058.bin": {
+      "bytes": 708,
+      "sha256": "6f92749e2f0585b91099e8a0424a59cc88f729125366166f9d3ce437fd0af300"
+    },
+    "games/g_aree/shader_logs/cemu_1113_050633.bin": {
+      "bytes": 528,
+      "sha256": "356d4aecb11dc935698fa9aad0c9daa8b4993ea0f9108b23bc6ef139cbe55250"
+    },
+    "games/g_aree/shader_logs/cemu_1113_050913.bin": {
+      "bytes": 568,
+      "sha256": "4dc8b961b9dbc22e243e91e3b8c3bd93105344ac724cc771ee2c80f6a392ff71"
+    },
+    "games/g_aree/shader_logs/cemu_1114_025311.bin": {
+      "bytes": 3460,
+      "sha256": "387b08e2c63b0352c3804da06523b69202e93168db758f02b1f5c678010d89a9"
+    },
+    "games/g_aree/shader_logs/cemu_1114_025426.bin": {
+      "bytes": 3460,
+      "sha256": "387b08e2c63b0352c3804da06523b69202e93168db758f02b1f5c678010d89a9"
+    },
+    "games/g_aree/shader_logs/cemu_i1110.bin": {
+      "bytes": 16492,
+      "sha256": "28cfc5203bf8101c390e0eca1f6b28edea401defdd018dfa818678c9dc5142ca"
+    },
+    "games/g_aree/shader_logs/cemu_i1110.vsf": {
+      "bytes": 1040,
+      "sha256": "1d678b80667d0b7bfa758c2d16aece5e171d6520d8294ee44177ba0b6a0cbade"
+    },
+    "games/g_aree/shader_logs/cemu_i1141.bin": {
+      "bytes": 5484,
+      "sha256": "2907a404d9c22db218c1a4d961616e5479e559a196f462a7d9e9b6099076d221"
+    },
+    "games/g_aree/shader_logs/cemu_i1141.vsf": {
+      "bytes": 80,
+      "sha256": "63f202bff5358e5bc035fd632466d514682e366b9f15026056d0490caa6c9f78"
+    },
+    "games/g_aree/shader_logs/console_1108_1500.bin": {
+      "bytes": 57428,
+      "sha256": "3a1e84cd3983c33b9cec87bf3984cce822861cfd13205df23bbd295686c85d7b"
+    },
+    "games/g_aree/shader_logs/console_1108_1500.vsf": {
+      "bytes": 160,
+      "sha256": "3cbf8b6aa37cefcf318a60486332a827ef2b64b574f1929ec098be210e492148"
+    },
+    "games/g_aree/shader_logs/console_card_1c469eaa5980.bin": {
+      "bytes": 31828,
+      "sha256": "e1d7ece4db6fc26e2f6e0aae6faa049deac563006e833a867872e49257aa39d5"
+    },
+    "games/g_aree/shader_logs/console_card_1c469eaa5980.vsf": {
+      "bytes": 240,
+      "sha256": "8679cb0f73fc98084e229d7f03cceab91853c5291e5eeaf22461396212c474b3"
+    },
+    "games/g_aree/shader_logs/console_card_5f18570b11b2.bin": {
+      "bytes": 10056,
+      "sha256": "cc55f33e8d136c7aac86656f1fc2c14e5fca4b0d8ac731dabad8a164c742d132"
+    },
+    "games/g_aree/shader_logs/console_card_5f18570b11b2.vsf": {
+      "bytes": 240,
+      "sha256": "8679cb0f73fc98084e229d7f03cceab91853c5291e5eeaf22461396212c474b3"
+    },
+    "games/g_aree/shader_logs/console_card_ece3073e6f3d.bin": {
+      "bytes": 11588,
+      "sha256": "2084703eaab5f3ae3a7c06df76507e6191d54659275a3d3a0336f4fa87c905ca"
+    },
+    "games/g_aree/shader_logs/console_card_ece3073e6f3d.vsf": {
+      "bytes": 240,
+      "sha256": "8679cb0f73fc98084e229d7f03cceab91853c5291e5eeaf22461396212c474b3"
+    },
+    "games/g_asre/shader_logs/brain_age_cemu_learned.bin": {
+      "bytes": 5080,
+      "sha256": "f4890967f67ae62ec99efad93c58b77595c0cd90aad7128e8ab37feda32c0c82"
+    },
+    "games/g_asre/shader_logs/wiiu_1back_fs.bin": {
+      "bytes": 6536,
+      "sha256": "1f92e1dbfb442c2c4e386811bc8eb2b13ce51d973d5c35634e4c26ac60da96c6"
+    },
+    "games/g_at3a/shader_logs/preserved_fs.bin": {
+      "bytes": 106408,
+      "sha256": "41c47d3171f366bfcc4f7ec95f37016cb1aa96f96846c3498b66d459f3f82d20"
+    },
+    "games/g_bage/shader_logs/cemu_observed.bin": {
+      "bytes": 7028,
+      "sha256": "b05549c1195b5a01b38846d3f39fdc2562d6e8b113822854009d582cc4bb6854"
+    },
+    "games/g_bage/shader_logs/cemu_observed.vsf": {
+      "bytes": 560,
+      "sha256": "5cd9ec35efee323bb9740bbc0e2325d9965087e89e1efe43651fb1d20197803e"
+    },
+    "games/g_bage/shader_logs/models_fs.bin": {
+      "bytes": 71760,
+      "sha256": "cdb2552aff23e57f50ba835773b63ba545be0221bb0212999110a8f0a2c15ef2"
+    },
+    "games/g_bage/shader_logs/v110_cemu_observed.bin": {
+      "bytes": 7028,
+      "sha256": "b05549c1195b5a01b38846d3f39fdc2562d6e8b113822854009d582cc4bb6854"
+    },
+    "games/g_bage/shader_logs/v110_cemu_observed.vsf": {
+      "bytes": 560,
+      "sha256": "5cd9ec35efee323bb9740bbc0e2325d9965087e89e1efe43651fb1d20197803e"
+    },
+    "games/g_bage/shader_logs/v110_garden-hardware.bin": {
+      "bytes": 16040,
+      "sha256": "dec4feddef7a68d673fdb65542d2a8f75187c66d73dc792de2f6c50ea4da26a4"
+    },
+    "games/g_bage/shader_logs/v110_garden-hardware.vsf": {
+      "bytes": 1360,
+      "sha256": "2d37903132af93f729c1336e4bc3c041adba4be1c6b97db68cfa1d716d7383a2"
+    },
+    "games/g_bage/shader_logs/v110_models_fs.bin": {
+      "bytes": 170792,
+      "sha256": "8b0521bd2ed7c722b438f4bb3c3e9832965ea7ee085081e537e0ca8eb8fe598e"
+    },
+    "games/g_bage/shader_logs/v110_variants.bin": {
+      "bytes": 287528,
+      "sha256": "3812e5607587e022e0ae3f46c4281bf409c4e37b27830544956bdc0333be9f24"
+    },
+    "games/g_bage/shader_logs/variants.bin": {
+      "bytes": 285040,
+      "sha256": "f1086559ac1676d2f93393e187c845a739fa591717e4f8cfbe4e0b755cbe2663"
+    },
+    "games/g_bage_v1040/shader_logs/cemu_observed.bin": {
+      "bytes": 7028,
+      "sha256": "b05549c1195b5a01b38846d3f39fdc2562d6e8b113822854009d582cc4bb6854"
+    },
+    "games/g_bage_v1040/shader_logs/cemu_observed.vsf": {
+      "bytes": 560,
+      "sha256": "5cd9ec35efee323bb9740bbc0e2325d9965087e89e1efe43651fb1d20197803e"
+    },
+    "games/g_bage_v1040/shader_logs/garden-hardware.bin": {
+      "bytes": 16040,
+      "sha256": "dec4feddef7a68d673fdb65542d2a8f75187c66d73dc792de2f6c50ea4da26a4"
+    },
+    "games/g_bage_v1040/shader_logs/garden-hardware.vsf": {
+      "bytes": 1360,
+      "sha256": "2d37903132af93f729c1336e4bc3c041adba4be1c6b97db68cfa1d716d7383a2"
+    },
+    "games/g_bage_v1040/shader_logs/models_fs.bin": {
+      "bytes": 170792,
+      "sha256": "8b0521bd2ed7c722b438f4bb3c3e9832965ea7ee085081e537e0ca8eb8fe598e"
+    },
+    "games/g_bage_v1040/shader_logs/variants.bin": {
+      "bytes": 287528,
+      "sha256": "3812e5607587e022e0ae3f46c4281bf409c4e37b27830544956bdc0333be9f24"
+    },
+    "games/g_bale/shader_logs/cemu_1108.bin": {
+      "bytes": 43172,
+      "sha256": "ecff6914bddc67b917cc68b4b7d9bd259afdc9a4ef8539e46c152993088cdb53"
+    },
+    "games/g_bale/shader_logs/cemu_1111_012417.bin": {
+      "bytes": 160,
+      "sha256": "56f94739d227eaeaaf1fc7e1b20157f6b047c286b78e0cda09ec58215c260531"
+    },
+    "games/g_bale/shader_logs/cemu_w0410.bin": {
+      "bytes": 42704,
+      "sha256": "c9b11ad9c098578f7610caf0e1aca4eeb2e86805179035ce87f5b5683c095f41"
+    },
+    "games/g_bale/shader_logs/cemu_w0503.bin": {
+      "bytes": 4988,
+      "sha256": "e19ecb44ab3562266738e61ff7ba43e9d2f83252f92f766639def6e8ff59731f"
+    },
+    "games/g_bale/shader_logs/cemu_w1046.bin": {
+      "bytes": 30104,
+      "sha256": "88a1d73455d834f256a441e3e486eaccc192d371272d143fd3402bf629f20de1"
+    },
+    "games/g_bale/shader_logs/recipes.vsr": {
+      "bytes": 2760,
+      "sha256": "517fbc4c2d74731fe3bc17e46de553efb3bfbd8820d4c6146b57ac6be475828f"
+    },
+    "games/g_bfge/shader_logs/hardware_fs.bin": {
+      "bytes": 5880,
+      "sha256": "26de7deab8a9c5f998eb44f0d96793207df0a768e84ebf9b10fb890079c9a7a5"
+    },
+    "games/g_bfge/shader_logs/hardware_gsx.vsf": {
+      "bytes": 1824,
+      "sha256": "696c2faa4c0a00358ff50c1e03afdaa22065b730296c23146d0b841211623069"
+    },
+    "games/g_bhde/shader_logs/cemu_w0435.bin": {
+      "bytes": 164,
+      "sha256": "91a274099480bc8da5e69986643d9cad14257ab2ab6f7c55d45815543867f93c"
+    },
+    "games/g_bpje/shader_logs/cemu_1108.bin": {
+      "bytes": 8076,
+      "sha256": "739f794e71661103ceda5e394550fe784aaa75e0d1c19905456e4dacd4012dad"
+    },
+    "games/g_bpje/shader_logs/cemu_1108.vsf": {
+      "bytes": 80,
+      "sha256": "746a61841458e18c16944edd976155c1bd0dbac6dfdd541d8336b32048c022fa"
+    },
+    "games/g_bpje/shader_logs/cemu_w0645.bin": {
+      "bytes": 208,
+      "sha256": "2a1dc536d1ccd74d311d689e1fab1ea932074c391bd932e527eb99abff2604f7"
+    },
+    "games/g_bzle/shader_logs/cemu_1108.bin": {
+      "bytes": 27448,
+      "sha256": "b8c93153f6a6e2f8cbb6eb6a974d4bd5293621c51400b2afab0bdbb64f807516"
+    },
+    "games/g_bzle/shader_logs/cemu_1108.vsf": {
+      "bytes": 320,
+      "sha256": "6ebfb0a0e1a26f2ab6b887742fcbede457f7dc2ef1b481f737182e6d6e296f80"
+    },
+    "games/g_bzle/shader_logs/cemu_1108b.bin": {
+      "bytes": 2104,
+      "sha256": "506581fc9044723a60258b7c1bad0545b6c194aa882529f98dbf8438b49a73bc"
+    },
+    "games/g_bzle/shader_logs/cemu_w0236.bin": {
+      "bytes": 18640,
+      "sha256": "bab03f02119444816971166870774bd4fe60dae4b1ba4eb59a4a7eefaec24607"
+    },
+    "games/g_bzle/shader_logs/cemu_w0448.bin": {
+      "bytes": 2792,
+      "sha256": "e6d1bff656cfe2ddef3ad6d72857e7a3db6ce69fba5b940ef7eb2e0175946f09"
+    },
+    "games/g_bzle/shader_logs/cemu_w0448.vsf": {
+      "bytes": 80,
+      "sha256": "44476765752943b90a8085f9237f9d24ee4b35d5cae7491c73b2bd486aa3ae11"
+    },
+    "games/g_bzle/shader_logs/recipes.vsr": {
+      "bytes": 2544,
+      "sha256": "dd21905399616b029bec750b779efa4a425a6cd42652c728de72662104a20c6c"
+    },
+    "games/g_egde/shader_logs/cemu_1108.bin": {
+      "bytes": 12908,
+      "sha256": "863a53aa32fd0dc01f2038a308e289c18a53dd328ea673ac2ac04e7df8c5afa7"
+    },
+    "games/g_egde/shader_logs/cemu_1108.vsf": {
+      "bytes": 2640,
+      "sha256": "bd824f7ded4d654a672e652a3950945463e351ce9641f56b924e202d3d8a2f41"
+    },
+    "games/g_egde/shader_logs/cemu_1108b.bin": {
+      "bytes": 1096,
+      "sha256": "f10e7bf3a2563d35e26a19d30429ec3ddf91a1b78a18c7fb53fe25eca30f82ab"
+    },
+    "games/g_egde/shader_logs/cemu_1111_005343.bin": {
+      "bytes": 176,
+      "sha256": "18ff615aae837d1f044f685d078faf1a9a60943ecb7365707dccdb7c953c454c"
+    },
+    "games/g_egde/shader_logs/cemu_1111_200050.bin": {
+      "bytes": 3080,
+      "sha256": "ac184f5832fbdbc13a9811530c6dd318d83006836c2355de7981615244c550d7"
+    },
+    "games/g_egde/shader_logs/cemu_1111_200050.vsf": {
+      "bytes": 80,
+      "sha256": "33996c41c28d4b69dd5287b80f2b3a909efb672c9ba4d8986131930dbf7c6415"
+    },
+    "games/g_egde/shader_logs/cemu_1112_025818.vsf": {
+      "bytes": 320,
+      "sha256": "18f49c9494564337faebbd58f272ce3ca8f082f9cbd359aa560b3ef4536a0145"
+    },
+    "games/g_egde/shader_logs/cemu_1112_162217.bin": {
+      "bytes": 232,
+      "sha256": "c1799f2e212ff626cf213e8898370960954151f4bb39705af4f74ed0e022aeec"
+    },
+    "games/g_egde/shader_logs/cemu_1114_021353.bin": {
+      "bytes": 664,
+      "sha256": "62d8bd80029464856c950c2499f331de65d6b14fe53a5f0af38ae18f6c5e7077"
+    },
+    "games/g_egde/shader_logs/cemu_1114_021511.bin": {
+      "bytes": 940,
+      "sha256": "1e65ff4b807a626dd48028f7a690879a1d44434469b34a8d0e3694aa0b0c728f"
+    },
+    "games/g_egde/shader_logs/cemu_1114_025135.bin": {
+      "bytes": 27812,
+      "sha256": "c85272378afc45ba636aac89c76767d9c39c12388320bf402b329bc8b5e04ac7"
+    },
+    "games/g_egde/shader_logs/cemu_1114_025202.bin": {
+      "bytes": 27812,
+      "sha256": "c85272378afc45ba636aac89c76767d9c39c12388320bf402b329bc8b5e04ac7"
+    },
+    "games/g_egde/shader_logs/cemu_1114_034235.bin": {
+      "bytes": 196,
+      "sha256": "e8b6bae18c29f93f85a7d943e85ebd7ee541523cd7ef89dc097f61975e9f4168"
+    },
+    "games/g_egde/shader_logs/cemu_1114_034611.bin": {
+      "bytes": 640,
+      "sha256": "d27bae6e00ad8f2c90bcf3c51f1d5e124bd8418bda99662647f0431dbd509b16"
+    },
+    "games/g_egde/shader_logs/cemu_1114_035946.bin": {
+      "bytes": 280,
+      "sha256": "e1aac50fac6a6f4a66016635ec5309228698e9c82266ccde069cd46ba909a60a"
+    },
+    "games/g_egde/shader_logs/cemu_1114_113257.bin": {
+      "bytes": 156,
+      "sha256": "0a729608a6114db860a4b1230ed8a6b2bb9b3c79a75a3c918fb5f2e2adf5d109"
+    },
+    "games/g_egde/shader_logs/cemu_1114_231015.bin": {
+      "bytes": 156,
+      "sha256": "2167e17bd5d7fc702d767954186494939cddc5d3dcf87731cd8a416957172b95"
+    },
+    "games/g_egde/shader_logs/cemu_w0611.bin": {
+      "bytes": 2456,
+      "sha256": "befda13a778c2298d2b031938d849778cc96f78681b6bc36de17b8fb092a61b0"
+    },
+    "games/g_egde/shader_logs/cemu_w0611.vsf": {
+      "bytes": 80,
+      "sha256": "9fc08333a3788f4eb51e5e7c9e29bfda632f618aee798f4a3b33662c3db2ed11"
+    },
+    "games/g_egde/shader_logs/console_1108_1500.bin": {
+      "bytes": 57428,
+      "sha256": "3a1e84cd3983c33b9cec87bf3984cce822861cfd13205df23bbd295686c85d7b"
+    },
+    "games/g_egde/shader_logs/console_1108_1500.vsf": {
+      "bytes": 1120,
+      "sha256": "81438a7670582e0f8be26fce015546050037884d500faffa0046f1d1a5803abe"
+    },
+    "games/layton_azran/shader_logs/console_lit.bin": {
+      "bytes": 888,
+      "sha256": "4a4c3b2e92bca6ee60194190edad04b9f1403edf371524f443fc7b81c961ca94"
+    },
+    "games/layton_azran/shader_logs/fs_log.bin": {
+      "bytes": 10224,
+      "sha256": "149d48efdbf079987d4d687a23d14251cd14531e0a5b9774eaaf12cfbdb55200"
+    },
+    "games/layton_azran/shader_logs/variants.bin": {
+      "bytes": 65296,
+      "sha256": "af0bfd21a227d31133b12fcb69e7e3c9c2a18f058d96d4aaab3b80288cebfb9a"
+    },
+    "games/layton_azran/shader_logs/vs_log.vsf": {
+      "bytes": 3680,
+      "sha256": "e87846bef69e2cb817cba74fa5c954f046daf0842d75ec7daffd0354446f2326"
+    },
+    "games/layton_mask/shader_logs/console_lit.bin": {
+      "bytes": 888,
+      "sha256": "4a4c3b2e92bca6ee60194190edad04b9f1403edf371524f443fc7b81c961ca94"
+    },
+    "games/layton_mask/shader_logs/console_misses.bin": {
+      "bytes": 96,
+      "sha256": "47095e134bc1e765f8520ce9827b0e9e75627a5fceab823ebc3884290ed81c6a"
+    },
+    "games/layton_mask/shader_logs/fs_log.bin": {
+      "bytes": 20464,
+      "sha256": "0c7a8a83e1ace40654b09d6f282202a9bff82732c5703f94c34ab0f77244dab4"
+    },
+    "games/layton_mask/shader_logs/variants.bin": {
+      "bytes": 65296,
+      "sha256": "98e7259b13c2762d94c1a7b14021a6300dfe19af16afbab9e4cb6ab4bac569a8"
+    },
+    "games/layton_mask/shader_logs/vs_log.vsf": {
+      "bytes": 5520,
+      "sha256": "29b28d378da8537c2a097b871a24574cdc1124afe95817e410e36061e2f5d7a7"
+    },
+    "games/nsmb2/shader_logs/abi_fs_log.bin": {
+      "bytes": 9544,
+      "sha256": "15e327c47d87780c66e69d44a914516700e92980e383cb8e09f5645134e83913"
+    },
+    "games/nsmb2/shader_logs/abi_vs_log.vsf": {
+      "bytes": 1600,
+      "sha256": "e71c974e8691600e7c1159c64702f0b81fd61b6155c736478f88be1cd896e6c8"
+    },
+    "games/nsmb2/shader_logs/cemu_1110_202723.vsf": {
+      "bytes": 1280,
+      "sha256": "f3a5cabd68d0934c1ef5a60e9b237024d17587e389b49dc08e7d17384b50fc3b"
+    },
+    "games/nsmb2/shader_logs/cemu_1110_205558.vsf": {
+      "bytes": 1280,
+      "sha256": "f3a5cabd68d0934c1ef5a60e9b237024d17587e389b49dc08e7d17384b50fc3b"
+    },
+    "games/nsmb2/shader_logs/cemu_1110_211632.vsf": {
+      "bytes": 1280,
+      "sha256": "f3a5cabd68d0934c1ef5a60e9b237024d17587e389b49dc08e7d17384b50fc3b"
+    },
+    "games/nsmb2/shader_logs/cemu_1110_213451.vsf": {
+      "bytes": 1280,
+      "sha256": "f3a5cabd68d0934c1ef5a60e9b237024d17587e389b49dc08e7d17384b50fc3b"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_073252.vsf": {
+      "bytes": 1120,
+      "sha256": "17aeacc119e8126b4ba8500627428180611f13ed2191483bd367dacdd9652332"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_073345.vsf": {
+      "bytes": 640,
+      "sha256": "5695c0e355991cb8dda7e3c2b6fce50c2138f9d9d225b8486e243b7a9b42ce0f"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_074641.vsf": {
+      "bytes": 1120,
+      "sha256": "17aeacc119e8126b4ba8500627428180611f13ed2191483bd367dacdd9652332"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_074734.vsf": {
+      "bytes": 640,
+      "sha256": "5695c0e355991cb8dda7e3c2b6fce50c2138f9d9d225b8486e243b7a9b42ce0f"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_080326.vsf": {
+      "bytes": 1120,
+      "sha256": "17aeacc119e8126b4ba8500627428180611f13ed2191483bd367dacdd9652332"
+    },
+    "games/nsmb2/shader_logs/cemu_1111_080419.vsf": {
+      "bytes": 320,
+      "sha256": "adf519a34e9d3179fb2af985b56ba6e433e03ecc7ad70bc2cd2cfcc3c7825e36"
+    },
+    "games/nsmb2/shader_logs/confirmed.bin": {
+      "bytes": 1175976,
+      "sha256": "5bc2c021b12ae86e3687a6aff659d10a435d6633fee5d2adc1cf3f4fb8eece7a"
+    },
+    "games/nsmb2/shader_logs/console_1107_1023.bin": {
+      "bytes": 540,
+      "sha256": "8f6daf5b202391355add5b5e9b76c83554ac6621125522e9f9880fa9e5c54cce"
+    },
+    "games/nsmb2/shader_logs/console_1107_1741.bin": {
+      "bytes": 19500,
+      "sha256": "f411ddb72ad366800c7e160690455f37c756cdf9ae10f55a2166f22499aa2f98"
+    },
+    "games/nsmb2/shader_logs/console_1107_1741.vsf": {
+      "bytes": 880,
+      "sha256": "35b63c8edd994fe75d9867ebed1b9f7d484252b6f53f7151313fba5b07f4fb5c"
+    },
+    "games/nsmb2/shader_logs/console_1108_0025.bin": {
+      "bytes": 45400,
+      "sha256": "dfb65d8fc6e3199ce2defddbccab726eff517c8696e22a94716952471eecb3ce"
+    },
+    "games/nsmb2/shader_logs/console_card_8e627b766ba7.bin": {
+      "bytes": 2040,
+      "sha256": "ffec212a3767474f25204ff52528edd2972f46e0c43d2004e3ba60c1c1baf824"
+    },
+    "games/nsmb2/shader_logs/console_r5.bin": {
+      "bytes": 23992,
+      "sha256": "47fd5048e1446c40cf3e2f6d70186ed82f40cdd57a7283cc73f1b2b408c27847"
+    },
+    "games/nsmb2/shader_logs/console_r5.vsf": {
+      "bytes": 240,
+      "sha256": "72378c754757361cedd16712b68754172c97c3e9410b3d49f68661386932be38"
+    },
+    "games/nsmb2/shader_logs/console_r5_fs.bin": {
+      "bytes": 23992,
+      "sha256": "47fd5048e1446c40cf3e2f6d70186ed82f40cdd57a7283cc73f1b2b408c27847"
+    },
+    "games/nsmb2/shader_logs/fs_log.bin": {
+      "bytes": 10540,
+      "sha256": "600834d71492fcc7ec95365ef941d6067ad02bd07f01c5f354b94dd248202c39"
+    },
+    "games/nsmb2/shader_logs/models_fs.bin": {
+      "bytes": 640352,
+      "sha256": "7f0e33cacdddda63ba0572cf90457eb7a32bedfe4d8cda422424d4c21eaedff6"
+    },
+    "games/nsmb2/shader_logs/variants.bin": {
+      "bytes": 307040,
+      "sha256": "2d9fd6d9381e8bcef15c2058e8c8bbcee9a820bcba6eddc2d47480623482407c"
+    },
+    "games/nsmb2/shader_logs/vs_log.vsf": {
+      "bytes": 2160,
+      "sha256": "aa62e9fe5af639d375e7eaa247f073f93b00aaf7ca9de3cbc05d3ed994013a44"
+    },
+    "games/nsmb2/shader_logs/walk_3101_fs.bin": {
+      "bytes": 18360,
+      "sha256": "a89a38f544f44001b45f91561b81722e9ff77ee4e822567b2d0b2a3c2963e86f"
+    },
+    "games/nsmb2/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 1600,
+      "sha256": "98a12423ded32d0f4090f4deb81bef1106f131c4027d8326d63beb76464aa3a6"
+    },
+    "games/nsmb2/shader_logs/walk_3102_fs.bin": {
+      "bytes": 20572,
+      "sha256": "327fb49a4423a152721b31d3fb9819b212c7d61adde6eec9ed54403ce4b6606a"
+    },
+    "games/nsmb2/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 1600,
+      "sha256": "98a12423ded32d0f4090f4deb81bef1106f131c4027d8326d63beb76464aa3a6"
+    },
+    "games/paper_jam/shader_logs/abi_fs_log.bin": {
+      "bytes": 53156,
+      "sha256": "7d1996760d818a82fdc620d98a68f2fecb72ade1aff43ff7c547bd0d03cb278c"
+    },
+    "games/paper_jam/shader_logs/abi_vs_log.vsf": {
+      "bytes": 5760,
+      "sha256": "3bddf7b8fee7690c1493902ec7b5c9569526ee51e91ff517fc35e4db8eb62dab"
+    },
+    "games/paper_jam/shader_logs/abi_vs_log.vsr": {
+      "bytes": 1440,
+      "sha256": "0b4cf51b3d3e14dc7a15c19278a3cf063c6f70229d19184ca92bbf60f6f64270"
+    },
+    "games/paper_jam/shader_logs/fs_log.bin": {
+      "bytes": 28568,
+      "sha256": "e1a18d7a9ad604468e40497441158c94c12a45f23f3e1e2beb0c55dc33081def"
+    },
+    "games/paper_jam/shader_logs/models_fs.bin": {
+      "bytes": 398476,
+      "sha256": "b6c6a1613f636c9cab941942071b8c327fce472f347bad4d2bf331c47a999fd6"
+    },
+    "games/paper_jam/shader_logs/variants.bin": {
+      "bytes": 237680,
+      "sha256": "6d2a772e52e75f81f3e1fa58ecbd35f0964f073275c2e457b3067f77da7f20a0"
+    },
+    "games/paper_jam/shader_logs/vs_log.vsf": {
+      "bytes": 2880,
+      "sha256": "f6a941dc176126f21fbb21f04cb5c5b003db56457b24d295187a1766f1bf02d3"
+    },
+    "games/paper_jam/shader_logs/vs_log.vsr": {
+      "bytes": 912,
+      "sha256": "ea6d73195716cc63de443debae8aebca71b97f33c670884ac893b7232c1d2df1"
+    },
+    "games/paper_jam/shader_logs/walk_3101_fs.bin": {
+      "bytes": 27100,
+      "sha256": "99fa2dedec13f6df3729b627cac7653dc535bd52cc2c6813a5fb0daf56385b8a"
+    },
+    "games/paper_jam/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 2880,
+      "sha256": "f6a941dc176126f21fbb21f04cb5c5b003db56457b24d295187a1766f1bf02d3"
+    },
+    "games/paper_jam/shader_logs/walk_3101_vs.vsr": {
+      "bytes": 912,
+      "sha256": "ea6d73195716cc63de443debae8aebca71b97f33c670884ac893b7232c1d2df1"
+    },
+    "games/paper_jam/shader_logs/walk_3102_fs.bin": {
+      "bytes": 26868,
+      "sha256": "1c741da4d60dbd415d44de70234159ed2bbd8dd25b502a1630a9b0cf97bfd2c5"
+    },
+    "games/paper_jam/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 2880,
+      "sha256": "f6a941dc176126f21fbb21f04cb5c5b003db56457b24d295187a1766f1bf02d3"
+    },
+    "games/paper_jam/shader_logs/walk_3102_vs.vsr": {
+      "bytes": 912,
+      "sha256": "ea6d73195716cc63de443debae8aebca71b97f33c670884ac893b7232c1d2df1"
+    },
+    "games/sticker_star/shader_logs/abi_fs_log.bin": {
+      "bytes": 21352,
+      "sha256": "670ba59f5ad77db52f6089be6410b798c774917e7e021ac074727cc9623a97dc"
+    },
+    "games/sticker_star/shader_logs/abi_vs_log.vsf": {
+      "bytes": 4320,
+      "sha256": "8194bb03f18e7c483b588c03c7bbb7ca0f9c913cfea5c19e7445bcf81b52e211"
+    },
+    "games/sticker_star/shader_logs/cemu_014547.vsf": {
+      "bytes": 160,
+      "sha256": "c98d8b6f3546afb289c46f893414110e6bb332c608d5f6a4a045039f2fe85626"
+    },
+    "games/sticker_star/shader_logs/cemu_132546.bin": {
+      "bytes": 5476,
+      "sha256": "37e3a7973820ab343a65bc18002bb1e63ce9b3509548c519dac1d3ea90f7f09d"
+    },
+    "games/sticker_star/shader_logs/cemu_132546.vsf": {
+      "bytes": 800,
+      "sha256": "b3ccb4ac8ee3c539eb560b917cf00aa26c399861c28bf8e02364a163bee770d3"
+    },
+    "games/sticker_star/shader_logs/fs_log.bin": {
+      "bytes": 6900,
+      "sha256": "1e922044550ea0aadb249a46d52f57a22391792352797be34494ddbab511dc3a"
+    },
+    "games/sticker_star/shader_logs/models_fs.bin": {
+      "bytes": 76756,
+      "sha256": "f27682c0fc261ae2b2a6f962aca297a908e4d64211a66ee7c6a95a89f7d39de0"
+    },
+    "games/sticker_star/shader_logs/variants.bin": {
+      "bytes": 259012,
+      "sha256": "fabd8bb31144c7dd03666143095323c9a513143faadd7ac982dcffd0cf30aff4"
+    },
+    "games/sticker_star/shader_logs/vs_log.vsf": {
+      "bytes": 1600,
+      "sha256": "3cd68130b608968d83034ef7459ddfc9ee41b77713cc15639440ac2b9ab5185a"
+    },
+    "games/sticker_star/shader_logs/walk_3101_fs.bin": {
+      "bytes": 10272,
+      "sha256": "aa63238e25db4795c4957977c9e2e52c63eaf622218952c562a1b134d6714ccf"
+    },
+    "games/sticker_star/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 1920,
+      "sha256": "294221d54dc34f4d579212751ab06fb6dbd7c00d84cf6aaef10bfbe7841cefcd"
+    },
+    "games/sticker_star/shader_logs/walk_3102_fs.bin": {
+      "bytes": 10412,
+      "sha256": "5935d2183476b7b327565f61429ac442b51f395a94c4832fd58c045b55947401"
+    },
+    "games/sticker_star/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 2000,
+      "sha256": "6e73b57fa9c0d7ef5e244550aefbba9774e6edd493edfa2de5084fc06685caf4"
+    },
+    "games/superstar_saga/shader_logs/abi_fs_log.bin": {
+      "bytes": 26276,
+      "sha256": "e66fc9b2074d5fbf5bdcc34ee786eeb22df862db5e6ff19a488e977581832fab"
+    },
+    "games/superstar_saga/shader_logs/abi_vs_log.vsf": {
+      "bytes": 4480,
+      "sha256": "5390ad4e967eeb54a331ab8d611720279b0b81287a750692c295f798c7aec894"
+    },
+    "games/superstar_saga/shader_logs/abi_vs_log.vsr": {
+      "bytes": 1428,
+      "sha256": "ef7c7f967c04a40041d89f1cebe88b3af03d3d952ab090fb73fd3e6430812fd8"
+    },
+    "games/superstar_saga/shader_logs/cemu_144611.bin": {
+      "bytes": 3668,
+      "sha256": "dccf566c5c81d02b3bb99fa60a6e9d7db9be520aaf67325c92ef78ab0914451e"
+    },
+    "games/superstar_saga/shader_logs/cemu_144611.vsf": {
+      "bytes": 240,
+      "sha256": "5d79403d85101477025a7520b8b336dcda3de88c2ff8c8bfe19f4ab9253f2789"
+    },
+    "games/superstar_saga/shader_logs/console_run1.bin": {
+      "bytes": 5156,
+      "sha256": "d930da445696e588ddb585b6ddf878a2e25d80070f9ac74d86b4e5bc40205c72"
+    },
+    "games/superstar_saga/shader_logs/console_run1.vsf": {
+      "bytes": 400,
+      "sha256": "fc249a4e63ae3a70921c3587a2f9af79a41af99a376d450e3b700b5c29022a43"
+    },
+    "games/superstar_saga/shader_logs/fs_log.bin": {
+      "bytes": 8876,
+      "sha256": "13c03885fa514039a0f52b4ebf6dd34939719d31971b981db1a9b674cbc4b396"
+    },
+    "games/superstar_saga/shader_logs/models_fs.bin": {
+      "bytes": 360600,
+      "sha256": "889fae7b5db7f492981d3960fdfea5fac6b6552970403c50ffd53034bc902137"
+    },
+    "games/superstar_saga/shader_logs/variants.bin": {
+      "bytes": 243772,
+      "sha256": "39564244e0aaf5bf1397b282e3be3f708c517d5d5afc1f8dee7d36bf7a1fdaaa"
+    },
+    "games/superstar_saga/shader_logs/vs_log.vsf": {
+      "bytes": 1840,
+      "sha256": "750992813133f46e76ca3919461a61f1cf16e6b8e4332912c55d638437dea466"
+    },
+    "games/superstar_saga/shader_logs/vs_log.vsr": {
+      "bytes": 624,
+      "sha256": "013fbf21f98649c79d1333ce79015a487b4a85ead071110d310847d97257dc63"
+    },
+    "games/superstar_saga/shader_logs/walk_3101_fs.bin": {
+      "bytes": 19376,
+      "sha256": "52cbcc71b25cdcb00133e290b3f0a60068a477919062f29481700c7d2e792d90"
+    },
+    "games/superstar_saga/shader_logs/walk_3101_vs.vsf": {
+      "bytes": 2640,
+      "sha256": "b668a5b2ca6bb8ae71ba926143f023f80f2ec3e443532788ac210ee9de2842c4"
+    },
+    "games/superstar_saga/shader_logs/walk_3101_vs.vsr": {
+      "bytes": 960,
+      "sha256": "b52c43916db7fd4094edd1f77169d9d8d12624b7e68aea534cc7ffded08484c3"
+    },
+    "games/superstar_saga/shader_logs/walk_3102_fs.bin": {
+      "bytes": 22784,
+      "sha256": "1c7957d75c36e272f335feca31f813cde33f887b7e5e4d1c062fd73c9a37fdca"
+    },
+    "games/superstar_saga/shader_logs/walk_3102_vs.vsf": {
+      "bytes": 3040,
+      "sha256": "6563f678965dd44a563013618481c148983c0086e51b87b1de6011cdb3d49a50"
+    },
+    "games/superstar_saga/shader_logs/walk_3102_vs.vsr": {
+      "bytes": 960,
+      "sha256": "b52c43916db7fd4094edd1f77169d9d8d12624b7e68aea534cc7ffded08484c3"
+    },
+    "games/tomodachi/shader_logs/cemu1.bin": {
+      "bytes": 540,
+      "sha256": "9896d96c2f71f40726b10133857b04403d9021f70d829b3defe598641b794b9d"
+    },
+    "games/tomodachi/shader_logs/cemu1.vsf": {
+      "bytes": 240,
+      "sha256": "9e0994989f18bd5929af0fa7ff3149692f1bc91f22a3991b777f37b74d1a3aa8"
+    },
+    "games/tomodachi/shader_logs/cemu2.bin": {
+      "bytes": 860,
+      "sha256": "72d4a8e9f5dd9d9bc220f36d2c08655860ebb846738593e3da608b8344b8e82d"
+    },
+    "games/tomodachi/shader_logs/cemu2.vsf": {
+      "bytes": 320,
+      "sha256": "5570eec39dd5a2e97f2c361a88d78cf1e9ce7150080fff67ed0571dfc604e670"
+    },
+    "games/tomodachi/shader_logs/cemu3.bin": {
+      "bytes": 8796,
+      "sha256": "8dc5d3767f96b4096bead308250a7737d965cd3e80ac9f2db12520adb69b1e6f"
+    },
+    "games/tomodachi/shader_logs/cemu3.vsf": {
+      "bytes": 400,
+      "sha256": "a06916a64a4798a9d7a54fdc6a37f2cef17fb6d24f3b6e26a875cd1611a45408"
+    },
+    "games/tomodachi/shader_logs/cemu_1110_204135.vsf": {
+      "bytes": 1120,
+      "sha256": "5902763cfc8def8b39aa4fb93dc3f5116446c64322baf1f010beb1d0bea8f2d7"
+    },
+    "games/tomodachi/shader_logs/console1.bin": {
+      "bytes": 7840,
+      "sha256": "ef41477a4743d082b83c2190963f275cf2db84236416b79d420864d1334914a6"
+    },
+    "games/tomodachi/shader_logs/console1.vsf": {
+      "bytes": 240,
+      "sha256": "f13a80afe43e70e2be917875583adb5a3e5c6a625ae66c40d0fdb89d5da5785f"
+    },
+    "games/tomodachi/shader_logs/console2.bin": {
+      "bytes": 8320,
+      "sha256": "5ebf511e743ca5f4a1b1935e78c0d06ca786f021342ba904228ee9a6b6bacb06"
+    },
+    "games/tomodachi/shader_logs/console2.vsf": {
+      "bytes": 320,
+      "sha256": "53b3f342bc8f4de847164a8a39b4b642bfa8db1c503909681072d49ae2b1ac0b"
+    },
+    "games/tomodachi/shader_logs/console3.bin": {
+      "bytes": 33916,
+      "sha256": "346b153cd510f612f5805d15a5a2fb51cebfc6af2c4c681a6b1fcd65fef09bd0"
+    },
+    "games/tomodachi/shader_logs/console3.vsf": {
+      "bytes": 1040,
+      "sha256": "251daf141bb112f19a85b1ea77ca55e06fe9fc302dac729113118432215f081e"
+    },
+    "games/tomodachi/shader_logs/console_1108_0025.bin": {
+      "bytes": 45400,
+      "sha256": "dfb65d8fc6e3199ce2defddbccab726eff517c8696e22a94716952471eecb3ce"
+    },
+    "games/tomodachi/shader_logs/fs_log.bin": {
+      "bytes": 6376,
+      "sha256": "8baad4c4786a10a4f7ca41207e631a9abda52d06800866003de376995efe3094"
+    },
+    "games/tomodachi/shader_logs/fs_log10.bin": {
+      "bytes": 46388,
+      "sha256": "116bd882d20d4634ba4c189cea7e7b0f450bd859d1bf01af47c08f032feffea4"
+    },
+    "games/tomodachi/shader_logs/fs_log11.bin": {
+      "bytes": 61148,
+      "sha256": "80cce53ec78b0d6b5ea96dc29431d8ba978d5cec4635b95ec9c69b9ffdcd04e3"
+    },
+    "games/tomodachi/shader_logs/fs_log12.bin": {
+      "bytes": 38768,
+      "sha256": "4bfc51b848ba66f41a24960c6cc20746d572b45f8796cae8326cea631a10deb9"
+    },
+    "games/tomodachi/shader_logs/fs_log13.bin": {
+      "bytes": 23048,
+      "sha256": "75cebfc7f81742eab1e2d3192f79a5dc1fda6c65405f165c30ea0c528e74a3ee"
+    },
+    "games/tomodachi/shader_logs/fs_log14.bin": {
+      "bytes": 37628,
+      "sha256": "c10d75a7c7491384de7693df2f4992f6b243bfeb3b50e8fd550cd05531c7cce4"
+    },
+    "games/tomodachi/shader_logs/fs_log15.bin": {
+      "bytes": 39180,
+      "sha256": "7d17ee75af9fa51456fb06ca43b122d016c77ccd6905cbf60249924c38f73e45"
+    },
+    "games/tomodachi/shader_logs/fs_log16.bin": {
+      "bytes": 39348,
+      "sha256": "ee3c9b8b62cb0c8411f3f078db4cd98e18d4621e7ca2aa27fa284cf1d70c9901"
+    },
+    "games/tomodachi/shader_logs/fs_log17.bin": {
+      "bytes": 41924,
+      "sha256": "438c8ff3b0b58bcd2968e78592e07bee2251778a32f5ad918c480373046faf81"
+    },
+    "games/tomodachi/shader_logs/fs_log18.bin": {
+      "bytes": 36320,
+      "sha256": "ac46bb269dd35aeb0990a9737cb2732de497ed3efabd259d387e06059fa81fba"
+    },
+    "games/tomodachi/shader_logs/fs_log19.bin": {
+      "bytes": 39276,
+      "sha256": "4add81f5f7e1910ce3f5b6244fae01e6b7246174344ef634bf6039ad280052cc"
+    },
+    "games/tomodachi/shader_logs/fs_log2.bin": {
+      "bytes": 10696,
+      "sha256": "a1e6eca374ad3c3ecaa6300bc96761eebae113811ac385b435f02993cd66c2fc"
+    },
+    "games/tomodachi/shader_logs/fs_log20.bin": {
+      "bytes": 55700,
+      "sha256": "97d28594dd430d1f90ace3af796b5f89394191319f7e9795be2d7340ee9d6b38"
+    },
+    "games/tomodachi/shader_logs/fs_log21.bin": {
+      "bytes": 41268,
+      "sha256": "a2f11522d5a7497a39a18156165a11b1b4dd9f05f9e4ff831a4ea13e2ee5349f"
+    },
+    "games/tomodachi/shader_logs/fs_log22.bin": {
+      "bytes": 50824,
+      "sha256": "3054c1342645a1ba1cd1951af45ca7d59ea228948ae72468ca51089d0807ab99"
+    },
+    "games/tomodachi/shader_logs/fs_log23.bin": {
+      "bytes": 44040,
+      "sha256": "1068f28e4d5b7e4b698a0c48fd14c702b5b6a16c68b17e34ee59b40dc96c57ba"
+    },
+    "games/tomodachi/shader_logs/fs_log3.bin": {
+      "bytes": 57496,
+      "sha256": "70bd5dd49c29e2e6a73d348a488caadf7999dd75e5273a531c89dd57efdb885b"
+    },
+    "games/tomodachi/shader_logs/fs_log30.bin": {
+      "bytes": 88228,
+      "sha256": "6c962fed56f6e6a439b7b01464bca1442b1d92c2437439830969aacaea0ca260"
+    },
+    "games/tomodachi/shader_logs/fs_log31.bin": {
+      "bytes": 153232,
+      "sha256": "148c579c817218217a08e2ce4e6af9c0e523ecc1549f90bebe5938107fbbf687"
+    },
+    "games/tomodachi/shader_logs/fs_log32.bin": {
+      "bytes": 88228,
+      "sha256": "6c962fed56f6e6a439b7b01464bca1442b1d92c2437439830969aacaea0ca260"
+    },
+    "games/tomodachi/shader_logs/fs_log4.bin": {
+      "bytes": 17184,
+      "sha256": "9114a16e196ca05ddd1a04524a6220b382dbed7203e7ca3220498ef02f13de32"
+    },
+    "games/tomodachi/shader_logs/fs_log40.bin": {
+      "bytes": 166412,
+      "sha256": "dbf1ce9a22da50c5117a5f7ca92833644dd1af28cad65119d06292223088c717"
+    },
+    "games/tomodachi/shader_logs/fs_log41.bin": {
+      "bytes": 110952,
+      "sha256": "f77a4936b86eb524abeffc6272ee8e7886f7382403b377872f24b9b379d2623a"
+    },
+    "games/tomodachi/shader_logs/fs_log42.bin": {
+      "bytes": 25580,
+      "sha256": "a1268c7c48b6af4947b5d8744e2ea96181c3794c6899061b745d35a1fb247ff7"
+    },
+    "games/tomodachi/shader_logs/fs_log5.bin": {
+      "bytes": 3188,
+      "sha256": "8e0f58c926624249035a72fc03a346d4ffef3d0617c67429b71ce59dfb0dff07"
+    },
+    "games/tomodachi/shader_logs/fs_log6.bin": {
+      "bytes": 27348,
+      "sha256": "9de586c1b8849787f18ae6f8c3cd0b1221ac542d44ff7ec1f8a7bbb36ee265a6"
+    },
+    "games/tomodachi/shader_logs/fs_log7.bin": {
+      "bytes": 17184,
+      "sha256": "9114a16e196ca05ddd1a04524a6220b382dbed7203e7ca3220498ef02f13de32"
+    },
+    "games/tomodachi/shader_logs/fs_log701.bin": {
+      "bytes": 42416,
+      "sha256": "0917ebedf133fe12c02dadf993461f3eaacc10260635c5a79e27630b02c9a208"
+    },
+    "games/tomodachi/shader_logs/fs_log702.bin": {
+      "bytes": 35624,
+      "sha256": "553acb1b1ca4cac6d1edb32ff21faa387ca3f34d545aed4e3b8cc5d71b5958c4"
+    },
+    "games/tomodachi/shader_logs/fs_log703.bin": {
+      "bytes": 137108,
+      "sha256": "284c1e23bce1ee38ded5d8e91711906afc774721774cd78d7d5b7f6a92855f6b"
+    },
+    "games/tomodachi/shader_logs/fs_log8.bin": {
+      "bytes": 13736,
+      "sha256": "67ff19a60013e6a60f3904d7d7ac0aa3e7ed1be430b2f9a50dfe49c4846f9cb6"
+    },
+    "games/tomodachi/shader_logs/fs_log801.bin": {
+      "bytes": 1516,
+      "sha256": "9909cac98bccb9d1633951ee8d90aa5f52241caeab0acd1da8916caaf9d26a8c"
+    },
+    "games/tomodachi/shader_logs/fs_log802.bin": {
+      "bytes": 15852,
+      "sha256": "028e6b31cd5221cbba26832a7f356c955f8bdbd54e7e4f022153ff23816e7fbb"
+    },
+    "games/tomodachi/shader_logs/fs_log803.bin": {
+      "bytes": 45400,
+      "sha256": "9c98d53cd11a4c8d5d9ca64284f3bac3e8f942bede28a51bfb9ca5060c4513ef"
+    },
+    "games/tomodachi/shader_logs/fs_log804.bin": {
+      "bytes": 43064,
+      "sha256": "d5ba7f05ba3860d879870d34627f0f1c25190ade64ebdcb565f1f65c4a4d3dee"
+    },
+    "games/tomodachi/shader_logs/fs_log9.bin": {
+      "bytes": 33248,
+      "sha256": "6eb051b7eaaaa10aca984c14bea240c865faa4a78c9df242a2d00f6cefc07323"
+    },
+    "games/tomodachi/shader_logs/fs_log_console_d.bin": {
+      "bytes": 8488,
+      "sha256": "e96665e5129f9e422d52e2cac7bc6c99b3c79317b53d6829aa22b084e6e0ea0e"
+    },
+    "games/tomodachi/shader_logs/models_fs.bin": {
+      "bytes": 849680,
+      "sha256": "a71d9d66f6fce8cab1813c221b316b17f1405c7ce2f0c0b2696b8282bf4742bf"
+    },
+    "games/tomodachi/shader_logs/variants.bin": {
+      "bytes": 262076,
+      "sha256": "e6fc4fbe96501ec2d36f9f902d9daa6cc322481e7874d00bc181bf93c12d4412"
+    },
+    "games/tomodachi/shader_logs/vs_log.vsf": {
+      "bytes": 1120,
+      "sha256": "fbdd3212f81918b7ee0644070c8aa9d0818e59e906fc7830aa7d9f4850f8796f"
+    },
+    "games/tomodachi/shader_logs/vs_log10.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log11.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log12.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log13.vsf": {
+      "bytes": 1440,
+      "sha256": "62b9e7b697cd557c2b0720b5290792603ba514ad027b1244969e638d7ea24f78"
+    },
+    "games/tomodachi/shader_logs/vs_log14.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log15.vsf": {
+      "bytes": 1680,
+      "sha256": "ae87b43af46f3cb0b4d890a5763b23110a0a909e119f3296d9db457326bc5657"
+    },
+    "games/tomodachi/shader_logs/vs_log16.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log17.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log18.vsf": {
+      "bytes": 1680,
+      "sha256": "ae87b43af46f3cb0b4d890a5763b23110a0a909e119f3296d9db457326bc5657"
+    },
+    "games/tomodachi/shader_logs/vs_log19.vsf": {
+      "bytes": 1680,
+      "sha256": "ae87b43af46f3cb0b4d890a5763b23110a0a909e119f3296d9db457326bc5657"
+    },
+    "games/tomodachi/shader_logs/vs_log2.vsf": {
+      "bytes": 1200,
+      "sha256": "7ca0015ec4070e2a371f6e652a40cc134ea157cbbb85211184b4bb010ad7b83d"
+    },
+    "games/tomodachi/shader_logs/vs_log20.vsf": {
+      "bytes": 1760,
+      "sha256": "a554b2dcc53683c6e9032cb5740eb33576ffd050f3d37f31143ee621c6b86cf4"
+    },
+    "games/tomodachi/shader_logs/vs_log21.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log22.vsf": {
+      "bytes": 1520,
+      "sha256": "c7d597e70d38c10f59832a22d601baa4d389162e20a42389c9c3dfb89833afa6"
+    },
+    "games/tomodachi/shader_logs/vs_log23.vsf": {
+      "bytes": 1760,
+      "sha256": "a554b2dcc53683c6e9032cb5740eb33576ffd050f3d37f31143ee621c6b86cf4"
+    },
+    "games/tomodachi/shader_logs/vs_log3.vsf": {
+      "bytes": 6160,
+      "sha256": "5c583d1481c00ee86329e1274577d4bcb7720787e802371a68d55e30c2e3e083"
+    },
+    "games/tomodachi/shader_logs/vs_log30.vsf": {
+      "bytes": 2160,
+      "sha256": "3d32f01dbfdf58c673b7dcb3323bd47d786a4170c86d5c139ab5e1ec8ca06a3d"
+    },
+    "games/tomodachi/shader_logs/vs_log31.vsf": {
+      "bytes": 2800,
+      "sha256": "839e4b57c8642361616fbb45cfc1949e035c19f2e22a9c4e7bc0963508c14310"
+    },
+    "games/tomodachi/shader_logs/vs_log32.vsf": {
+      "bytes": 2160,
+      "sha256": "3d32f01dbfdf58c673b7dcb3323bd47d786a4170c86d5c139ab5e1ec8ca06a3d"
+    },
+    "games/tomodachi/shader_logs/vs_log4.vsf": {
+      "bytes": 1200,
+      "sha256": "fc45b5b724c4cefc3c618d86e556897d68ed9b43f596842515b3a218f20267ee"
+    },
+    "games/tomodachi/shader_logs/vs_log40.vsf": {
+      "bytes": 3280,
+      "sha256": "571cc864ae4d20eb53935bc2c2b5d0c8270ba778a404b0bd8d44e34a13e47ed4"
+    },
+    "games/tomodachi/shader_logs/vs_log41.vsf": {
+      "bytes": 2560,
+      "sha256": "b912ec05636d69ff4fa966a9c3db9b277bcdf3276f0ccbf4ed211910380d7018"
+    },
+    "games/tomodachi/shader_logs/vs_log42.vsf": {
+      "bytes": 1520,
+      "sha256": "11d9bc9d03994265aef3da9687e926d68f9329e3cad94f830d8e3100395fe71a"
+    },
+    "games/tomodachi/shader_logs/vs_log5.vsf": {
+      "bytes": 560,
+      "sha256": "0a785ed1934fe10391d63cf74fcb6884d1fa1d54567b3d83392df4b5b29b68a3"
+    },
+    "games/tomodachi/shader_logs/vs_log6.vsf": {
+      "bytes": 1520,
+      "sha256": "e978c3077a48cfa66305a362b47c83da9fe128effdf5eabf4ef1b27fd59d378b"
+    },
+    "games/tomodachi/shader_logs/vs_log7.vsf": {
+      "bytes": 1200,
+      "sha256": "fc45b5b724c4cefc3c618d86e556897d68ed9b43f596842515b3a218f20267ee"
+    },
+    "games/tomodachi/shader_logs/vs_log701.vsf": {
+      "bytes": 1760,
+      "sha256": "db0f6dc24f81c3b763d8bd48df7a814f866fbb103bb2bb01ad971b1eb421a79c"
+    },
+    "games/tomodachi/shader_logs/vs_log702.vsf": {
+      "bytes": 1600,
+      "sha256": "5a85b6bbd9448f949a46a998ebf41815434f591d69943032c1e34e1ff8bcaa86"
+    },
+    "games/tomodachi/shader_logs/vs_log703.vsf": {
+      "bytes": 3120,
+      "sha256": "d41853274aed0f5b4e4709826d55364eca0933ab66baf50a2626ee9978a2f550"
+    },
+    "games/tomodachi/shader_logs/vs_log8.vsf": {
+      "bytes": 1200,
+      "sha256": "fc45b5b724c4cefc3c618d86e556897d68ed9b43f596842515b3a218f20267ee"
+    },
+    "games/tomodachi/shader_logs/vs_log801.vsf": {
+      "bytes": 400,
+      "sha256": "59840c419e2fcb864e1046da35aa9162f6a525816425144c7129d3756b56af97"
+    },
+    "games/tomodachi/shader_logs/vs_log802.vsf": {
+      "bytes": 1520,
+      "sha256": "1c589b34270cabe4c36dcc5bb68e1eba3e194df5844a64f75ac3ab68cb416acd"
+    },
+    "games/tomodachi/shader_logs/vs_log803.vsf": {
+      "bytes": 2160,
+      "sha256": "23e2b07a18c97333fcf761b2add8b8b353ed8ec8ed7391dd6b6fd4de77535b48"
+    },
+    "games/tomodachi/shader_logs/vs_log804.vsf": {
+      "bytes": 2080,
+      "sha256": "64815b801c1408c877acf358e7a6f8ebdd2a769c313dec5bcae2d19c3e63bf5c"
+    },
+    "games/tomodachi/shader_logs/vs_log9.vsf": {
+      "bytes": 1440,
+      "sha256": "62b9e7b697cd557c2b0720b5290792603ba514ad027b1244969e638d7ea24f78"
+    }
+  }
+}

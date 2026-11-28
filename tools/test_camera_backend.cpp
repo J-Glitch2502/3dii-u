@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
 #include <malloc.h>
 #include <mutex>
 #include <vector>
@@ -12,12 +13,23 @@
 
 static int allocations;
 static void *test_memalign(size_t alignment, size_t size) {
+#ifdef _WIN32
     void *p = _aligned_malloc(size, alignment);
+#else
+    void *p = nullptr;
+    if (posix_memalign(&p, alignment, size)) return nullptr;
+#endif
     if (p) allocations++;
     return p;
 }
 static void test_free(void *p) {
-    if (p) { allocations--; _aligned_free(p); }
+    if (!p) return;
+    allocations--;
+#ifdef _WIN32
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
 }
 #define memalign test_memalign
 #define free test_free

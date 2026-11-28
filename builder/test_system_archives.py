@@ -130,4 +130,21 @@ with tempfile.TemporaryDirectory() as tmp:
             pass
         requested.assert_called_once()
         assert requested.call_args.args[:2] == (user, cached)
+with tempfile.TemporaryDirectory() as tmp:
+    tid='0004009b00010402';archive=Path(tmp)/(tid+'.romfs')
+    assert dumps.install_system_fallbacks(tmp,[]) == []
+    assert not archive.exists()
+    assert dumps.install_system_fallbacks(tmp,[tid]) == [tid]
+    assert dumps.is_romfs(archive)
+    assert dumps.install_system_fallbacks(tmp,[tid]) == []
+    # Preserve an existing user archive, even when its bytes differ from ours.
+    romfs(str(archive),b'user country-list data'*8)
+    original=archive.read_bytes()
+    assert dumps.install_system_fallbacks(tmp,[tid]) == []
+    assert archive.read_bytes()==original
+    archive.unlink()
+    try: dumps.install_system_fallbacks(tmp,[tid],str(Path(tmp)/'incomplete-engine'))
+    except dumps.DumpError: pass
+    else: raise AssertionError('A missing packaged asset must produce a clear error')
+
 print('system archives: ok')

@@ -24,6 +24,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     backend = (args.backend or root / 'port/wiiu/gx2_backend.cpp').read_text()
     (out / 'ps_entry_production.inc').write_text(function(backend, 'struct PsEntry {') + ';\n')
+    (out / 'ps_cache_production.inc').write_text(backend[backend.index('const DrawState *ps_last_ds;'):backend.index('GX2PixelShader *find_ps(')])
     (out / 'find_ps_production.inc').write_text(function(backend, 'GX2PixelShader *find_ps(') + '\n')
     generator = (root / 'port/wiiu/shadergen.cpp').read_text()
     # GLSL string literals contain braces, so retain the whole generator prefix.

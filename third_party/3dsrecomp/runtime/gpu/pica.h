@@ -674,6 +674,15 @@ struct VtxCpuStats {
     u64 geometry_prims;
 };
 extern VtxCpuStats vtx_cpu;
+enum GpuFallbackWhy { GPUF_MISSING_VS, GPUF_FORCED, GPUF_MISSING_GS, GPUF_LIMIT, GPUF_COUNT };
+extern GpuFallbackWhy gpu_fallback_why;
+extern u64 gpu_fallback_key;
+void vtx_report_hotspots();
+extern u64 gpu_fallback_draws[GPUF_COUNT];
+extern std::atomic<bool> g_cpu_vs_simd;
+extern std::atomic<bool> g_pool_idle_spin;
+extern std::atomic<bool> g_cpu_timing;  // opt-in timing counters; no alarm sampler or shader tracing
+inline bool cpu_timing_enabled() { return kMeasure || g_cpu_timing.load(std::memory_order_relaxed); }
 extern bool g_gs_shared;  // a draw's geometry shader runs go to two threads where they can (vertex.cpp: gs_run_shared); a switch for a console
 // texture decoding (texture.cpp), for RECOMP_STATS (the Metal backend logs and resets them)
 extern double g_tex_decode_ms;

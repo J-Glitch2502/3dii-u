@@ -14,10 +14,31 @@ How each part reaches you decides what its licence asks of whoever distributes i
   distributes games; you build them from your own dumps for your own console.
 - **Build tool**: a program the build runs; nothing of it ends up in a game except where noted.
 
+## Public-room browser dependencies
+
+The Wii U room browser links libcurl 8.7.1 (curl licence), Mbed TLS 2.28.8
+(Apache-2.0), zlib (zlib licence), and Brotli's decoder/common libraries (MIT),
+from devkitPro portlibs. The Windows engine includes their PowerPC static libraries
+and headers in `toolchain/network_ppc`, with licence texts alongside them.
+The Mozilla CA certificate bundle distributed by curl is MPL-2.0 and is embedded
+for HTTPS verification. nlohmann/json 3.11.2 (MIT) is vendored in
+`third_party/nlohmann` with its licence. These dependencies are used by public-room
+HTTP/TLS discovery and authentication; they are not required to enable networking
+when the user leaves wireless Off.
+
+## Open-source country-list replacement
+
+`third_party/system_archives` contains the country-list generator/data from
+[B3n30/citra_system_archives](https://github.com/B3n30/citra_system_archives),
+revision `bbe60b5477fc8d7f317d9a82a9f2e6a789af931c`, copyright 2018 Weiyi Wang,
+GPL-2.0-or-later. Its generated country-list RomFS, source, data and licence are
+bundled with the Builder. A valid user-supplied archive takes precedence.
+
 ## Summary
 
 | Component | Version | Authors | Licence | Copyleft | How it's used |
 |---|---|---|---|---|---|
+| [3DS-Link](https://github.com/gionko/3DS-Link), derived from Azahar/Citra | bd09ca (adapted) | gionko and Azahar/Citra contributors | GPL-2.0-or-later; bundled ENet is MIT | yes (GPL) | room transport and Download Play in `third_party/3ds-link`, app source and games; licences in that directory |
 | [3dsrecomp](https://github.com/nathsou/3dsrecomp) | upstream `8737b72` + this project's changes | Nathan Soufflet (nathsou) | EUPL-1.2 | yes (EUPL) | repository (`third_party/3dsrecomp`), app, games |
 | [devkitPPC](https://devkitpro.org/): GCC | 16.2.0 (devkitPPC build) | Free Software Foundation, Inc. and the GCC contributors; packaged by devkitPro | GPL-3.0-or-later; libgcc and libstdc++ under GPL-3.0 with the GCC Runtime Library Exception 3.1 | yes (tool only) | app (build tool); its runtime libraries in the games under the exception |
 | devkitPPC: GNU Binutils | 2.47 | Free Software Foundation, Inc. and contributors | GPL-3.0-or-later | yes (tool only) | app (build tool) |
@@ -68,9 +89,6 @@ None of these projects' code is in 3Dii U:
 
 - **[NUSPacker](https://github.com/Maschell/NUSPacker)** by Maschell (GPL-3.0). The WUP layout `phase0/tools/pack_wup.py`
   writes was learned from it.
-- **[Citra](https://github.com/citra-emu/citra)** and **[Azahar](https://github.com/azahar-emu/azahar)** (GPL-2.0-or-later).
-  Comments in `third_party/3dsrecomp` compare behaviour with theirs. The builder can read *your own* 3DS system files
-  from their user folders.
 - **[3dbrew](https://www.3dbrew.org/)** and **[WiiUBrew](https://wiiubrew.org/)**: hardware and system documentation.
 - **shinyquagsire23's homebrew titles**: the field layout of `app.xml`, `cos.xml` and `meta.xml`.
 - **[Cemu](https://github.com/cemu-project/Cemu)** (MPL-2.0): developers test builds in it. It isn't shipped.
@@ -2551,3 +2569,11 @@ You should also get your employer (if you work as a programmer) or school, if an
 
 The GNU General Public License does not permit incorporating your program into proprietary programs. If your program is a subroutine library, you may consider it more useful to permit linking proprietary applications with the library. If this is what you want to do, use the GNU Lesser General Public License instead of this License. But first, please read <http://www.gnu.org/philosophy/why-not-lgpl.html>.
 ```
+
+## RPXLoadingModule Homebrew update support
+
+The Windows test distribution's `Aroma support` folder includes this fork of
+[wiiu-env/RPXLoadingModule](https://github.com/wiiu-env/RPXLoadingModule), licensed
+under GPL-3.0. Its corresponding project source archive and full licence are
+included beside the module. The module is optional for complete WUHB builds;
+it enables the adjacent `.wuhb.dev` executable/content update layout.

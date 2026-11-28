@@ -13,6 +13,8 @@ import heapq
 import os
 import struct
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +24,9 @@ MOST_RANKED = 4_000_000  # combinations worth walking through to rank; past it t
 
 
 def keys(path):
-    with open(path, 'rb') as f:
-        for key in fragment_keys(f.read()):
-            if key and len(key) % 4 == 0:
-                yield struct.unpack(f'<{len(key) // 4}I', key)
+    from tev_to_log import records
+    for key in records(path, allow_partial=True):
+        yield struct.unpack(f'<{len(key) // 4}I', key)
 
 
 def split(w):

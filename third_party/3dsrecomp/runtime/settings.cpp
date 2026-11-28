@@ -48,6 +48,7 @@ void settings_load() {
     num("speed", s.speed);
     num("volume", s.volume);
     num("show_fps", s.show_fps);
+    num("wiiu_render_mode", s.wiiu_render_mode);
     num("clock_offset", s.clock_offset);
     num("auto_backup", s.auto_backup);
     num("forgive_unsaved", s.forgive_unsaved);
@@ -94,6 +95,7 @@ void settings_save() {
       << "\npip=" << s.pip << "\npip_corner=" << s.pip_corner << "\npip_x=" << s.pip_x << "\npip_y=" << s.pip_y
       << "\npip_size=" << s.pip_size << "\nauto_focus=" << s.auto_focus << "\nhud=" << s.hud
       << "\ntex_filter=" << s.tex_filter << "\nstack_items=" << s.stack_items << "\nlanguage=" << s.language
+      << "\nwiiu_render_mode=" << s.wiiu_render_mode
       << "\ntv_layout=" << s.tv_layout << "\npad_layout=" << s.pad_layout << "\nresolution=" << s.resolution << "\n";
 }
 

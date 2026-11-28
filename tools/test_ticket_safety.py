@@ -89,10 +89,23 @@ class TicketSafety(unittest.TestCase):
             self.assertEqual(nested_ticket.read_bytes(), b'existing emulator NAND ticket')
             # This is an ordinary generated update: its own ticket is expected and round-trip verified.
             (out/'title.tmd').write_bytes(fake_tmd(b'previous update', 0x0005000e3d008630))
-            result = pack('0005000e3d008630', app_type='0800001b')
+            result = pack('0005000e3d008630', meta_id='000500003d008630', app_type='0800001b')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('round trip verified', result.stdout)
             self.assertEqual(int.from_bytes(old.read_bytes()[0x1dc:0x1e4], 'big'), 0x0005000e3d008630)
+            # The same title/version with a different file table must get a new
+            # content ID; otherwise native installation can retain the old FST.
+            previous_fst_id = (out/'title.tmd').read_bytes()[0xb04:0xb08]
+            import json
+            (source/'.3dii-base-links.json').write_text(json.dumps({
+                'base_title_id':'000500003d008630', 'files':{'romfs.bin':17<<20,'shaders.idx':1024}}))
+
+            (source/'content/extra.bin').write_bytes(b'new update payload')
+            result = pack('0005000e3d008630', meta_id='000500003d008630', app_type='0800001b')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            tmd = (out/'title.tmd').read_bytes()
+            self.assertNotEqual(tmd[0xb04:0xb08], previous_fst_id)
+            self.assertNotEqual(int.from_bytes(tmd[0xb04:0xb08],'big'), int.from_bytes(tmd[0xb08:0xb0a],'big'))
             saved = {f.name: f.read_bytes() for f in out.iterdir()}
             result = pack('000500003d008631')
             self.assertNotEqual(result.returncode, 0)

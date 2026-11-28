@@ -66,6 +66,8 @@ void rt_svc(CPU *c, u32 imm);
 // Set by the host when a thread with a higher priority than the running one became ready (an interrupt woke it):
 // generated code checks it on backward branches and calls rt_preempt, the way the 3DS kernel preempts a busy loop.
 extern volatile u32 rt_preempt_flag;
+extern volatile u32 rt_checkpoint_requested; // experimental pause barrier; zero in ordinary builds
+extern u32 rt_bulk_copy_enabled;  // accessed with atomic builtins; a live performance trial switch
 void rt_preempt(CPU *c);
 void rt_undefined(CPU *c, u32 addr, u32 word);
 

@@ -17,12 +17,18 @@ namespace kernel {
 
 namespace {
 struct Parameter {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(sender, dest, signal, object, buffer); }
+#endif
     u32 sender = 0, dest = 0x300, signal = 0;
     ObjPtr object;
     std::vector<u8> buffer;
 };
 
 struct AptState {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(lock, notif, param_ev, params, notifications, initialized, cpu_limit, screencap, font, lib_applet); }
+#endif
     std::shared_ptr<Mutex> lock = std::make_shared<Mutex>();
     std::shared_ptr<Event> notif = make_event(ONESHOT, "APT notification");
     std::shared_ptr<Event> param_ev = make_event(ONESHOT, "APT parameter");
@@ -113,6 +119,9 @@ static std::u16string utf16(const std::string &s) {
 
 namespace {
 struct SwkbdPending {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(id, cfg, mem); }
+#endif
     u32 id = 0;
     std::vector<u8> cfg;
     ObjPtr mem;
@@ -342,6 +351,7 @@ void apt_notify(u32 signal) {
 }
 
 struct AptService : Service {
+    SERVICE_CHECKPOINT(AptService)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -593,5 +603,18 @@ void register_apt() {
     register_service(std::make_shared<AptService>("APT:A"));
     register_service(std::make_shared<AptService>("APT:S"));
 }
+
+
+#ifdef RECOMP_RESUMABLE
+bool checkpoint_apt(checkpoint::Image &im) {
+    if (swkbd_active) return false;
+    im.take(apt); im.take(swkbd_wait); im.take(swkbd_serial);
+    if (!im.archive) {
+        capture_object(im, apt.lock); capture_object(im, apt.font);
+        for (auto &p : apt.params) capture_object(im, p.object);
+    }
+    return true;
+}
+#endif
 
 }  // namespace kernel

@@ -2,6 +2,7 @@
 // rasterizer with the full per-fragment pipeline (textures, lighting, TEV, fog, alpha / stencil /
 // depth tests, blending, logic ops) operating on PICA tiled framebuffers in guest memory.
 #include <algorithm>
+#include <deque>
 #include <unordered_map>
 
 #include "gpu/pica.h"
@@ -564,12 +565,21 @@ void build_draw_state(DrawState &ds) {
 // Building a state is a large part of a draw on this CPU, and the same ones keep coming back, the game's materials frame after frame. A state comes from the registers, whose hash is
 // kept up to date as they're written, and from tables that change without them, so what comes from those is looked up again each time.
 static std::unordered_map<u64, std::unique_ptr<DrawState>> ds_cache;
+static std::deque<u64> ds_cache_order;
 u32 ds_built;
 u32 ds_churn[0x200];  // per register: how many state builds found it changed since the build before (the frame-rate report prints the worst)
 static u32 ds_last_regs[0x200];
 
 void draw_state_cache_trim() {
-    if (ds_cache.size() >= 4096) ds_cache.clear();  // called between command lists, when nothing is using one
+    // Between command lists no queued draws still reference these states.
+    // Spread eviction across lists to avoid a full-cache rebuild in one frame.
+    constexpr size_t limit = 4096;
+    constexpr size_t max_evictions = 64;
+    const size_t excess = ds_cache.size() > limit ? ds_cache.size() - limit : 0;
+    for (size_t count = std::min(excess, max_evictions); count; --count) {
+        ds_cache.erase(ds_cache_order.front());
+        ds_cache_order.pop_front();
+    }
 }
 
 // the texture units' registers, which ds_hash leaves out
@@ -653,7 +663,9 @@ DrawState *draw_state() {
     g.ds_version = g.regs_version;
 #ifdef __WIIU__
     g.ds->tex_sig = tex_regs_sig();
-    ds_cache[g.ds_hash] = std::move(ds);
+    auto [entry, inserted] = ds_cache.try_emplace(g.ds_hash);
+    if (inserted) ds_cache_order.push_back(g.ds_hash);
+    entry->second = std::move(ds);
     if constexpr (kMeasure) ds_built++;
 #else
     batch.states.push_back(std::move(ds));

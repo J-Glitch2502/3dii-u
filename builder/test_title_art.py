@@ -154,7 +154,7 @@ with tempfile.TemporaryDirectory() as tmp:
         os.makedirs(d, exist_ok=True)
     every, own = struct.pack('>II', 2, 0) + b'EVRY' * 4, struct.pack('>II', 2, 0) + b'OWN!' * 4  # a boot sound's head, then samples
     for f, body in (('game/exheader.bin', b''), ('game/code.bin', b''), ('game/romfs.bin', b''), ('game/exefs/icon.bin', smdh('Some Game', 'Maker')),
-                    ('g.rpx', b'rpx'), ('shaders/shaders.gsh', b''), ('shaders/shaders.idx', b''), ('boot_sound.btsnd', every),
+                    ('g.rpx', b'rpx'), ('shaders/shaders.gsh', b''), ('shaders/shaders.idx', b''), ('shaders/fallback-shaders.bin', b'fallback fixture'), ('boot_sound.btsnd', every),
                     ('own.btsnd', own), ('bad.btsnd', b'not a sound')):
         with open(os.path.join(tmp, f), 'wb') as fh:
             fh.write(body)
@@ -213,4 +213,14 @@ with tempfile.TemporaryDirectory() as tmp:
     assert near(middle['bootDrcTex.tga'], (255, 0, 0)) and sound == every, ("a picture or sound that can't be used wasn't left out", middle, sound)
     sound = made('picture', boot_sound=os.path.join(tmp, 'start.wav'))[1]
     assert sound[:4] == struct.pack('>I', 2) and len(sound) > 8 + 4 * 24000 // 2, 'a WAV given as the sound was not made into one'
+    assert open(os.path.join(tmp, 'title', 'content', 'fallback-shaders.bin'), 'rb').read() == b'fallback fixture'
+    os.remove(os.path.join(shaders, 'fallback-shaders.bin'))
+    before = open(os.path.join(tmp, 'title', 'content', 'romfs.bin'), 'rb').read()
+    try:
+        made('picture')
+    except ValueError as error:
+        assert 'Optimized fallback shader pack is missing' in str(error)
+    else:
+        raise AssertionError('A full title silently omitted optimized fallback shaders')
+    assert open(os.path.join(tmp, 'title', 'content', 'romfs.bin'), 'rb').read() == before
 print('title art: ok')

@@ -25,13 +25,14 @@ namespace fsys = std::filesystem;
 
 #ifdef __WIIU__
 namespace wiiu {
+bool av_timing_enabled();
 void note(const char *fmt, ...);  // frontend_wiiu.cpp
 void fs_begin(u32 op);
 void fs_end();
 void romfs_begin();  // the game data's reads: a lock of their own (frontend_wiiu.cpp)
 void romfs_end();
 void direct_read_open(const char *path, int fd, u64 size);  // direct_read.cpp
-bool direct_read(void *dst, u32 len, u64 off);
+bool direct_read(void *dst, u32 len, u64 off, bool *cached = nullptr);
 long save_write(int fd, const void *data, u32 len, u64 at);  // save_storage.cpp
 void save_resize(int fd, u64 size);
 void save_dirty();
@@ -83,6 +84,31 @@ static const u32 ERR_FILE_EXISTS = fs_err(180, 1);
 static const u32 ERR_DIR_EXISTS = fs_err(185, 1);
 static const u32 ERR_ARCHIVE = fs_err(101, 4);
 static const u32 ERR_UNSUPPORTED = fs_err(760, 6, 28);
+static const u32 ERR_FS_IO = fs_err(0, 11, 27);  // FS/Internal/Permanent: host cause has no verified CTR description
+static const u32 ERR_FS_PERMISSION = fs_err(630, 8, 27);  // CommandNotAllowed
+
+static u32 delete_error(const std::error_code &ec) {
+    if (!ec || ec == std::errc::no_such_file_or_directory) return ERR_FILE_NOT_FOUND;
+    if (ec == std::errc::not_a_directory) return ERR_PATH_NOT_FOUND;
+    if (ec == std::errc::permission_denied || ec == std::errc::operation_not_permitted ||
+        ec == std::errc::read_only_file_system) return ERR_FS_PERMISSION;
+    if (ec == std::errc::directory_not_empty) return fs_err(240, 9);
+    if (ec == std::errc::is_a_directory) return fs_err(250, 9);
+    if (ec == std::errc::no_space_on_device) return fs_err(210, 3);
+    return ERR_FS_IO;
+}
+
+static u32 delete_host_file(const std::string &path, std::error_code &ec) {
+    // Aroma versions can turn remove(ENOENT) into MEDIA_ERROR/EIO. Check
+    // absence explicitly, so normal startup cleanup retains the missing-file
+    // result without hiding an actual I/O or permission failure.
+    const auto status = fsys::symlink_status(path, ec);
+    if (ec || status.type() == fsys::file_type::not_found) return delete_error(ec);
+    if (fsys::is_directory(status)) return fs_err(250, 9);  // DeleteFile must not remove directories
+    const bool removed = fsys::remove(path, ec);
+    return removed && !ec ? 0 : delete_error(ec);
+}
+
 static const u32 ERR_IO = fs_err(1007, 11);  // NoData, Internal: cached changes could not reach storage
 
 }  // namespace kernel
@@ -102,7 +128,13 @@ void save_lock() { g_save_mx.lock(); }
 void save_unlock() { g_save_mx.unlock(); }
 namespace kernel {
 // A change to the game's own save (savedata/, extdata/): cloud saves upload it a little later
+#ifdef RECOMP_RESUMABLE
+static u64 checkpoint_write_epoch;
+#endif
 static void save_changed(const std::string &path) {
+#ifdef RECOMP_RESUMABLE
+    ++checkpoint_write_epoch;
+#endif
     SAVE_DIRTY();
     static const std::string root = save_root() + "/";
     if (path.compare(0, root.size(), root)) return;
@@ -175,6 +207,9 @@ static std::string sanitize(const std::string &s) {
 
 // ---- archives
 struct Archive {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(id, host, romfs, dlc); }
+#endif
     u32 id;
     std::string host;  // host folder for directory-backed archives, or the RomFS image of a system archive
     bool romfs = false;
@@ -253,16 +288,23 @@ static std::vector<RomfsPatch> romfs_patches;
 struct RomfsExtra { u64 off, size; int fd; };
 static std::vector<RomfsExtra> romfs_extra;
 
+static ssize_t romfs_read_at(void *dst, size_t len, u64 off) {
+#ifdef __WIIU__
+    if (len <= UINT32_MAX && wiiu::direct_read(dst, (u32)len, off)) return (ssize_t)len;
+#endif
+    return pread(romfs_fd, dst, len, (off_t)off);
+}
+
 static void build_romfs_index() {
     std::vector<u8> hdr(0x28);
-    if (pread(romfs_fd, hdr.data(), 0x28, 0) != 0x28) return;
+    if (romfs_read_at(hdr.data(), 0x28, 0) != 0x28) return;
     auto u32at = [](const std::vector<u8> &b, size_t o) { u32 v; memcpy(&v, &b[o], 4); return le32(v); };
     u32 dmeta_off = u32at(hdr, 0x0C), dmeta_len = u32at(hdr, 0x10);
     u32 fmeta_off = u32at(hdr, 0x1C), fmeta_len = u32at(hdr, 0x20);
     u32 data_off = u32at(hdr, 0x24);
     std::vector<u8> dm(dmeta_len), fm(fmeta_len);
-    if (pread(romfs_fd, dm.data(), dmeta_len, dmeta_off) != (ssize_t)dmeta_len) return;
-    if (pread(romfs_fd, fm.data(), fmeta_len, fmeta_off) != (ssize_t)fmeta_len) return;
+    if (romfs_read_at(dm.data(), dmeta_len, dmeta_off) != (ssize_t)dmeta_len) return;
+    if (romfs_read_at(fm.data(), fmeta_len, fmeta_off) != (ssize_t)fmeta_len) return;
     auto name = [](const std::vector<u8> &b, size_t o, u32 len) {
         std::string s;
         for (u32 i = 0; i + 1 < len; i += 2) s += (char)b[o + i];
@@ -381,7 +423,7 @@ std::vector<u8> romfs_file(const std::string &path) {
     for (const auto &f : romfs_index)
         if (f.path == path) {
             std::vector<u8> d(f.size);
-            if (pread(romfs_fd, d.data(), f.size, (off_t)f.off) != (ssize_t)f.size) return {};
+            if (romfs_read_at(d.data(), f.size, f.off) != (ssize_t)f.size) return {};
             return d;
         }
     return {};
@@ -407,11 +449,42 @@ static void log_romfs_read(u64 off) {
 // its own "ready" flag after a synchronous load, leaving the village's bottom screen blank and untouchable).
 // What the read itself took here (spent_ns) counts towards it: a console's storage is no faster than a game card.
 // RECOMP_FS_DELAY=0 turns it off.
-static void romfs_read_delay(IPC &ipc, u32 len, u64 spent_ns) {
+static u64 romfs_read_delay(IPC &ipc, u32 len, u64 spent_ns, bool cached = false) {
     static const bool on = !getenv("RECOMP_FS_DELAY") || atoi(getenv("RECOMP_FS_DELAY")) != 0;
-    const u64 on_a_3ds = std::max<u64>((u64)len * 94 + 582778, 663124);
-    if (on && spent_ns < on_a_3ds) sleep_current(on_a_3ds - spent_ns, *ipc.lk);
+    // An opt-in host read-ahead hit already has its bytes in RAM. Preserve the
+    // asynchronous minimum, without charging another cartridge transfer for
+    // data whose physical read was charged to the earlier miss.
+    const u64 on_a_3ds = cached ? 663124 : std::max<u64>((u64)len * 94 + 582778, 663124);
+    const u64 wait = on && spent_ns < on_a_3ds ? on_a_3ds - spent_ns : 0;
+    if (wait) sleep_current(wait, *ipc.lk);
+    return wait;
 }
+
+#ifdef __WIIU__
+// All updates run with the kernel lock held, after run_blocked has rejoined
+// the guest. IO includes waiting for the RomFS read lock; resume is the time
+// outside that native operation. Neither is labelled as pure SD-device time.
+static void report_read_timing(u32 bytes, u64 io_ns, u64 spent_ns, u64 wait_ns) {
+    if (!wiiu::av_timing_enabled()) return;
+    static u64 start, total_bytes, count, max_io, max_resume, max_wait, total_io, fast_reads;
+    const u64 now = real_ns();
+    if (!start) start = now;
+    count++;
+    total_bytes += bytes;
+    total_io += io_ns;
+    fast_reads += io_ns < 1000000;
+    max_io = std::max(max_io, io_ns);
+    max_resume = std::max(max_resume, spent_ns > io_ns ? spent_ns - io_ns : 0);
+    max_wait = std::max(max_wait, wait_ns);
+    if (now - start < 2000000000ULL) return;
+    LOG("[fs-time] %llu reads, %llu KB in %llu ms; max native IO %llu us, resume %llu us, emulated wait %llu us; mean IO %llu us, fast reads %llu\n",
+        (unsigned long long)count, (unsigned long long)(total_bytes >> 10), (unsigned long long)((now - start) / 1000000),
+        (unsigned long long)(max_io / 1000), (unsigned long long)(max_resume / 1000), (unsigned long long)(max_wait / 1000),
+        (unsigned long long)(total_io / count / 1000), (unsigned long long)fast_reads);
+    start = now;
+    total_bytes = count = max_io = max_resume = max_wait = total_io = fast_reads = 0;
+}
+#endif
 
 static std::string archive_dir(u32 id, const LowPath &p) {
     std::string root = save_root();
@@ -438,7 +511,9 @@ static std::string archive_dir(u32 id, const LowPath &p) {
 // ---- file and directory sessions
 struct FileSession : Service {
     int fd = -1;
+    int open_flags = O_RDONLY;
     bool romfs = false, written = false;
+    bool extdata = false;
     bool gamedata = false;  // read-only game data in a file of its own (an update's RomFS, DLC, system archives, ExeFS files): the RomFS's lock, never behind a save write-out
     u64 base = 0, size = 0;
     std::string path;
@@ -447,6 +522,85 @@ struct FileSession : Service {
     bool direct_save = false;  // this session reserved an uncached save path
 #endif
     FileSession() : Service("fs file") {}
+#ifdef RECOMP_RESUMABLE
+    bool persistent_supported() const override { return true; }
+    bool capture(checkpoint::Image &im) override {
+        if (im.archive) return persist(im);
+        im.take(open_flags); im.take(fd); im.take(romfs); im.take(written); im.take(extdata); im.take(gamedata);
+        im.take(base); im.take(size); im.take(path);
+#ifdef __WIIU__
+        im.take(held);
+#endif
+        return true;
+    }
+    bool persist(checkpoint::Image &im) {
+        auto &a = *im.archive;
+        bool saved_romfs = romfs, saved_written = written, saved_extdata = extdata, saved_gamedata = gamedata;
+        u64 saved_base = base, saved_size = size, length = 0, fingerprint = 0;
+        int flags = open_flags;
+        std::string saved_path = path;
+        a.fields(saved_romfs, saved_written, saved_extdata, saved_gamedata, saved_base, saved_size, flags, saved_path);
+        if (!a.ok) return false;
+        if (!a.reading && !saved_romfs) {
+            if (saved_path.empty()) { a.fail("open file has no reopenable path"); return false; }
+            if (!file_fingerprint(length, fingerprint)) { a.fail("could not fingerprint open file"); return false; }
+        }
+        a.fields(length, fingerprint);
+        if (a.reading && a.ok) {
+            // This instance was freshly constructed by PersistentGraph; no live
+            // service is mutated until the staged image is committed.
+            romfs = saved_romfs; extdata = saved_extdata; gamedata = saved_gamedata;
+            base = saved_base; size = saved_size; path = saved_path; open_flags = flags & O_RDWR;
+            if (!romfs) {
+                const auto normalized = fsys::path(path).lexically_normal().generic_string();
+                auto inside = [&](const std::string &root) { return !root.empty() && normalized.rfind(root + "/", 0) == 0; };
+                if (path.find('\0') != std::string::npos || normalized != path || (!inside(g_game.dir) && !inside(g_save_base))) {
+                    a.fail("saved file path is outside title storage"); return false;
+                }
+                fd = open(path.c_str(), open_flags); // never create/truncate a permanent save
+                if (fd < 0) { a.fail("saved file cannot be reopened"); return false; }
+#ifdef __WIIU__
+                if (!path.compare(0,g_save_base.size(),g_save_base)) {
+                    held = wiiu::save_file_open(path,fd);
+                    if (held) { close(fd); fd=-1; }
+                }
+#endif
+                u64 actual_length=0, actual_fingerprint=0;
+                if (!file_fingerprint(actual_length,actual_fingerprint) || actual_length!=length || actual_fingerprint!=fingerprint) {
+                    a.fail("permanent file changed since this state was saved"); return false;
+                }
+            }
+        }
+        // Retain the normal session callbacks too, so subsequent loads of this
+        // newly reconstructed state can use the in-memory path.
+        auto *stream = im.archive; im.archive = nullptr;
+        const bool result = capture(im); im.archive = stream;
+        if (a.reading) im.restore.push_back([this, saved_written] { written = saved_written; });
+        return result && a.ok;
+    }
+    bool file_fingerprint(u64 &length, u64 &fingerprint) {
+        length = file_size();
+        // Immutable game files can be large; their executable/build identity
+        // is checked globally, with a per-file size check here.
+        if (gamedata) { fingerprint = 0; return true; }
+        if (length > (16u << 20)) return false;
+        fingerprint = 14695981039346656037ull;
+        u8 buffer[4096];
+        for (u64 at=0; at<length;) {
+            const u32 count = std::min<u64>(sizeof buffer,length-at);
+            long got;
+#ifdef __WIIU__
+            if (held) got = wiiu::save_file_read(*held,buffer,count,at);
+            else
+#endif
+            got = pread(fd,buffer,count,at);
+            if (got != (long)count) return false;
+            for (u32 i=0;i<count;++i) fingerprint = (fingerprint ^ buffer[i]) * 1099511628211ull;
+            at += count;
+        }
+        return true;
+    }
+#endif
     ~FileSession() override {
 #ifdef __WIIU__
         if (held) {
@@ -483,13 +637,16 @@ struct FileSession : Service {
             s64 n;
             // Storage can take a long time to answer: the game's other threads run meanwhile, as they do on a 3DS (run_blocked)
             const auto began = std::chrono::steady_clock::now();
+            u64 io_ns = 0;
+            bool cached = false;
             run_blocked(*ipc.lk, [&] {
+            const auto io_began = std::chrono::steady_clock::now();
             if (romfs) {
                 FsIo io(0x0802);
                 log_romfs_read(base + off);
                 if (off >= size) n = 0;
 #ifdef __WIIU__
-                else if (wiiu::direct_read(gptr(dst), (u32)std::min<u64>(len, size - off), base + off)) n = (s64)std::min<u64>(len, size - off);
+                else if (wiiu::direct_read(gptr(dst), (u32)std::min<u64>(len, size - off), base + off, &cached)) n = (s64)std::min<u64>(len, size - off);
 #endif
                 else n = pread(romfs_fd, gptr(dst), (size_t)std::min<u64>(len, size - off), (off_t)(base + off));
                 for (auto &x : romfs_extra)
@@ -510,6 +667,7 @@ struct FileSession : Service {
                     n = pread(fd, gptr(dst), len, (off_t)off);
                 }
             }
+            io_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - io_began).count();
             });
             const u64 spent_ns = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - began).count();
             if (n < 0) n = 0;
@@ -519,7 +677,18 @@ struct FileSession : Service {
             ipc.set(2, (u32)n);
             ipc.set(3, (len << 4) | 0xC);
             ipc.set(4, dst);
-            if (romfs) romfs_read_delay(ipc, len, spent_ns);
+            if (romfs) {
+                const u64 wait_ns = romfs_read_delay(ipc, len, spent_ns, cached);
+#ifdef __WIIU__
+                report_read_timing(len, io_ns, spent_ns, wait_ns);
+#endif
+            }
+            if (extdata) {
+                // Azahar's extdata timing keeps these reads asynchronous to
+                // the game. Mario Maker advances its startup after the read.
+                const u64 delay = std::max<u64>((u64)len * 183 + 524879, 631826);
+                if (spent_ns < delay) sleep_current(delay - spent_ns, *ipc.lk);
+            }
             break;
         }
         case 0x0803: {  // Write(offset u64, size, flush, mapped buffer)
@@ -606,6 +775,7 @@ struct FileSession : Service {
 };
 
 struct DirSession : Service {
+    SERVICE_CHECKPOINT(DirSession, entries, pos)
     std::vector<fsys::directory_entry> entries;
     size_t pos = 0;
     DirSession() : Service("fs dir") {}
@@ -845,6 +1015,7 @@ int mii_maker_place(u32 n) {
 
 // ---- fs:USER
 struct FsUser : Service {
+    SERVICE_CHECKPOINT(FsUser)
     using Service::Service;
 
     u32 open_archive(u32 id, const LowPath &p, u64 *out) {
@@ -899,6 +1070,7 @@ struct FsUser : Service {
     u32 open_file(Archive *a, const LowPath &p, u32 flags, ObjPtr *out) {
         if (a->id == 10 && (flags & 1)) return fs_err(700, 7, 28);
         auto fs = std::make_shared<FileSession>();
+        fs->extdata = a->id == 6 || a->id == 7;
         if (a->id == 0x2345678A) {
             std::string host = a->host;
             if (a->dlc) {  // the file path: open type, content index, section (0 RomFS), ExeFS name
@@ -906,6 +1078,7 @@ struct FsUser : Service {
                 snprintf(nm, sizeof nm, "%08x.romfs", p.data.size() >= 8 ? p.word(1) : 0);
                 host += nm;
             }
+            fs->path = host;
             fs->fd = open(host.c_str(), O_RDONLY);
             if (fs->fd < 0) return ERR_NOT_FOUND;
             fs->gamedata = true;
@@ -924,14 +1097,16 @@ struct FsUser : Service {
                 if (!name.empty() && name[0] == '.') name = name.substr(1);
                 fs->romfs = false;
                 fs->gamedata = true;
-                fs->fd = open((g_game.dir + EXEFS_PREFIX + name + ".bin").c_str(), O_RDONLY);
+                fs->path = g_game.dir + EXEFS_PREFIX + name + ".bin";
+                fs->fd = open(fs->path.c_str(), O_RDONLY);
                 VLOG("[fs] SelfNCCH ExeFS %s -> %s\n", nm, fs->fd >= 0 ? "ok" : "missing");
                 if (fs->fd < 0) return ERR_NOT_FOUND;
             } else if (p.data.size() >= 4 && p.word(0) == 5) {
                 // an update's own RomFS (builder/dumps.py), which the game lays over its base RomFS itself
                 fs->romfs = false;
                 fs->gamedata = true;
-                fs->fd = open((g_game.dir + "/update_romfs.bin").c_str(), O_RDONLY);
+                fs->path = g_game.dir + "/update_romfs.bin";
+                fs->fd = open(fs->path.c_str(), O_RDONLY);
                 VLOG("[fs] SelfNCCH update RomFS -> %s\n", fs->fd >= 0 ? "ok" : "missing");
                 if (fs->fd < 0) return ERR_NOT_FOUND;
             } else if (p.data.size() >= 4 && p.word(0) != 0) {
@@ -944,6 +1119,7 @@ struct FsUser : Service {
             int oflags = (flags & 2) ? O_RDWR : O_RDONLY;
             if (flags & 4) oflags |= O_CREAT;
             if (fsys::is_directory(path)) return fs_err(250, 7, 28);
+            fs->open_flags = oflags & O_RDWR;
             fs->fd = open(path.c_str(), oflags, 0644);
             if (fs->fd < 0) {
                 VLOG("[fs] open %s failed\n", path.c_str());
@@ -1032,23 +1208,17 @@ struct FsUser : Service {
             Archive *a = arch(ipc[2], ipc[3]);
             if (!a) { ipc.result(ERR_ARCHIVE); break; }
             std::string path = a->host + sanitize(read_path(ipc[4], ipc[5], ipc[7]).str());
-            if (!SAVE_SETTLE(path, true)) { ipc.result(ERR_IO); break; }
-            // Some Wii U filesystems report I/O errors when removing an absent file.
+            if (!SAVE_SETTLE(path, false)) { ipc.result(ERR_IO); break; }
             std::error_code ec;
-            const auto status = fsys::symlink_status(path, ec);
-            if (status.type() == fsys::file_type::not_found || ec == std::errc::no_such_file_or_directory) {
-                ipc.result(ERR_FILE_NOT_FOUND);
-                break;
+            const u32 result = delete_host_file(path, ec);
+            if (ec && ec != std::errc::no_such_file_or_directory)
+                LOG("[fs] DeleteFile failed archive=%u path=%s error=%d (%s) result=%08x\n",
+                    a->id, path.c_str(), ec.value(), ec.message().c_str(), result);
+            ipc.result(result);
+            if (!result) {
+                save_changed(path);
+                if (!SAVE_SETTLE(path, true)) ipc.result(ERR_IO);
             }
-            if (fsys::is_directory(status)) { ipc.result(fs_err(250, 9)); break; }
-            const bool removed = !ec && fsys::remove(path, ec);
-            if (ec && ec != std::errc::no_such_file_or_directory) {
-                LOG("[fs] DeleteFile failed archive=%u path=%s error=%d\n", a->id, path.c_str(), ec.value());
-                ipc.result(ec == std::errc::not_a_directory ? ERR_PATH_NOT_FOUND : ERR_IO);
-                break;
-            }
-            ipc.result(removed ? 0 : ERR_FILE_NOT_FOUND);
-            if (removed) save_changed(path);
             break;
         }
         case 0x0805: {  // RenameFile(transaction, src archive, src type, src size, dst archive, dst type, dst size, ...)
@@ -1256,4 +1426,27 @@ struct FsUser : Service {
 
 void register_fs() { register_service(std::make_shared<FsUser>("fs:USER")); }
 
+
+#ifdef RECOMP_RESUMABLE
+void checkpoint_fs(checkpoint::Image &im) {
+    im.take(archives); im.take(next_archive);
+    const auto epoch = checkpoint_write_epoch;
+    im.validate.push_back([epoch] {
+        if (checkpoint_write_epoch == epoch) return true;
+        LOG("[state] validation failed: permanent-save epoch %llu -> %llu\n", (unsigned long long)epoch, (unsigned long long)checkpoint_write_epoch);
+        return false;
+    });
+}
+#endif
+
 }  // namespace kernel
+
+#ifdef RECOMP_RESUMABLE
+namespace kernel {
+std::shared_ptr<Service> persistent_file_service(const std::string &name) {
+    if (name == "fs file") return std::make_shared<FileSession>();
+    if (name == "fs dir") return std::make_shared<DirSession>();
+    return nullptr;
+}
+}
+#endif

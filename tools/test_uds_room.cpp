@@ -158,6 +158,20 @@ int main() {
         reply(0xe, 2, 0);
         assert(r32(cb + 8) == (id == 0x0004000100030801ull));
     }
+    // With no room configuration, initialization must not pretend to start
+    // a Download Play server that can never leave state zero.
+    call(dlp, 0x0f, {1, 2, 3});
+    reply(0x0f, 1, 0xc940ac04);
+    call(dlp, 3);
+    reply(3, 1, 0xc940ac04);
+    call(dlp, 2); reply(2, 1, 0);
+    kernel::DlpFkcl fkcl("dlp:FKCL");
+    for (u32 cmd : {1u, 0x11u, 5u, 7u, 8u, 0xbu, 0xcu}) {
+        call(fkcl, cmd, {0xdeadbeef}); reply(cmd, 1, 0xc940ac04);
+    }
+    for (u32 cmd : {2u, 6u, 0x10u}) {
+        call(fkcl, cmd); reply(cmd, 1, 0);
+    }
     kernel::Uds uds("nwm::UDS");
     call(uds, 6); // EjectSpectators must never become ConnectNetwork.
     offline(uds); // red on the old production scaffold

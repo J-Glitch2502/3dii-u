@@ -72,7 +72,10 @@ void Source::parse_config(SourceConfig &cfg, const s16 coeffs[16]) {
 
     if (d & SRC_RESET) reset();
     if (d & SRC_PARTIAL_RESET) st.queue.clear();
-    if (d & SRC_ENABLE_DIRTY) st.enabled = cfg.enable != 0;
+    if (d & SRC_ENABLE_DIRTY) {
+        st.enabled = cfg.enable != 0;
+        if (!st.enabled) st.has_emitted = false;
+    }
     if (d & SRC_SYNC_COUNT_DIRTY) st.sync_count = cfg.sync_count;
     if (d & SRC_RATE_DIRTY) {
         st.rate = cfg.rate_multiplier;
@@ -241,16 +244,29 @@ size_t Source::fetch(Sample *out, size_t max) {
 
 void Source::generate() {
     frame.fill({});
+    timing.frames++;
 
     if (!st.have_buffer) {
-        if (dequeue()) return;
-        // Nothing left to play: the source turns itself off.
-        if (g_verbose >= 3) rt_log("[dsp] src %p empty after id=%u: off\n", (void *)this, st.current_buffer_id);
-        st.enabled = false;
-        st.buffer_update = true;
-        st.last_buffer_id = st.current_buffer_id;
-        st.current_buffer_id = 0;
-        return;
+        const bool boundary = st.cur_length && st.pos >= st.cur_length;
+        if (dequeue()) {
+            // Keep first-start latency, but a stream that already played must
+            // consume its newly available buffer now. Returning here used to
+            // add 160 silent samples after an otherwise recoverable shortage.
+            if (!st.has_emitted || !st.have_buffer) {
+                timing.blank_starts++;
+                timing.boundary_blanks += boundary;
+                return;
+            }
+        } else {
+            timing.empty++;
+            if (g_verbose >= 3) rt_log("[dsp] src %p empty after id=%u: off\n", (void *)this, st.current_buffer_id);
+            st.enabled = false;
+            st.has_emitted = false;
+            st.buffer_update = true;
+            st.last_buffer_id = st.current_buffer_id;
+            st.current_buffer_id = 0;
+            return;
+        }
     }
 
 #ifdef __WIIU__  // no thread-local storage in an RPX; one audio thread
@@ -278,7 +294,17 @@ void Source::generate() {
         if (st.pos >= st.cur_length) st.have_buffer = false;
     }
 
+    timing.short_frames += outi < frame.size();
+    if (outi) st.has_emitted = true;
     st.filters.process(frame);
+}
+
+void Source::report_timing(unsigned index) {
+    if (timing.frames)
+        rt_log("[dsp-source] src %u frames %u blank starts %u (boundary %u) empty %u short %u; rate %.6f fmt %u channels %u length %u pos %u queued %u id %u\n",
+            index, timing.frames, timing.blank_starts, timing.boundary_blanks, timing.empty, timing.short_frames,
+            st.rate, (unsigned)st.cur_format, st.cur_channels, st.cur_length, st.pos, (unsigned)st.queue.size(), st.current_buffer_id);
+    timing = {};
 }
 
 SourceStatus Source::tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish) {

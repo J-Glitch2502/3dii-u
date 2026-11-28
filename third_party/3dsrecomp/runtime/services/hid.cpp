@@ -17,6 +17,9 @@ namespace kernel {
 
 namespace {
 struct HidState {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(shm, ev_pad0, ev_pad1, ev_accel, ev_gyro, ev_debug, last_buttons, accel_on, gyro_on, tick); }
+#endif
     std::shared_ptr<SharedMem> shm;
     std::shared_ptr<Event> ev_pad0 = make_event(ONESHOT, "HID pad0");
     std::shared_ptr<Event> ev_pad1 = make_event(ONESHOT, "HID pad1");
@@ -234,11 +237,13 @@ void live_input(u32 &buttons, s16 &cx, s16 &cy, bool &touch, u16 &tx, u16 &ty) {
 static s16 motion_accel[3] = {0, -512, 0}, motion_gyro[3];
 
 void hid_motion(const s16 *accel, const s16 *gyro) {
+    checkpoint::Scope state_lock(checkpoint::gate());
     memcpy(motion_accel, accel, sizeof motion_accel);
     memcpy(motion_gyro, gyro, sizeof motion_gyro);
 }
 
 void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
+    checkpoint::Scope state_lock(checkpoint::gate());
     live_input(buttons, cx, cy, touch, tx, ty);
     hid_extra_pad_live(live.active ? live.cur.buttons : 0);
     Lock lk(kmutex);
@@ -313,6 +318,7 @@ void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty) {
 }
 
 struct Hid : Service {
+    SERVICE_CHECKPOINT(Hid)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -371,5 +377,10 @@ void register_hid() {
     register_service(std::make_shared<Hid>("hid:USER"));
     register_service(std::make_shared<Hid>("hid:SPVR"));
 }
+
+
+#ifdef RECOMP_RESUMABLE
+void checkpoint_hid(checkpoint::Image &im) { im.take(hid); if (!im.archive) capture_object(im, hid.shm); }
+#endif
 
 }  // namespace kernel

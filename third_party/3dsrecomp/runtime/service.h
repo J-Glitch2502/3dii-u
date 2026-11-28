@@ -54,6 +54,11 @@ struct Service : std::enable_shared_from_this<Service> {
     explicit Service(std::string n) : name(std::move(n)) {}
     virtual ~Service() = default;
     virtual void handle(IPC &ipc) = 0;
+#ifdef RECOMP_RESUMABLE
+    virtual bool capture(checkpoint::Image &) { return false; }
+    virtual bool persistent_supported() const { return false; }
+    virtual void persistent_timeout(u64, u32) { FATAL("unsupported restored service timeout\n"); }
+#endif
     void unimplemented(IPC &ipc, bool succeed = true);
 };
 
@@ -65,5 +70,20 @@ void init_services();
 
 // Session handle to a host service object (for services that hand out sub-sessions, e.g. fs files)
 Handle new_session(std::shared_ptr<Service> s);
+#ifdef RECOMP_RESUMABLE
+std::shared_ptr<Service> persistent_service(const std::string &name);
+std::shared_ptr<Service> persistent_file_service(const std::string &name);
+#endif
 
 }  // namespace kernel
+
+// Only use on services with value-owned fields and no resource-owning destructor.
+#ifdef RECOMP_RESUMABLE
+#define SERVICE_CHECKPOINT(T, ...) bool persistent_supported() const override { return true; } \
+    bool capture(checkpoint::Image &im) override { \
+    if (im.archive) { im.fields(__VA_ARGS__); return im.ok; } \
+    auto saved = std::make_shared<T>(*this); \
+    im.restore.push_back([this, saved] { *this = *saved; }); return true; }
+#else
+#define SERVICE_CHECKPOINT(T, ...)
+#endif

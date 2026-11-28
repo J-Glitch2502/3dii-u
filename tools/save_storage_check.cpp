@@ -107,6 +107,10 @@ void rt_log(const char *, ...) {}
 void wiiu::note(const char *, ...) {}
 void wiiu::fs_begin(u32) {}
 void wiiu::fs_end() {}
+std::string g_save_base;
+void wiiu::fsa_direct_check_writes() {}
+void wiiu::fsa_report_save_quota(const char *) {}
+bool wiiu::fsa_direct_flush_quota(const char *, int &) { return false; }
 
 static std::vector<u8> want;
 
@@ -177,6 +181,19 @@ int main() {
         assert(wiiu::save_write(1, data.data(), (u32)data.size(), 0) == 0x40000);
         assert(wiiu::save_write(1, data.data(), (u32)data.size(), 0x40000) == -1);
         assert(disk.size() == 0x40000);
+
+        // A short write flushes the journal without starting a second
+        // writeback pass over the other dirty files.
+        fresh();
+        auto pending = std::make_shared<wiiu::SaveFile>();
+        pending->path = "/nonexistent/3dii-u-save-storage-check";
+        pending->dirty = true;
+        cache.emplace(pending->path, pending);
+        journal = 0;
+        write_at(0, 16, 12);
+        assert(flushes == 1);
+        assert(pending->dirty);
+        cache.clear();
     }
     puts("save_storage_check: all good");
     return 0;

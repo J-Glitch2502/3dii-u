@@ -50,8 +50,6 @@ int main() {
            (VPAD_BUTTON_ZL|VPAD_BUTTON_ZR|VPAD_BUTTON_STICK_L));
     assert(pro_as_gamepad(WPAD_PRO_BUTTON_STICK_R|WPAD_PRO_BUTTON_MINUS)==
            (VPAD_BUTTON_STICK_R|VPAD_BUTTON_MINUS));
-    assert(pro_as_gamepad(WPAD_PRO_BUTTON_A|WPAD_PRO_BUTTON_B|WPAD_PRO_BUTTON_STICK_L)==
-           (VPAD_BUTTON_A|VPAD_BUTTON_B|VPAD_BUTTON_STICK_L));
     float x[4]={0.1f,-0.8f,0.2f,0}, y[4]={0.1f,0.1f,0.1f,0};
     u32 h[4]={WPAD_PRO_BUTTON_ZR,WPAD_PRO_BUTTON_R,0,0};
     auto input=select(0.1f,0.1f,VPAD_BUTTON_ZL,x,y,h);

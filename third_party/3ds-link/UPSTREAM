@@ -1,0 +1,33 @@
+https://github.com/gionko/3DS-Link
+Revision bd09ca77511347272deb3d4e3840e5bd2b444d71
+GPL-2.0-or-later; UDS and Download Play logic derives from Azahar/Citra.
+Bundled ENet core: MIT, licence in enet/LICENSE.
+
+Imported subset:
+- UDS engine, frame codec, crypto and room packet codec.
+- Room client, platform/logging support and dependency headers.
+- Download Play hub, lobby network, real network/wire and the C dlph_wire codec.
+- ENet core and its platform headers.
+
+Wii U adaptations:
+- Explicit guest little-endian ConnectionStatus serialization and numeric IPC
+  conversion for UTF-16 names, node records and nine-byte reboot passphrases.
+- Integer conversion of host/PPC ticks to the ARM11 protocol clock.
+- enet/wiiu.c, derived from upstream unix.c, uses sendto/recvfrom in place of
+  unavailable scatter/gather calls. Both receive-buffer address and requested
+  capacity are 64-byte aligned. Nonblocking receives use MSG_DONTWAIT.
+- The runtime bridge stamps outgoing frames with the room-assigned MAC and
+  maps service events to guest handles. DLP adapters currently select Mario Kart
+  title IDs; transport configuration is shared across all rebuilt games.
+
+Checks and limitations:
+- Upstream uds_eight_test under host ASan/UBSan passed 15,798 checks, including
+  two acknowledged upstream gaps. dlp_ipc_test against the adapted headers passed
+  827,897 checks in the local investigation.
+- Local UDP adapter checks cover nonblocking reads, scatter/gather, truncation,
+  oversized writes and native receive alignment.
+- Real Wii U room connection, Tri Force Heroes Cemu/Azahar lobby join, and Mario
+  Kart Cemu/locally patched Azahar lobby/race startup have been observed. These
+  do not establish all-game compatibility or complete hardware gameplay.
+- Current configuration and verification limits are documented in
+  tools/wiiu_diagnostics/TRIFORCE_MULTIPLAYER_STATUS.md.

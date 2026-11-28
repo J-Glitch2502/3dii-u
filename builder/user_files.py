@@ -3,6 +3,7 @@ seeddb.bin). 3Dii U carries none of them and none of Nintendo's keys. Each check
 before a build relies on it, without reading out, printing or storing what's in it. bundled() is the other half: what
 make_app.py runs to make sure no such file ever ends up in the app it packs."""
 import os
+import hashlib
 import struct
 
 OTP_SIZE = 1024
@@ -13,6 +14,9 @@ NAMES = ('otp.bin', 'seeprom.bin', 'boot9.bin', 'boot11.bin', 'seeddb.bin', 'aes
 # Recognizable raw game/system dumps; other .bin files include required shader records.
 DUMP_NAMES = ('code.bin', '.code', 'romfs.bin', 'exefs.bin', 'exheader.bin')
 DUMP_EXTENSIONS = ('.3ds', '.cia', '.cci', '.cxi', '.romfs')
+
+# Only this exact redistributable generated archive is allowed in a release.
+PUBLIC_ARCHIVES = {'engine/third_party/system_archives/0004009b00010402.romfs': '4a4f770d617d93bffa1d6437d1caae0626b31b9f01c15d43aa3ed9bbb566b20b'}
 
 
 def _size(path):
@@ -65,6 +69,14 @@ def bundled(root):
     """Files named like private keys, console data or raw game dumps: an app or release must not contain these."""
     found = []
     for d, _, files in os.walk(root):
-        found += [os.path.join(d, f) for f in files
-                  if f.lower() in NAMES + DUMP_NAMES or f.lower().endswith(DUMP_EXTENSIONS)]
+        for name in files:
+            path = os.path.join(d, name)
+            if name.lower() not in NAMES + DUMP_NAMES and not name.lower().endswith(DUMP_EXTENSIONS):
+                continue
+            relative = os.path.relpath(path, root).replace('\\', '/').lower()
+            approved = PUBLIC_ARCHIVES.get(relative)
+            if approved:
+                with open(path, 'rb') as source:
+                    if hashlib.sha256(source.read()).hexdigest() == approved: continue
+            found.append(path)
     return found

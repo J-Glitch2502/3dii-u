@@ -1,0 +1,82 @@
+3Dii U Builder - Homebrew builds and small updates
+
+BUILD A COMPLETE GAME FIRST
+1. Choose Output: Homebrew (.wuhb), then Build: Full game.
+2. Choose your game and any update/DLC/mods. Homebrew does not need Wii U otp.bin.
+3. Build to your SD card, or copy the resulting .wuhb into sd:/wiiu/apps/.
+4. Launch its icon from the Wii U Menu with Aroma.
+
+THE SMALL EXPORT CHOICES
+Binary only produces root.rpx. Shaders only produces content/shaders.gsh and
+content/shaders.idx. Binary + shaders produces all three. These exports contain
+no ROM assets and cannot launch by themselves. Keep the complete original WUHB.
+
+Choose Binary + shaders after updating the Builder. Separate binary or shader
+exports are for compatible builds of the same game/version and shader revision.
+update.json identifies the game, its asset hashes and shader revision. A game
+update, DLC or asset-changing mod may require a complete Homebrew build instead.
+
+INSTALL THE AROMA LOADER ONCE FOR SMALL UPDATES
+The Windows ZIP's "Aroma support" folder contains our RPXLoadingModule.wms,
+its source and licence. This is an Aroma module, not a .wps plugin.
+Close any game. Copy RPXLoadingModule.wms into the modules folder of the Aroma
+environment you actually use, normally:
+  sd:/wiiu/environments/aroma/modules/RPXLoadingModule.wms
+Replace that one module, retaining the rest of your Aroma setup. Restart Aroma
+or reboot the Wii U once. Full WUHB builds do not require this custom update
+loader; the adjacent .wuhb.dev update layout below does.
+
+IMPORT BINARY + SHADERS
+Close the game before changing its files. Example for an existing game called
+Example.wuhb (use its EXACT existing filename; do not rename it):
+
+  sd:/wiiu/apps/Example.wuhb
+  sd:/wiiu/apps/Example.wuhb.dev/
+    builds/update-001/
+      root.rpx
+      content/shaders.gsh
+      content/shaders.idx
+      content/3dii-homebrew.json    (optional compatibility metadata)
+    active.txt
+
+1. Create Example.wuhb.dev/builds/update-001 beside the original WUHB.
+2. Copy the export's root.rpx and content folder into update-001.
+3. Once copying finishes, create active.txt inside Example.wuhb.dev. Its entire
+   contents are the release-folder name, for example: update-001
+4. Safely eject the SD card and launch the SAME original game icon again.
+The new executable and shaders override the corresponding bundled files. The
+original WUHB supplies the remaining assets. Its name/location and save stay.
+
+IMPORT BINARY ONLY OR SHADERS ONLY
+First set up a working Binary + shaders release as above. For each later update,
+COPY that entire active release into a new folder (update-002, for example).
+Then replace only root.rpx for Binary only, or BOTH shader files for Shaders only.
+Keep the other component from the compatible working release. Update active.txt
+LAST to select the new folder. There is no automatic inheritance from an older
+release: omitting its content can fall back to older shaders inside the WUHB.
+Never mix a new shader revision with an older executable: export Both instead.
+
+Binary export to an SD card is staged under wiiu/3dii-u/updates/; it does not
+silently activate an update for a differently named or located WUHB. Follow the
+steps above to import it. Folder exports include this guide and update.json.
+
+TO RETURN TO THE BUNDLED GAME
+Close the game and remove or rename only Example.wuhb.dev/active.txt. Your WUHB
+and save remain. A complete replacement Homebrew build deactivates an older
+companion marker so it cannot keep overriding the new full bundle.
+
+WUP INSTALLS
+Output: WUP remains the installed-title workflow and requires your own otp.bin.
+Copy its output folder into sd:/install/ and use WUP Installer GX2. WUP titles
+use their NAND/USB save storage; the .wuhb.dev instructions apply to Homebrew.
+
+Experimental multiplayer settings (Homebrew and WUP)
+-------------------------------------------------
+All rebuilt titles read SD:/3dii-u/multiplayer-room.txt. The Builder supplies
+an empty-host template under 3dii-u alongside the output, or directly at the
+SD root when building to a card. Existing settings are preserved. Set host
+and port for your chosen room, then relaunch the game. A missing file or blank
+host disables room networking. No server address is built into the defaults.
+Shared configuration does not mean multiplayer is implemented for every game.
+Do not use save states during multiplayer. Implementation and current test
+limits: tools/wiiu_diagnostics/TRIFORCE_MULTIPLAYER_STATUS.md in the source.

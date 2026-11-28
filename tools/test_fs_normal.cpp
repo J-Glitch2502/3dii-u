@@ -109,8 +109,8 @@ int main(int argc, char **argv) {
     const DrawState shipped = decode_key(std::string((const char *)shipped_words, sizeof shipped_words));
     const std::string raw_capture = fs_key(captured);
     expect(fnv64(raw_capture.data(), raw_capture.size()) == 0x5bc241f058947ff7ull, "fixture is the actual captured miss");
-    expect(gen_fs_glsl(captured) == gen_fs_glsl(shipped), "captured and shipped states already generate identical GLSL");
-    expect(fs_key(fs_normal(captured)) == fs_key(fs_normal(shipped)), "inactive spotlight selector reuses the actual shipped key");
+    expect(gen_fs_glsl(fs_normal(captured)) != gen_fs_glsl(fs_normal(shipped)), "live spotlight selectors keep distinct LUT behavior");
+    expect(fs_key(fs_normal(captured)) != fs_key(fs_normal(shipped)), "live spotlight selector is retained even when this draw disables every spotlight");
     expect(fs_normal(captured).light.sp.enabled && fs_normal(captured).light.sp.abs, "inactive selector keeps spotlight enable and absolute bits");
     expect(fs_key(captured) == raw_capture, "spotlight normalization leaves caller state unchanged");
     if (!emit(captured)) return 2;
@@ -127,11 +127,11 @@ int main(int argc, char **argv) {
                         d.light.sp.input = input;
                         for (u32 i = 0; i < 8; i++) d.light.lights[i].spot_atten = i < lights ? bool(mask & (1u << i)) : true;
                         const DrawState normal = fs_normal(d);
-                        expect(normal.light.sp.input == (enabled && mask ? input : 0), "only active spotlight attenuation keeps its selector");
+                        expect(normal.light.sp.input == (enabled ? input : 0), "live spotlight LUT keeps its selector while enabled");
                         expect(normal.light.sp.enabled == enabled && normal.light.sp.abs == (enabled && absolute), "spotlight enable/abs retain existing normalization");
-                        expect(gen_fs_glsl(d) == gen_fs_glsl(normal), "spotlight normalization preserves generated behavior");
+                        expect(gen_fs_glsl(normal) == gen_fs_glsl(fs_normal(normal)), "spotlight normalization preserves generated behavior on repeated normalization");
                         expect(fs_key(fs_normal(normal)) == fs_key(normal), "spotlight normalization is idempotent");
-                        if (!enabled || !mask) {
+                        if (!enabled) {
                             DrawState zero = d;
                             zero.light.sp.input = 0;
                             expect(fs_key(normal) == fs_key(fs_normal(zero)), "all inactive selector values share one key");

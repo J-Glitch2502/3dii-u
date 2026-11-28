@@ -60,7 +60,7 @@ def main():
         for path in sorted((ROOT / directory).rglob('*')):
             if path.is_file() and path.suffix in ('.cpp', '.h', '.c', '.inc', '.py'):
                 copy(path, path.relative_to(ROOT))
-    for name in ('tools/shadergen_main.cpp', 'tools/shadergen_lists.cpp',
+    for name in ('tools/fallbackgen.cpp', 'tools/shadergen_main.cpp', 'tools/shadergen_lists.cpp',
                  'tools/win/build3ds.py', 'tools/win/objcache.py', 'tools/win/shadergen_stubs.cpp',
                  'tools/wup_safety.py', 'tools/gsh_rules.py', 'tools/test_gpu_render.cpp',
                  'tools/gpu_replay_verify.py', 'third_party/cafeglsl/glslcompiler.exe',

@@ -63,6 +63,7 @@ public:
     SourceStatus tick(SourceConfig &cfg, const s16 coeffs[16], bool seen, bool publish);
     void mix_into(QuadFrame &dst, int mix);
     const StereoFrame &output() const { return frame; }
+    void report_timing(unsigned index);  // DSP lock held; bounded source summary
 
 private:
     struct Buffer {
@@ -78,6 +79,7 @@ private:
     };
     struct State {
         bool enabled = false;
+        bool has_emitted = false;  // distinguish a running stream from first start
         u16 sync_count = 0;
         std::array<std::array<float, 4>, 3> gain{}, gain_ramp_start{};
         std::array<bool, 3> gain_ramp{};
@@ -105,7 +107,25 @@ private:
     };
     State st;
     StereoFrame frame{};
+    struct {
+        u32 frames = 0, blank_starts = 0, boundary_blanks = 0, empty = 0, short_frames = 0;
+    } timing;
 
+#ifdef RECOMP_RESUMABLE
+public:
+    template<class A> void state_fields(A &a) {
+        a.fields(st.enabled, st.has_emitted, st.sync_count, st.gain, st.gain_ramp_start, st.gain_ramp);
+        u32 count = a.length(st.queue.size());
+        if (a.reading && a.ok) st.queue.resize(count);
+        for (auto &b : st.queue) a.fields(b.paddr, b.length, b.adpcm_yn, b.adpcm_dirty, b.looping, b.id, b.channels, b.format, b.from_queue, b.play_position, b.has_played);
+        a.fields(st.channels, st.format, st.have_buffer, st.pos, st.cur_paddr, st.cur_length, st.cur_channels, st.cur_format, st.cur_looping);
+        a.fields(st.decoded, st.adpcm_decoded, st.buffer_update, st.update_unpublished, st.last_buffer_id, st.current_buffer_id, st.adpcm_coeffs);
+        a.fields(st.adpcm.yn1, st.adpcm.yn2, st.rate, st.interp, st.interp_state.xn3, st.interp_state.xn2, st.interp_state.xn1, st.interp_state.fpos);
+        auto &f = st.filters;
+        a.fields(f.simple_on, f.biquad_on, f.s_b0, f.s_a1, f.s_y1, f.b_b0, f.b_b1, f.b_b2, f.b_a1, f.b_a2, f.b_x1, f.b_x2, f.b_y1, f.b_y2, frame);
+    }
+private:
+#endif
     void parse_config(SourceConfig &cfg, const s16 coeffs[16]);
     void enqueue(const Buffer &b);
     bool dequeue();
@@ -142,6 +162,13 @@ private:
     };
     State st;
     StereoFrame frame{};
+#ifdef RECOMP_RESUMABLE
+public:
+    template<class A> void state_fields(A &a) {
+        a.fields(st.volume, st.aux_enable, st.mix, st.output_format, frame);
+        for (auto &d : st.delay) a.fields(d.enabled, d.g, d.a, d.b, d.line, d.last, d.pos);
+    }
+#endif
 };
 
 }  // namespace audio::hle

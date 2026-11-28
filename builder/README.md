@@ -1,10 +1,10 @@
 # 3Dii U Builder
 
-Turns your own 3DS game dumps into games for your Wii U. Pick a game, say whether to add its update, DLC and a mod, press **Build It!**, and the game lands on your SD card ready for WUP Installer GX2.
+Turns your own 3DS game dumps into games for your Wii U. Pick a game, say whether to add its update, DLC and a mod, choose WUP install or Aroma Homebrew output, and press **Build It!**.
 
 UI and art design by syntcity.
 
-No game data and no keys come with the builder. Everything it builds from is yours: your dumps, your 3DS's keys if the dumps are encrypted, and your Wii U's `otp.bin`.
+No game data and no keys come with the builder. Everything it builds from is yours: your dumps, your 3DS's keys if the dumps are encrypted, and your Wii U's `otp.bin` for WUP output only.
 
 ## Using it
 
@@ -18,14 +18,113 @@ No game data and no keys come with the builder. Everything it builds from is you
 4. **Your Files**: the lights turn cyan when the builder has what it needs.
    - **3DS keys** are only needed for encrypted dumps. The builder decrypts them the way `cia_to_decrypted_3ds.py` does: makerom turns a game's CIA into a `.3ds`, then pyctr decrypts it, with `boot9.bin` and `seeddb.bin` from your own 3DS. It looks for them in `.3ds` in your user folder (`C:\Users\<you>\.3ds`), pyctr's own place; choose another folder if yours are elsewhere. GodMode9 can dump both from a 3DS.
    - **Wii U otp.bin** comes from your own console's NAND backup. The WUP is packed with the key inside it; the builder never shows or stores that key.
-5. **Put it on**: your SD card (cards set up for a Wii U come first), or a folder.
+5. **Output**: choose **WUP install** or **Homebrew (.wuhb)**. Homebrew supports full games and small executable/shader exports; see [Homebrew output and small exports](#homebrew-output-and-small-exports). **Put it on**: your SD card (cards set up for a Wii U come first), or a folder.
 6. **Build It!** It takes a while, longer for bigger games: the game's code is recompiled for the Wii U and its shaders are compiled ahead of time. You see each stage tick off. Your PC stays usable meanwhile, **Cancel** stops it cleanly, and **Details** shows everything the build prints.
    - To build several games, configure each one and press **Add to queue**. **Run queue** builds them in order using the options and destination each entry had when you added it. A failed build leaves a result in the list and the next one starts. **Stop queue** cancels the active build and leaves the waiting entries ready to run again. The list lasts until you close the Builder.
-7. Put the card in your Wii U and install with **WUP Installer GX2**. If you installed an older build of the same game, delete that one first (System Settings, Data Management), then install the new one.
+7. Put the card in your Wii U. Launch a complete Homebrew WUHB from the Aroma Menu, or install WUP output with **WUP Installer GX2**. If you installed an older build of the same game, delete that one first (System Settings, Data Management), then install the new one.
 
 **Games** in the bar on the left holds the games you picked before and the **Compatibility List**. **Help** covers what you need, app updates, and the light and dark themes.
 
-Saves live in the game's own save storage on the console, like any installed game. They show up in Data Management.
+**Game language** defaults to the computer's display language, with English as the fallback. Choose a language to override it for the selected title. The game must already include that language.
+
+WUP saves use the installed title's NAND/USB save storage and appear in Data Management. Aroma Homebrew saves use the loader's SD-backed save mapping. Save states follow the same backend; small executable/shader imports preserve the original WUHB's save identity.
+
+### Native WUP updates
+
+Choose **WUP update** under Package, then **Binary only** or **Binary + shaders** (the default).
+Install the resulting update on the same NAND/USB device as the matching base game. Keep the base game and its saves installed.
+The package uses an update title ID (`0005000E`); the Menu keeps the original game icon.
+New WUP base titles encode the 3DS game's unique number as `000500001Dxxxx00`.
+The `1D` prefix supports Nintendo's native update lookup, and the final `00` lets
+Data Management group software and saves under the same entry. The full unique
+number is retained; adjacent games receive different IDs. Inputs outside this
+reserved range are rejected rather than truncated.
+Older `3D` titles and earlier `1D` titles with a nonzero final byte need a one-time
+separate base rebuild. Updates cannot change an installed base title's identity.
+The builder uses a distinct `_NativeWUP` output folder and leaves existing installs
+and saves intact. Move saves using a save manager when changing title IDs; the
+builder does not silently migrate console data. Homebrew identity is unchanged.
+
+Every full WUP build now writes a matching `.base.json` beside its installer
+folder and keeps a copy in the Builder work folder. In **WUP update → Matching
+base**, choose that file, or use the last full base from the same work folder.
+Both update modes require this manifest. Old size-only inventories are rejected;
+make a full base with this Builder once to register its assets. Keep the manifest
+when moving a base build to another PC.
+
+The PC checks the selected 3DS update/DLC versions and the resulting game assets,
+including applied mods, against that base. Changes require a full base rebuild.
+Binary-only updates also check the shader code contract, then link the ORIGINAL
+base shaders without compiling/copying them. If graphics code changed, choose
+**Binary + shaders**. A binary-only update does not retain shaders from an earlier
+shader update: native update packages replace each other.
+
+Language defaults, menu enabled/disabled and menu shortcuts are copied as update
+content, with explicit defaults so old base flags do not win. Saved per-user
+language preferences still take precedence over the build's default language.
+A tiny startup marker check rejects an update paired with a different installed
+base before loading game content. It does not scan or checksum ROM assets on Wii U;
+asset comparisons run on the PC. Base reinstallations keep the same corrected
+native title ID, so this change does not require another ID migration.
+
+The preceding binary-only path passed repeated real Wii U installation tests.
+The new manifest/startup guard and binary + shader path still need a hardware
+comparison; host tests cover matching/mismatched assets and native update layout.
+
+Native update version stays fixed at **5**. Date/time labels identify the build folder and are recorded in the package metadata;
+there is no build counter, clock-derived version or rollover. Changed contents receive new content IDs, so a manually installed
+package can replace an earlier version-5 package without depending on a higher version number.
+On November 27, 2026, Urban Champion was tested on a real Wii U: a binary-only version-5 update launched, then a second version-5
+update replaced its executable and displayed a temporary menu label. The runtime log and installed metadata confirmed the new
+binary with version 5 unchanged. This validates that manual reinstall path on the tested Wii U; it does not establish automatic
+update discovery or behavior across every installer. The temporary menu text was excluded from production source.
+
+The corrected `1Dxxxx00` Urban Champion base was also installed and launched on real hardware.
+Existing user saves were restored while keeping Nintendo's new save metadata intact. The user confirmed
+that software, user saves and shared saves now appear together in Data Management. Existing titles are
+not renamed or migrated by the PC Builder; retain the old save until a manual migration is verified.
+
+### Rebuild just the executable for hardware testing
+
+Keep the prepared files from a normal build with the pipeline's `--keep` flag. Use the same Builder work directory and devkitPro environment for subsequent builds:
+
+```sh
+python tools/win/build3ds.py code g_asre --prepared-game WORK/builder_work/g_asre --work-dir WORK/build_win_builder --out RPX_OUTPUT
+```
+
+This reuses the extracted game and compiled objects. Use a full build when changing the ROM, game assets, shader generator, or shader pack.
+
+For Cemu, close the running title and copy the new RPX into the `code/` directory of a test copy of the unpacked title. Launch that RPX directly in Cemu. The existing `content/` and `meta/` folders supply the assets and title metadata, so this test skips WUP packaging.
+
+Install the matching base WUP once on the Wii U. Close the game, enable FTPiiU and its system-file access in debug Aroma, then run:
+
+```sh
+python3 tools/ftp_dev_rpx.py WII_U_IP WORK/builder_work/g_asre/out/title RPX_OUTPUT/g_asre.rpx --volume storage_usb
+```
+
+Use `storage_mlc` if the test title is installed to internal storage. The tool checks the installed title ID and shader files, uploads and verifies the new RPX, and keeps the previous RPX as a uniquely named backup in the same code directory. Launch the title again from the Wii U Menu to run the new executable.
+
+### Update a homebrew WUHB without replacing its assets
+
+With our generic development build of RPXLoadingModule installed in Aroma, any
+WUHB under `sd:/wiiu/apps/` can have a companion `<full-name>.wuhb.dev` directory.
+No game-specific loader entry is needed. Reload Aroma once after installing the
+module; later updates are selected automatically at the next application launch.
+
+```sh
+python3 tools/ftp_homebrew_dev.py WII_U_IP \
+  'wiiu/apps/Kirby Triple Deluxe.wuhb' RPX_OUTPUT/g_bale.rpx \
+  --content CHANGED_CONTENT --release build-20261118-1
+```
+
+`CHANGED_CONTENT` holds only changed content files, such as `shaders.gsh` and
+`shaders.idx` from the same build. Omit `--content` for an RPX-only update. Both
+shader files must be supplied together. The publisher writes an immutable release,
+verifies every upload, and switches the small `active.txt` marker last. The module
+loads that release's `root.rpx` and merges its optional `content/` over the WUHB.
+The original bundle supplies other assets and keeps the same save identity.
+Nothing in this workflow writes to the installed USB title or to save folders.
+The original installed-title FTP updater above remains a separate alternative.
 
 ## Which games work
 
@@ -83,6 +182,8 @@ Windows 10 or 11 for now (Linux is planned):
 - The window is Qt Quick: `ui/Main.qml` draws it (Wii U Menu glass laid out on a 1280x720 surface scaled to the window, light and dark, the in-window questions, the update card), `ui/Simple.qml` is the plainer window the About card can switch to and back from (the same `app`, one window at a time), and `gui.py` holds what it shows and does what its buttons ask. A choice that asks several things is a generator that yields each question.
 - `app.py` is the one program: the window, the build when run with `--pipeline`, and `python.exe`'s part for the repository's tool scripts the build runs. In the standalone app, the build's compilers start without console windows.
 - `make_app.py` builds the standalone app with PyInstaller (`python builder/make_app.py`, on a PC with the build tools above).
+  - For Windows packages, install `python -m pip install -r builder/requirements-windows.txt`. This pins Qt 6.11.3: Qt 6.12 aborts during display-profile discovery under Steam Proton 11 because its `WcsCreateIccProfile` implementation is still a stub. The same current Builder GUI runs with the pinned runtime; no native Windows DLL replacement is needed.
+  - On Linux, place `builder/proton.sh` beside the packaged executable and run it with Bash. It uses Steam Proton 11 and a separate `~/.local/share/3dii-u-builder/proton` prefix, and aliases Proton's own ICU implementation to the `icuuc.dll` name Qt imports. Set `THREEDII_PROTON` for a different Steam library. `test_proton_gui.py` checks real window rendering, navigation and output choices; pass its path to the executable to run it against the frozen application.
   - It leaves out the parts of Qt the window never loads.
   - It puts the engine beside the app, in this repository's own layout. That includes what runs of the games learned: where their code starts, and the render states they met.
   - None of the games' code goes in. A run's shader log keeps each vertex record's whole shader memory, which is the game's own code. So `shaderlogs.py` ships each record as a fingerprint of the program of the game's DVLB it ran, beside the log in a `.vsf` file, and a build finds the program in the user's own dump again (dvlb.bin). Checked on the nine games: the shader generator makes the same shaders from these as from the full logs, except that it declares fewer unused inputs.
@@ -117,3 +218,108 @@ Windows 10 or 11 for now (Linux is planned):
   - `services/fs.cpp` serves the update's RomFS (`update_romfs.bin`, SelfNCCH path type 5) and the DLC's (`dlc_<content index>.romfs`, archive 0x2345678A for `0004008C` title IDs).
   - `services/misc.cpp`'s `am:app` answers the add-on content calls from `dlc_contents.bin`, `dlc_title.bin`, `dlc_ticket.bin` and `update_title.bin`.
   - The GPU-timeout fix (`services/gsp.cpp`) finds nngxSetTimeout in whatever code is loaded, so updated code and new games get it too.
+
+## Optional hardware development tools
+
+See [the source-only hardware debugging handoff](../tools/wiiu_diagnostics/README.md) for incremental RPX/content transfers, the dual-channel PC recorder, pinned Aroma/Cemu patches, validation results and known limitations. These tools are opt-in developer features; the experimental Aroma heap workaround needs separate review. The language GUI is functional but could use visual and UX polish before release.
+
+### Shared hardware-observed fragment coverage
+
+The normal GUI shader stage also reads `observed_fragments.json` beside a
+known title's shader logs. It compiles missing fragment keys on the PC and
+adds them to the generated pack, preserving existing shader mappings. No
+console warm-up or separate Wii U program is required. Dark Moon currently
+includes 167 captured fragment states; this is coverage of tested states,
+not a claim that every runtime combination is known.
+
+Maintainers can export the fragment-only metadata from a console SHDC cache:
+
+```sh
+python tools/harvest_observed_fragments.py CACHE.bin games/TITLE/shader_logs/observed_fragments.json
+```
+
+Captured vertex GLSL is deliberately excluded: it may contain translated game
+programs. Fragment catalogs contain generated renderer GLSL and keys, plus the
+source cache hash. Their renderer-source fingerprint must match the builder;
+a changed renderer skips stale catalogs with a build-log explanation. Regenerate
+and validate catalogs when changing shader generation or key definitions.
+The packer retains the catalog in standalone Windows builds. The additional
+shaders pass the same CafeGLSL and Wii U register checks as other PC shaders.
+Hardware behavior still needs testing against a fresh runtime cache.
+
+## Shader feature reports
+
+The shader build writes `shader-feature-report.json` beside the shader pack.
+It records actual GPU translator rejections, by shader identity, entry, boolean
+variant and translator location. CPU fallback remains available; a rejection is
+not proof that the game will crash. A clean report covers only discovered shader
+variants, not all states that the game may construct during play.
+
+When there are rejections, `report-shader-issue.txt` contains a GitHub issue link
+with a short template. Review and submit it, attaching the JSON report and adding
+the Builder version, game region/update and affected scene. Reports contain no
+shader instructions, generated GLSL or game assets. Nothing is uploaded
+automatically. The GUI and command-line build use the same report step.
+
+For developer asset analysis, `tools/analyze_pica_shaders.py` accepts a captured
+shader log, optional `--recipes` and `--game` paths, and a required `--out` JSON
+path. It connects instruction-memory fingerprints and RomFS recipe offsets to
+DVLE symbol names. Its static counts are structural estimates, not timings.
+Symbol tables include helper functions, so a label alone must not be made into
+a draw variant without the material's uniforms and output mapping. The separate
+geometry-native translator probe does not describe GPU translator support.
+
+The asset scan also recognizes the tagged 0x1b3/0x1b4 material layout. It follows
+material/pass shader selections and shared DVLB constants/output declarations
+before compiling vertex variants. This does not infer arbitrary fragment states
+or promise complete coverage; recognized-but-invalid assets print a discovery
+diagnostic and leave the existing fallback available.
+
+## Homebrew output and small exports
+
+Both window layouts have an **Output** choice: **WUP install** or **Homebrew (.wuhb)**.
+Homebrew does not require `otp.bin`. Its **Build** choice selects a complete playable
+WUHB, just the executable, just the two shader files, or executable and shaders.
+Binary-only exports skip shader compilation; shader-only exports skip game-code
+compilation. Partial exports contain no ROM assets and require an existing WUHB.
+The included **Homebrew import guide** explains the companion release layout,
+retaining compatible components, and installing the custom Aroma loader once.
+The loader and its corresponding GPL source are in **Aroma support** in the ZIP.
+
+The pipeline exposes the same choices through `--output-format homebrew` and
+`--homebrew-parts full|binary|shaders|both`. WUP remains the default. A complete
+Homebrew build written to an SD card goes under `wiiu/apps`; small exports go
+under `wiiu/3dii-u/updates` for explicit import. Game saves are not replaced.
+
+To package the Windows app with the custom loader, set `THREEDII_AROMA_MODULE`
+to its built `RPXLoadingModule.wms` and `THREEDII_AROMA_SOURCE` to its matching
+source checkout before running `make_app.py`.
+
+
+### Validation of the November 25 Windows test package
+
+Portable shader observations now live in the tracked
+`tools/shader_observations/` catalog. Source and Windows builds verify its
+inventory before preparing shaders; Windows packaging also checks the copied
+inventory. Shader generation must cover every supplied fragment state through
+an exact or canonical-equivalent lookup, or the build fails with
+`shader-coverage-report.json`. This prevents an incomplete source archive from
+silently shipping reduced precompiled coverage. It does not promise discovery
+of all runtime states or full-speed rendering in every game.
+
+The packaged Windows executable was checked under Steam Proton 11: its frozen
+CLI, both QML layouts and all Homebrew choices, export/artwork/failure handling,
+and compiler-policy scenarios passed. Windows devkitPPC compiled the resumable
+checkpoint, renderer and kernel units. The bundled Windows wuhbtool produced a
+WUHB whose embedded content was checked. The ZIP passed CRC, source-hash and
+payload checks, and includes the Aroma module with corresponding GPL source.
+This is Proton validation, not a native Windows test or a full game build through
+the GUI. Test exports should use the same base game, update, mods and shader
+revision as their original WUHB; rebuild the full game when those assets change.
+
+## Experimental room networking
+
+Every output format supplies a blank `3dii-u/multiplayer-room.txt` template for the SD root.
+Homebrew and WUP runtimes read that same optional SD file; absent or blank hosts
+leave networking disabled. Existing card settings are preserved. See
+[configuration and tested compatibility](../tools/wiiu_diagnostics/TRIFORCE_MULTIPLAYER_STATUS.md).

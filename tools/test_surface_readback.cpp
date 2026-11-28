@@ -10,7 +10,7 @@ struct Surface {
     uint32_t addr, size;
     uint64_t drawn, written_after = 0;
     uint8_t value;
-    bool depth = false, gpu_newer = true, guest_newer = false;
+    bool depth = false, gpu_newer = true, guest_newer = false, first_use = false;
     sr::Spans written;
     uint32_t bytes() const { return size; }
 };

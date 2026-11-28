@@ -196,11 +196,10 @@ def key_from_config(c):
             L['sec_a'] << 21 | L['clamp'] << 22)
         # our order: d0 d1 sp fr rb rg rr; Azahar's: d0 d1 sp fr rr rg rb. Samplers as raster.cpp: 0 1 8 3 4 5 6
         az = {'d0': luts[0], 'd1': luts[1], 'sp': luts[2], 'fr': luts[3], 'rr': luts[4], 'rg': luts[5], 'rb': luts[6]}
-        spot = any(lt & (1 << 6) for lt in lights[:L['num']])
         for name, sampler in (('d0', 0), ('d1', 1), ('sp', 8), ('fr', 3), ('rb', 4), ('rg', 5), ('rr', 6)):
             raw = az[name][0]
             en = bool(raw & 1) and sampler_supported(L['config'], sampler)
-            inp = (raw >> 2) & 7 if name != 'sp' or spot else 0
+            inp = (raw >> 2) & 7
             put(int(en) | ((raw >> 1) & 1) << 1 | inp << 2 if en else 0)
         for i in range(L['num']):
             lt = lights[i]
@@ -213,7 +212,7 @@ def key_from_config(c):
     put(0)  # colour mask
     if shadow_rendering:
         return None  # a shadow map pass: our runtime draws those its own way
-    return struct.pack(f'<{len(words)}I', *words)
+    return normalize_logged(struct.pack(f'<{len(words)}I', *words))
 
 
 def normalize_logged(k):
@@ -296,15 +295,16 @@ def normalize_logged(k):
         if not shadows:  # as fs_normal(): disabled shadows are 1, so nothing else about them is read
             lw &= ~(3 << 12 | 15 << 16)
         out.append(lw)
-        spot = any(lt & (1 << 8) for lt in w[p + 7:p + 7 + (lw & 15)])
-        for i in range(7):
-            s = w[p]
-            if i == 2 and not spot:
-                s &= ~(7 << 2)
-            p += 1
-            out.append(s if s & 1 else 0)
+        sels = [s if s & 1 else 0 for s in w[p:p + 7]]
+        out.extend(sels)
+        p += 7
         for _ in range(lw & 15):
-            out.append(w[p] if shadows else w[p] & ~(1 << 9))
+            light = w[p] & ~256
+            if not shadows or not lw & ((1 << 17) | (1 << 18)):
+                light &= ~512
+            if not light & 128 and not sels[2] & 1:
+                light &= ~7
+            out.append(light)
             p += 1
     fw = w[p]
     fog, flip, at, af = fw & 1, (fw >> 1) & 1, (fw >> 2) & 1, (fw >> 3) & 7

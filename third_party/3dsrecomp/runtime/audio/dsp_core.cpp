@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../audio_iface.h"
+#include "../checkpoint.h"
 #include "dsp_hle.h"
 #include "host.h"
 
@@ -28,6 +29,7 @@ struct Dsp {
     u64 frames = 0;
     u16 last_counter = 0;  // the game's newest frame counter at the last frame
     bool fresh = true;     // the last frame worked on a frame the game submitted since the one before
+    u32 timed_frames = 0, reused = 0, unseen = 0, stale_run = 0, max_stale = 0;
 };
 
 Dsp &dsp() {
@@ -134,6 +136,11 @@ StereoFrame generate_frame(Dsp &d, bool seen) {
     const u16 counter = frame_counter(ri);
     d.fresh = seen && (counter != d.last_counter || (frame_counter(0) == 0 && frame_counter(1) == 0));
     if (seen) d.last_counter = counter;
+    d.timed_frames++;
+    d.reused += !d.fresh;
+    d.unseen += !seen;
+    d.stale_run = d.fresh ? 0 : d.stale_run + 1;
+    d.max_stale = std::max(d.max_stale, d.stale_run);
 
     std::array<QuadFrame, 3> mixes{};
     for (int i = 0; i < kNumSources; i++) {
@@ -192,6 +199,9 @@ StereoFrame generate_frame(Dsp &d, bool seen) {
 
 namespace audio {
 using namespace hle;
+#ifdef RECOMP_RESUMABLE
+static u64 checkpoint_codec_epoch;
+#endif
 
 // Builds without a decoder give silence, so that choosing those tracks can't leave the game waiting: port/aac/aac_ffmpeg.cpp has the real ones.
 extern "C" __attribute__((weak, noinline)) void aac_host_reset() {}
@@ -246,6 +256,9 @@ static void aac_request(Dsp &d, const u8 *data) {
 }
 
 void pipe_write(u32 pipe, const u8 *data, u32 size) {
+#ifdef RECOMP_RESUMABLE
+    if (pipe == 3) ++checkpoint_codec_epoch;
+#endif
     Dsp &d = dsp();
     std::lock_guard lk(d.lock);
     if (pipe == 3 && size == 32) {
@@ -325,5 +338,32 @@ bool tick(bool seen, bool *fresh) {
     host_output(out.data(), out.size());
     return true;
 }
+
+void report_dsp_timing() {
+    Dsp &d = dsp();
+    std::unique_lock lk(d.lock, std::try_to_lock);
+    if (!lk.owns_lock()) { LOG("[dsp-time] source snapshot skipped: IPC busy\n"); return; }
+    LOG("[dsp-time] frames %u reused %u unseen %u max consecutive stale %u\n", d.timed_frames, d.reused, d.unseen, d.max_stale);
+    for (unsigned i = 0; i < d.sources.size(); ++i) d.sources[i].report_timing(i);
+    d.timed_frames = d.reused = d.unseen = d.max_stale = 0;
+}
+
+
+#ifdef RECOMP_RESUMABLE
+void checkpoint_audio(checkpoint::Image &im) {
+    const auto epoch = checkpoint_codec_epoch;
+    im.validate.push_back([epoch] {
+        if (checkpoint_codec_epoch == epoch) return true;
+        LOG("[state] validation failed: native-codec epoch %llu -> %llu\n", (unsigned long long)epoch, (unsigned long long)checkpoint_codec_epoch);
+        return false;
+    });
+    Dsp &d = dsp();
+    std::lock_guard lock(d.lock);
+    im.take(d.power); for (auto &pipe : d.pipes) im.take(pipe);
+    im.take(d.sources); im.take(d.mixer); im.take(d.backup_ram);
+    im.take(d.backup_sources); im.take(d.backup_mixer);
+    im.take(d.frames); im.take(d.last_counter); im.take(d.fresh);
+}
+#endif
 
 }  // namespace audio

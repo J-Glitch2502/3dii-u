@@ -12,6 +12,7 @@
 
 #include "audio/host.h"
 #include "audio_iface.h"
+#include "audio_ring.h"
 
 namespace {
 constexpr u32 RING = 8192;     // samples per channel
@@ -22,6 +23,7 @@ u32 write_pos;
 bool playing;
 bool initialized;
 std::atomic<float> gain{1.0f};
+u32 queue_min = RING, queue_max, wrapped_reads, low_recoveries, wrapped_recoveries;
 std::mutex output_mutex;
 
 void start_voices() {
@@ -106,6 +108,15 @@ void init() {
     write_pos = CUSHION;
 }
 void set_volume(float v) { gain = v; }
+#ifdef RECOMP_RESUMABLE
+void checkpoint_clear_output() {
+    for (int c = 0; c < 2; c++) if (ring[c]) {
+        memset(ring[c], 0, RING * 2); DCFlushRange(ring[c], RING * 2);
+    }
+    write_pos = playing ? (play_pos() + CUSHION) % RING : CUSHION;
+}
+#endif
+
 // silence while the HOME Menu is up: the voices would otherwise repeat what's in the ring
 void pause(bool on) {
     std::lock_guard lock(output_mutex);
@@ -128,8 +139,10 @@ void host_output(const Sample *samples, size_t n) {
     if (!voice[0] || !voice[1]) return;
     if (playing) {
         // keep a steady distance: on an underrun or a pile-up, jump to where the cushion should be
-        const u32 distance = (write_pos + RING - play_pos()) % RING;
+        const u32 distance = audio_ring::distance(write_pos, play_pos(), RING);
         if (distance < 160 || distance > RING / 2) {
+            if (distance > RING / 2) wrapped_recoveries++;
+            else low_recoveries++;
             // what lies between the voices and the new place is old sound: silence, not a repeat of it
             for (int c = 0; c < 2; c++) {
                 memset(ring[c], 0, RING * 2);
@@ -159,7 +172,22 @@ void host_output(const Sample *samples, size_t n) {
 }
 int host_queued() {
     std::lock_guard lock(output_mutex);
-    return playing ? (int)((write_pos + RING - play_pos()) % RING) : -1;
+    if (!playing) return -1;
+    const u32 raw = audio_ring::distance(write_pos, play_pos(), RING);
+    const u32 ready = audio_ring::queued(raw, RING);
+    queue_min = std::min(queue_min, ready);
+    queue_max = std::max(queue_max, ready);
+    wrapped_reads += raw > RING / 2;
+    return (int)ready;
 }
 }  // namespace hle
+
+// Called only by the audio producer, outside its tick. No AX callback, net
+// thread, file write or cross-thread ring inspection is introduced.
+void report_output_timing() {
+    LOG("[audio-ring] queued min/max %u/%u samples; low recoveries %u, wrapped recoveries %u, wrapped observations %u\n",
+        queue_min == RING ? 0 : queue_min, queue_max, low_recoveries, wrapped_recoveries, wrapped_reads);
+    queue_min = RING;
+    queue_max = low_recoveries = wrapped_recoveries = wrapped_reads = 0;
+}
 }  // namespace audio

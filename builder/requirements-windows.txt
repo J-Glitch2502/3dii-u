@@ -1,0 +1,8 @@
+# Qt 6.12 calls WcsCreateIccProfile during screen discovery. Proton 11
+# exports a stub that aborts the process. Keep the tested Qt runtime for
+# Windows packages until that API is supported and a newer runtime is tested.
+PySide6-Essentials==6.11.3
+pyinstaller
+pyctr
+pycryptodome
+cryptography

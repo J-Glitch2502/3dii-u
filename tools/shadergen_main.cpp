@@ -1,4 +1,5 @@
-// Build step: compiles every shader the game needs ahead of time, so nothing compiles at run time.
+// Build step: translates discovered shader states ahead of time. States only
+// assembled during gameplay may still need runtime compilation or fallback.
 //   shadergen <pipelines.bin> <fs and vs log dir> <output dir> <glsl compiler>
 // Inputs: the fragment state list shipped with the recompiler, plus what runs of the game recorded (vs_log.bin, fs_log.bin) and
 // what the console logged as missing (shader_misses.bin, same records). Outputs shaders.gsh and shaders.idx.
@@ -12,6 +13,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "shadergen.h"
@@ -101,6 +103,15 @@ void read_log(const std::string &path) {
             memcpy(r.gs.slots, &d[q + 64], 24);
             gsx_records.push_back(std::move(r));
             p = end;
+        } else if (!memcmp(&d[p], "GS  ", 4)) {
+            // Legacy CPU geometry records are not fragment keys. Native
+            // geometry compilation consumes their separate .gsl representation.
+            if (p + 16 > d.size()) break;
+            const u32 nc = u32at(p + 8), ns = u32at(p + 12);
+            if (nc > 4096 || ns > 4096) break;
+            const size_t size = 16 + ((size_t)nc + ns) * 4;
+            if (size > d.size() - p) break;
+            p += size;
         } else if (!memcmp(&d[p], "VS  ", 4)) {
             if (d.size() - p < 16 + 56) break;
             VsRecord r;
@@ -139,7 +150,10 @@ std::string hex64(u64 v) {
 
 int lists_main(int argc, char **argv);  // shadergen_lists.cpp
 
+int fallbackgen_main(int argc, char **argv);
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--fallback")) return fallbackgen_main(argc - 1, argv + 1);
     if (argc >= 2 && !strcmp(argv[1], "--lists")) return lists_main(argc, argv);
     if (argc < 5) {
         fprintf(stderr, "usage: shadergen <pipelines.bin> <log dir> <output dir> <compiler>\n       shadergen --lists <out.bin> <romfs.bin>...\n");
@@ -152,11 +166,36 @@ int main(int argc, char **argv) {
     const std::vector<u8> pl = read_file(pipelines);
     for (size_t p = 8; p < pl.size() && read_fs_key(pl, p);) {}
     const size_t shipped = fs_keys.size();
+    std::vector<std::string> preferred_fs_keys = fs_keys;
     // a finished game's list first (builder/shaderlogs.py, confirm): its shaders keep their numbers, and what the logs add since comes after
-    if (fsys::exists(fsys::path(logs) / "confirmed.bin")) read_log((fsys::path(logs) / "confirmed.bin").string());
-    for (const auto &e : fsys::directory_iterator(logs))
-        if (e.path().extension() == ".bin" && e.path().filename() != "confirmed.bin") read_log(e.path().string());
+    if (fsys::exists(fsys::path(logs) / "confirmed.bin")) {
+        read_log((fsys::path(logs) / "confirmed.bin").string());
+        preferred_fs_keys = fs_keys;
+    }
+    for (const auto &e : fsys::directory_iterator(logs)) {
+        if (e.path().extension() != ".bin" || e.path().filename() == "confirmed.bin") continue;
+        const auto begin = fs_keys.size();
+        read_log(e.path().string());
+        if (!e.path().filename().string().starts_with("other_"))
+            preferred_fs_keys.insert(preferred_fs_keys.end(), fs_keys.begin() + begin, fs_keys.end());
+    }
     printf("%zu fragment keys (%zu shipped), %zu vertex records\n", fs_keys.size(), shipped, vs_records.size());
+
+    // Preserve the exact discovered inputs for material/lighting family generation.
+    std::string fragment_inputs;
+    const std::set<std::string> own_states(preferred_fs_keys.begin(), preferred_fs_keys.end());
+    preferred_fs_keys.insert(preferred_fs_keys.end(), fs_keys.begin(), fs_keys.end());
+    std::set<std::string> written;
+    for (const auto &key : preferred_fs_keys) {
+        if (!written.insert(key).second) continue;
+        const u32 n = (u32)key.size();
+        for (unsigned i = 0; i < 4; ++i) fragment_inputs += char(n >> (8 * i));
+        fragment_inputs += key;
+    }
+    write_file(out + "/fragment-states.bin", fragment_inputs);
+    write_file(out + "/fallback-input-report.json", "{\"preferred_game_states\":" +
+        std::to_string(own_states.size()) + ",\"total_unique_states\":" + std::to_string(written.size()) + "}\n");
+    printf("Fallback discovery inputs: %zu preferred game states, %zu total unique states\n", own_states.size(), written.size());
 
     // fragment shaders: many states differ only in what the source doesn't depend on (blending, say)
     std::map<std::string, u32> ps_sources;
@@ -173,6 +212,7 @@ int main(int argc, char **argv) {
         return i;
     };
     const u32 blit_ps = add_ps(gen_blit_fs());
+    ps_index[fnv64(kDepthCopyKey, strlen(kDepthCopyKey))] = add_ps(gen_depth_copy_fs());
     const u32 fallback_ps = add_ps("#version 450\nlayout(location = 0) in vec4 vColor;\nlayout(location = 0) out vec4 FragColor;\nvoid main() { FragColor = vColor; }\n");
     const u32 fallback_tex_ps = add_ps("#version 450\nlayout(location = 0) in vec4 vColor;\nlayout(location = 1) in vec4 vTc01;\nlayout(location = 0) out vec4 FragColor;\n"
                                        "layout(binding = 0) uniform sampler2D t0;\nvoid main() { FragColor = clamp(vColor, 0.0, 1.0) * texture(t0, vTc01.xy); }\n");
@@ -189,6 +229,10 @@ int main(int argc, char **argv) {
     }
     ps_index[fnv64(kUberKey, strlen(kUberKey))] = add_ps(gen_uber_fs(false));
     ps_index[fnv64(kUberLitKey, strlen(kUberLitKey))] = add_ps(gen_uber_fs(true));
+    for (bool lit : {false, true}) for (u32 mask = 0; mask < 8; mask++) {
+        const std::string key = uber_family_key(lit, mask);
+        ps_index[fnv64(key.data(), key.size())] = add_ps(gen_uber_fs(lit, mask));
+    }
     ps_index[fnv64(kEtc1Key, strlen(kEtc1Key))] = add_ps(gen_etc1_fs(false));
     ps_index[fnv64(kEtc1A4Key, strlen(kEtc1A4Key))] = add_ps(gen_etc1_fs(true));
     for (u32 fmt = 0; fmt < 12; fmt++) {
@@ -214,7 +258,14 @@ int main(int argc, char **argv) {
     const u32 passthrough = add_vs(gen_passthrough_vs());
     const u32 blit_vs = add_vs(gen_blit_vs());
     u32 failed = 0;
-    std::set<std::pair<u32, u32>> failed_seen;
+    // Machine-readable failures survive the abbreviated build log. No shader
+    // words or generated source belong in a user-submitted diagnostic report.
+    std::string diagnostics = "stage\tprogram_id\tentry\tvariant\tpc\ttranslator_line\tfeature\n";
+    auto diagnostic = [&](const char *stage, u64 program_id, u32 entry, u32 variant, u32 pc, int line, const char *feature) {
+        diagnostics += std::string(stage) + "\t" + std::to_string(program_id) + "\t" + std::to_string(entry) + "\t" + std::to_string(variant) + "\t" +
+                       std::to_string(pc) + "\t" + std::to_string(line) + "\t" + feature + "\n";
+    };
+    std::set<std::tuple<u64, u32, u32>> failed_seen;
     for (const VsRecord &r : vs_records) {
         std::vector<u32> code = r.code, swz = r.swz;
         const u32 nc = (u32)code.size(), ns = (u32)swz.size();
@@ -246,9 +297,10 @@ int main(int argc, char **argv) {
             u32 inputs = 0;
             const std::string src = gen_vs_glsl(p, r.entry, bm, iu, r.slots, &inputs);
             if (src.empty()) {
-                if (!failed_seen.count({r.entry, bm})) {
-                    failed_seen.insert({r.entry, bm});
+                if (!failed_seen.count({identity, r.entry, bm})) {
+                    failed_seen.insert({identity, r.entry, bm});
                     printf("not translated: entry %03x, bools %04x: shader.cpp line %d gave up at instruction %03x\n", r.entry, bm, gpu::shader_glsl_fail_line, gpu::shader_glsl_fail_at);
+                    diagnostic("vertex", identity, r.entry, bm, gpu::shader_glsl_fail_at, gpu::shader_glsl_fail_line, "translation_rejected");
                 }
                 failed++;
                 continue;
@@ -261,7 +313,11 @@ int main(int argc, char **argv) {
             u32 inputs = 0;
             const bool none[16] = {};  // open bools aren't in the key
             const std::string src = gen_vs_glsl(p, r.entry, 0, iu, r.slots, &inputs, open);
-            if (src.empty()) failed++;
+            if (src.empty()) {
+                printf("not translated: open bools, entry %03x, mask %04x: shader.cpp line %d gave up at instruction %03x\n", r.entry, open, gpu::shader_glsl_fail_line, gpu::shader_glsl_fail_at);
+                diagnostic("vertex_open_bools", identity, r.entry, open, gpu::shader_glsl_fail_at, gpu::shader_glsl_fail_line, "translation_rejected");
+                failed++;
+            }
             else vs_index[vs_variant_key(p, r.entry, none, r.slots, open)] = {add_vs(src), inputs};
         }
     }
@@ -290,6 +346,13 @@ int main(int argc, char **argv) {
         const std::string src = gen_gsx_glsl(vs, r.vs.entry, vbm, (const u8 (*)[4])r.vs.iu, gs, r.gs.entry, gbm, (const u8 (*)[4])r.gs.iu, r.vs_outmask, r.gs_in,
                                              r.gs_perm, r.gs.slots, r.turns, &inputs, &tris);
         if (src.empty() || tris > 0xffff) {
+            // GSX may fail before the vertex translator's diagnostic variables
+            // are updated, so do not attach a stale instruction/line to it.
+            u64 geometry_id;
+            u32 geometry_bools, geometry_loops;
+            shader_entry_info(gs, r.gs.entry, &geometry_id, &geometry_bools, &geometry_loops);
+            diagnostic("geometry_pipeline", geometry_id, r.gs.entry, gbm, 0, 0,
+                       src.empty() ? "translation_rejected" : "triangle_count_limit");
             failed++;
             continue;
         }
@@ -303,6 +366,7 @@ int main(int argc, char **argv) {
     std::string listed;
     for (u32 i : gsx_shaders) listed += std::to_string(i) + "\n";
     write_file(glsl + "/gsx.txt", listed);
+    write_file(out + "/shader-diagnostics.tsv", diagnostics);
     printf("%zu fragment and %zu vertex shaders to compile (%u drawing geometry shaders); %u variants could not be translated\n", ps_files.size(), vs_files.size(),
            gsx, failed);
 

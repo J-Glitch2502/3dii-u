@@ -3,11 +3,18 @@
 #include "loader.h"
 
 #include <set>
+#ifdef __WIIU__
+#include <coreinit/debug.h>
+namespace kernel { bool room_wireless_available(); }
+#endif
 
 namespace kernel {
 
 static std::map<std::string, std::shared_ptr<Service>> services;
 static std::map<std::string, std::shared_ptr<Service>> ports;
+#ifdef RECOMP_RESUMABLE
+static std::map<Service *, u64> checkpoint_calls;
+#endif
 
 int IPC::handles(int pos, std::initializer_list<ObjPtr> objs, bool move) {
     set(pos++, (((u32)objs.size() - 1) << 26) | (move ? 0x10 : 0));
@@ -70,7 +77,29 @@ u32 service_request(std::shared_ptr<Session> s, Thread *t, Lock &lk) {
     }
     t->in_service = s->service->name.c_str();
     t->in_cmd = cmd;
+#ifdef RECOMP_RESUMABLE
+    ++checkpoint_calls[s->service.get()];
+#endif
+#ifdef __WIIU__
+    const auto &service_name = s->service->name;
+    static std::map<std::pair<std::string, u32>, u32> wireless_counts;
+    const bool wireless_service = g_verbose && (g_game.program_id == 0x0004000000176f00ULL ||
+        g_game.program_id == 0x0004000000030800ULL) &&
+        (service_name.rfind("ac:", 0) == 0 || service_name.rfind("nwm:", 0) == 0 ||
+         service_name.rfind("ndm:", 0) == 0 || service_name.rfind("dlp:", 0) == 0 ||
+         service_name.rfind("APT:", 0) == 0 || service_name.rfind("cfg:", 0) == 0);
+    const u32 count = wireless_service ? ++wireless_counts[{service_name, cmd}] : 0;
+    const bool wireless_trace = wireless_service && (count <= 4 || (count & 255) == 0);
+    if (wireless_trace)
+        OSReport("[wireless-ipc] %s request=%08x arg1=%08x arg2=%08x guest-thread=%u\n",
+            service_name.c_str(), cmd, ipc[1], ipc[2], t->id);
+#endif
     s->service->handle(ipc);
+#ifdef __WIIU__
+    if (wireless_trace || (wireless_service && (r32(ipc.buf + 4) & 0x80000000)))
+        OSReport("[wireless-ipc] %s reply=%08x result=%08x value=%08x room-ready=%u\n",
+            service_name.c_str(), r32(ipc.buf), r32(ipc.buf + 4), r32(ipc.buf + 8), room_wireless_available());
+#endif
     const u32 reply_result = r32(ipc.buf + 4);
     if (g_verbose && (reply_result & 0x80000000))
         LOG("[ipc] %s cmd %08x -> error %08x\n", s->service->name.c_str(), cmd, reply_result);
@@ -79,6 +108,7 @@ u32 service_request(std::shared_ptr<Session> s, Thread *t, Lock &lk) {
 
 // ---------------------------------------------------------------- srv:
 struct Srv : Service {
+    SERVICE_CHECKPOINT(Srv, notif, pending)
     std::shared_ptr<Semaphore> notif = std::make_shared<Semaphore>();
     std::vector<u32> pending;
     Srv() : Service("srv:") { notif->max = 64; }
@@ -129,6 +159,7 @@ struct Srv : Service {
 };
 
 struct StubService : Service {
+    SERVICE_CHECKPOINT(StubService)
     explicit StubService(std::string n) : Service(std::move(n)) {}
     void handle(IPC &ipc) override { unimplemented(ipc); }
 };
@@ -148,6 +179,7 @@ const char *system_archive_name(u64 tid) {
 }
 
 struct ErrF : Service {
+    SERVICE_CHECKPOINT(ErrF)
     ErrF() : Service("err:f") {}
     void handle(IPC &ipc) override {
         if (ipc.cmd() == 1) {  // ThrowFatalError
@@ -186,4 +218,43 @@ void init_services() {
     register_all_services();
 }
 
+
+#ifdef RECOMP_RESUMABLE
+void checkpoint_services(checkpoint::Image &im) {
+    if (im.archive) {
+        std::vector<std::shared_ptr<Service>> selected;
+        if (!im.archive->reading) {
+            for (auto &[name, service] : services) {
+                if (service->persistent_supported()) selected.push_back(service);
+                else if (checkpoint_calls[service.get()]) im.archive->fail("an unsupported service was used before saving");
+            }
+        }
+        im.archive->io(selected);
+        if (!im.archive->ok) im.ok = false;
+        return;
+    }
+    for (auto &[name, service] : services) {
+        if (!im.objects.insert(service.get()).second) continue;
+        if (!service->capture(im)) {
+            const auto calls = checkpoint_calls[service.get()];
+            im.validate.push_back([service, calls] {
+                if (checkpoint_calls[service.get()] == calls) return true;
+                LOG("[state] validation failed: unsupported service %s changed (%llu -> %llu)\n", service->name.c_str(), (unsigned long long)calls, (unsigned long long)checkpoint_calls[service.get()]);
+                return false;
+            });
+        }
+    }
+}
+#endif
+
 }  // namespace kernel
+
+#ifdef RECOMP_RESUMABLE
+namespace kernel {
+std::shared_ptr<Service> persistent_service(const std::string &name) {
+    if (auto s = find_service(name)) return s;
+    if (auto s = find_port(name)) return s;
+    return persistent_file_service(name);
+}
+}
+#endif

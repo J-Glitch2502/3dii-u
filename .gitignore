@@ -61,6 +61,7 @@ movable.sed
 # Only the recompiler and stb_truetype (the in-game menu's text) are tracked. The CafeGLSL compilers are downloads, or built by
 # tools/win/build_cafeglsl.ps1.
 /third_party/*
+!/third_party/3ds-link/
 !/third_party/3dsrecomp/
 !/third_party/stb/
 

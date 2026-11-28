@@ -7,7 +7,8 @@ import re
 import shutil
 import tempfile
 
-# Installed releases keep these IDs; new games use the 0x3D prefix.
+# Installed releases keep these IDs. Native-update-capable games use 0x1D;
+# legacy 0x3D titles remain accepted for existing Homebrew/development builds.
 LEGACY_IDS = {0x10334453, 0x10334455, 0x10334467, 0x10334477, 0x10334478, 0x10334479,
               0x10334480, 0x10334483, 0x10334484, 0x10334485, 0x10334486}
 NAND_DIRS = {'nand', 'slc', 'slccmpt', 'mlc', 'mlc01', 'storage_slc', 'storage_slccmpt',
@@ -16,7 +17,7 @@ NAND_DIRS = {'nand', 'slc', 'slccmpt', 'mlc', 'mlc01', 'storage_slc', 'storage_s
 
 def check_title_id(title_id):
     low = title_id & 0xffffffff
-    if title_id >> 32 not in (0x00050000, 0x0005000e) or (low >> 24 != 0x3d and low not in LEGACY_IDS):
+    if title_id >> 32 not in (0x00050000, 0x0005000e) or (low >> 24 not in (0x1d, 0x3d) and low not in LEGACY_IDS):
         raise ValueError('Refusing a title ID outside 3Dii U: existing console tickets must not be replaced.')
 
 

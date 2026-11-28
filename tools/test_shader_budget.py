@@ -70,7 +70,7 @@ def fixtures():
     def texture(src, dst):
         return [2, 1 << 23, *exported(0), 16 | src << 16, dst, 0, 0]
 
-    cases = [(n, gfd(n), n in (48, 49, 124), {0} if n in (49, 124) else set())
+    cases = [(n, gfd(n), n in (48, 49, 124, None), {0} if n in (49, 124) else set())
              for n in (48, 49, 124, 125, 0, None)]
     cases += [
         ('TEX source', gfd(4, vs_words=texture(4, 0)), False, set()),
@@ -163,7 +163,7 @@ def main():
                          'void begin_blit()', 'void gfx_thread_init()'):
                 assert 'shader_mode();' in function(backend, name), name
             worker = source('port/wiiu/shader_compile.cpp').read_text()
-            assert worker.count('registers, shader_budget::kOrdinary') == 2
+            assert worker.count('registers, shader_budget::kOrdinary') == 1  # Physical-SD GLSL journal; redirected native-GFD cache deliberately deferred.
             assert 'GX2SetShaderMode' not in worker and 'GX2DrawDone' not in worker
 
         exe = out / 'test_shader_budget.exe'
@@ -201,7 +201,7 @@ def main():
                 failures.append((name, 'accept/drop mismatch', message))
             if name == 'invalid GSX policy' and good and struct.unpack_from('>I', idx.read_bytes(), 12)[0] != 0:
                 failures.append((name, 'invalid GSX not dropped', message))
-            if name is None and not good and 'no vertex programs discovered' not in message:
+            if name is None and not good and 'empty shader pack' not in message:
                 failures.append((name, 'empty diagnostic', message))
             if name == 0 and not good and 'zero-register metadata' not in message:
                 failures.append((name, 'zero diagnostic', message))

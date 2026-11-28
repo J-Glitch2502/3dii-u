@@ -2,6 +2,7 @@
 #include "surface_readback.h"
 #include "scaled_copy.h"
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -65,7 +66,7 @@ struct Surface {
     u64 last_use = 0, drawn = 0, written_after = 0;
     bool gpu_newer = false, guest_newer = false, lcd_bottom = false, linear = false;
     bool copy = false, gpu_chain = false;
-    bool clear_pending = false, written_since_flush = false;
+    bool clear_pending = false, written_since_flush = false, first_use = false;
     surface_readback::Spans written;
     Texture tex;
     ColorBuffer cb{};

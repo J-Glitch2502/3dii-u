@@ -273,15 +273,56 @@ def normal(s):
             s['lcfg'] &= ~(3 << 12 | 15 << 16)
             s['lights'] = [w & ~(1 << 9) for w in s['lights']]
         s['lsel'] = [w if w & 1 else 0 for w in s['lsel']]
-        if not any(lt & (1 << 8) for lt in s['lights'][:s['lcfg'] & 15]):
-            s['lsel'][2] &= ~(7 << 2)
+        lights = []
+        for w in s['lights']:
+            # Per-draw spotlight enable is carried by Light.att.z.
+            w &= ~256
+            if not s['lcfg'] & (1 << 15) or not s['lcfg'] & ((1 << 17) | (1 << 18)):
+                w &= ~512
+            if not w & 128 and not s['lsel'][2] & 1:
+                w &= ~7
+            lights.append(w)
+        s['lights'] = lights
     return s
 
 
-def records(path):
-    """fragment keys in a log, or in a console's miss list (tagged records, as misses_to_log.py reads them)"""
-    with open(path, 'rb') as f:
-        return [key for key in fragment_keys(f.read()) if key and len(key) % 4 == 0]
+def records(path, allow_partial=False):
+    """Read mixed miss logs, retaining only fragment keys; reject partial records."""
+    with open(path, 'rb') as source:
+        d = source.read()
+    if allow_partial:
+        from dvlb_to_log import fragment_keys
+        return [key for key in fragment_keys(d) if key and len(key) % 4 == 0]
+    p, out = 0, []
+    def require(at, size):
+        if size < 0 or at > len(d) or size > len(d) - at:
+            raise ValueError(f'{path}: truncated shader record at {p}')
+    while p < len(d):
+        require(p, 4)
+        tag = d[p:p + 4]
+        if tag in (b'VS  ', b'GS  '):
+            require(p, 16)
+            _, nc, ns = struct.unpack_from('<III', d, p + 4)
+            if nc > 4096 or ns > 4096:
+                raise ValueError(f'{path}: oversized shader program at {p}')
+            size = 16 + (nc + ns) * 4 + (56 if tag == b'VS  ' else 0)
+            require(p, size); p += size
+            continue
+        if tag == b'GSX ':
+            require(p, 8)
+            n = struct.unpack_from('<I', d, p + 4)[0]
+            if n > 1 << 20:
+                raise ValueError(f'{path}: oversized geometry record at {p}')
+            require(p, 8 + n); p += 8 + n
+            continue
+        q = p + 4 if tag == b'FS  ' else p
+        require(q, 4)
+        n = struct.unpack_from('<I', d, q)[0]
+        if n < 4 or n > 4096 or n % 4:
+            raise ValueError(f'{path}: not a fragment log at {p}')
+        require(q + 4, n)
+        out.append(d[q + 4:q + 4 + n]); p = q + 4 + n
+    return out
 
 
 def tex_needed(s):
@@ -484,9 +525,9 @@ def main():
     keys = set()
     for f in glob.glob(logs + '/*.bin'):
         b = os.path.basename(f)
-        if b.startswith('other_') or b in (OUT, 'dvlb.bin', 'vs_log.bin', 'abi_vs_log.bin', 'variants.bin', 'confirmed.bin') or b.endswith('_vs.bin'):
+        if b.startswith(('other_', 'preserved_')) or b in (OUT, 'neighborhood_fs.bin', 'dvlb.bin', 'vs_log.bin', 'abi_vs_log.bin', 'variants.bin', 'confirmed.bin') or b.endswith('_vs.bin'):
             continue
-        (held if holdout and 'console' in b else keys).update(records(f))
+        (held if holdout and 'console' in b else keys).update(records(f, allow_partial=True))
     for k in keys:
         assert encode(decode(k)) == k, 'key layout changed: update decode() and encode() from fs_key.inc'
     states = [normal(decode(k)) for k in keys]

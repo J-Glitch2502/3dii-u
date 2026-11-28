@@ -10,11 +10,15 @@ CONTRIBUTORS = 'sennecaelen, Clone-34242342, creeper88-boy, Mertoxx07, matte-oss
 
 # (what, by whom, licence, where): the projects whose code is in the app or in the games it makes
 UPSTREAM = [
+    ('3DS-Link room transport and Download Play, derived from Azahar/Citra', 'gionko and contributors',
+     'GPL-2.0-or-later', 'https://github.com/gionko/3DS-Link'),
+    ('RPXLoadingModule with generic Homebrew updates', "wiiu-env and this fork's contributors", 'GPL-3.0',
+     'https://github.com/wiiu-env/RPXLoadingModule'),
     ('3dsrecomp, the recompiler and runtime 3Dii U is built on', 'Nathan Soufflet (nathsou)', 'EUPL-1.2',
      'https://github.com/nathsou/3dsrecomp'),
     ('devkitPPC (GCC, Binutils, newlib) and wut', 'devkitPro and the wut authors', 'GPL-3.0, BSD-style, Zlib',
      'https://devkitpro.org'),
-    ('wut-tools (elf2rpl)', 'devkitPro', 'GPL-2.0-or-later', 'https://github.com/devkitPro/wut-tools'),
+    ('wut-tools (elf2rpl, wuhbtool)', 'devkitPro', 'GPL-2.0-or-later', 'https://github.com/devkitPro/wut-tools'),
     ('CafeGLSL, the Wii U shader compiler', 'Exzap, on Mesa', 'MIT', 'https://github.com/Exzap/CafeGLSL'),
     ('FFmpeg\'s AAC decoder', 'the FFmpeg developers', 'LGPL-2.1-or-later', 'https://ffmpeg.org'),
     ('makerom (Project_CTR)', '3DSGuy, applestash, Jakcron', 'MIT', 'https://github.com/3DSGuy/Project_CTR'),

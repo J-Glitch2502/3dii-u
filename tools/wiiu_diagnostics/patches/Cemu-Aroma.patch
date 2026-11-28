@@ -1,0 +1,2869 @@
+diff --git a/README-AROMA.md b/README-AROMA.md
+index 01b01823..5b81ec62 100644
+--- a/README-AROMA.md
++++ b/README-AROMA.md
+@@ -876,3 +876,90 @@ Menu v0.4.1**. The session used Xvfb, Vulkan and zero TV/GamePad volume.
+ The native backend's plugin directory was empty, so this verifies menu
+ entry and rendering. Native plugin registration and settings changes
+ remain unverified. [GamePad capture](docs/images/aroma-config-wii-street-u.png)
++
++
++## Four-plugin compatibility validation — 2026-11-18
++
++The isolated Linux test uses **Aroma Base Plugin, FTPiiU, Homebrew on Wii U Menu,
++and WiiLoad**, with their required WUMS modules. The guest WUPS backend discovers
++and loads the plugins from the active emulated SD environment; Cemu does not map
++a second copy of each plugin when that backend is present.
++
++This update fixes the following emulator-side problems:
++
++- Missing module imports prevented the shared backend from initializing. Added
++  the default AppIO completion queue and filesystem callback worker, settings
++  launch support, positioned FSA reads and the required filesystem helpers.
++- WUMS loader-only allocator hooks incorrectly disabled every module lifecycle
++  hook. Cemu now recognizes those hooks while retaining ownership of RPL memory.
++- Runtime WUMS export tables disagreed with Cemu's linker substitutions. Guest
++  dynamic lookups now see the same mapped-memory allocator slots and kernel-copy
++  implementation as static imports.
++- ContentRedirectionModule calls private Cafe OS FSA request builders at fixed
++  firmware addresses. Cemu maps those addresses to its existing request builders
++  and allocates their recompiler lookup blocks. Mapping memory alone was not
++  sufficient: a compiled indirect call otherwise faulted in the jump table.
++- Homebrew on Menu needs the production-settings serial fields. These now read
++  the existing EEPROM dump rather than remaining empty. Identifying values are
++  not added to these documentation or test reports.
++- Added the Mocha API handshake, active-environment path and filesystem-client
++  permission compatibility needed by these plugins. Unsupported IOSU operations
++  still return errors.
++- Unmapped addresses no longer pass `OSEffectiveToPhysical`; `OSIsAddressValid`
++  is implemented. This prevented a diagnostic thread from treating an invalid
++  pointer as readable during Kirby's exit.
++- Account finalization and per-thread run-quantum support are available to small
++  homebrew executables as well as larger ports.
++- The Python debugger can stop before system/plugin startup and retain its
++  listener across an executable reload.
++
++### Verified behavior
++
++| Test | Result |
++| --- | --- |
++| Four plugins, guest WUPS backend, Kirby Triple Deluxe | Reached the first rendered frame in multicore recompiler mode |
++| FTPiiU upload/download | 4,096 bytes matched SHA-256; test file deleted; passed in interpreter and recompiler modes |
++| WiiLoad diagnostic receiver to replacement RPX | Replacement executable printed its unique entry marker |
++| Kirby to replacement RPX through native WiiLoad | Replacement entry marker confirmed after normal title exit |
++| Identity during RPX-only reload | Same title ID and base RPX hash; updated RPX hash changed |
++| Debugger after reload | Python reattached and resumed the replacement executable |
++| FTP after reload | Upload/download round trip still passed |
++| Python debugger unit tests | 15 passed |
++
++WiiLoad's transfer test uses a 50,625-byte diagnostic RPX. Receiving a TCP payload
++alone is not the success criterion: the replacement's entry marker must appear.
++
++### Reproducing transfers
++
++On Linux, use `--aroma-ftp-port 2121` to explicitly map the guest FTP listener on
++port 21 to an unprivileged host port. The guest still observes port 21. Connect to
++the host address shown by the listener; it may bind the PC's LAN address rather
++than loopback.
++
++```sh
++python3 tools/python/aroma_ftp_smoke_test.py --host YOUR_PC_IP --port 2121
++python3 tools/python/wiiload_send.py rebuilt.rpx --host 127.0.0.1
++```
++
++The sender uses WiiLoad protocol 0.4 without compression. The tested WiiLoad
++plugin's compressed file path selects the same temporary filename for input and
++output and later removes it. An uncompressed transfer avoids that separate
++plugin problem; the plugin binary was not patched for this test.
++
++Cemu's Mocha handoff currently verifies **RPX-only reloads using the current
++title's assets and save identity**. It validates the SD path, bounded file slice
++and RPX header, then consumes the prepared executable on the scheduled reload.
++It does not establish compatibility with arbitrary new WUHB content mounts or
++prove that the full Wii U Menu homebrew interface works. Raw SLC, optical-disc
++and USB device access is also not implemented by this test setup; those mount
++requests can report errors while SD FTP works.
++
++The MemoryMapping and kernel-copy services use Cemu's flat mapped address space.
++These tests validate the plugin paths above, not full Wii U kernel emulation or
++hardware-equivalent memory pressure.
++
++### Native spinlock comparison (2026-11-18)
++
++A hardware capture from a 3Dii U title stopped in coreinit's uninterruptible heap lock. Disassembling the locally dumped coreinit showed ownership is cleared before scheduling is restored. The local HLE release now follows that order, and OSIsInterruptEnabled is exported (it previously existed only as an internal helper). A native PowerPC probe installed the same four acquisition/release tracing wrappers used by the hardware diagnostic module and passed 24 transitions: recursive and ordinary locks, with the interrupt mask initially disabled and enabled, restored afterward. Evidence is retained locally with the Aroma flight recorder validation artifacts.
++
++This does not make HLE scheduling hardware-equivalent. The single-core wait still deliberately yields in an uninterruptible state to prevent the emulator itself from deadlocking. Such a successful emulator run cannot establish that native module contention will be safe on Wii U hardware. The tracing hooks preserve lock semantics and do not force-release locks.
+diff --git a/README-PYTHON.md b/README-PYTHON.md
+index d5ad8d8d..8598910d 100644
+--- a/README-PYTHON.md
++++ b/README-PYTHON.md
+@@ -101,3 +101,18 @@ connects. Alternating native code hooks were checked against the executing
+ physics timestep. A core can finish an already-running translated block after a
+ write, so wait for the changed code to execute before taking measurements.
+ Other operating systems have not been tested.
++
++
++### Debugging Aroma startup and reloads
++
++Add `--python-debug-start-paused` to stop at the system startup entry before
++Aroma modules and plugins execute. This also enables the Python debugger. Attach
++with `CemuDebug`, inspect the initial state, and leave the context to resume.
++This is earlier than the title's ordinary entry breakpoint, which can be too late
++for plugin initialization failures. The listener remains available across title
++reloads, including the verified WiiLoad RPX-only handoff.
++
++The transfer helpers are `tools/python/aroma_ftp_smoke_test.py` (upload, retrieve,
++compare and delete a temporary SD file) and `tools/python/wiiload_send.py`
++(uncompressed RPX transfer to the real WiiLoad plugin). A completed send does
++not by itself prove execution; confirm a build marker in the guest console log.
+diff --git a/src/Cafe/Aroma/WupsLoader.cpp b/src/Cafe/Aroma/WupsLoader.cpp
+index b7ad5912..4a3194a5 100644
+--- a/src/Cafe/Aroma/WupsLoader.cpp
++++ b/src/Cafe/Aroma/WupsLoader.cpp
+@@ -9,6 +9,7 @@
+ #include "Cafe/OS/libs/coreinit/coreinit.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_MEM_ExpHeap.h"
+ #include "Common/StackAllocator.h"
++#include "Cafe/Filesystem/fsc.h"
+ 
+ #include <rapidjson/document.h>
+ #include <rapidjson/istreamwrapper.h>
+@@ -82,6 +83,8 @@ enum class ModuleHookType : uint32
+ 	AllApplicationStartsDone = 18,
+ 	AllApplicationEndsDone = 19,
+ 	AllApplicationRequestsExitDone = 20,
++	GetCustomRPLAllocator = 21,
++	ClearAllocatedRPLMemory = 22,
+ 	InitThread = 23,
+ 	InitReentFunctions = 24,
+ };
+@@ -583,6 +586,8 @@ void LinkModules(const fs::path& directory)
+ 		for (const auto& entry : declarations.exports)
+ 		{
+ 			auto address = entry.address;
++			if (metadata.exportName == "homebrew_kernel" && entry.name == "KernelCopyData" && !entry.isData)
++				address = RPLLoader_MakePPCCallable(CopyGuestPhysicalMemory);
+ 			if (metadata.exportName == "homebrew_memorymapping")
+ 			{
+ 				address = ResolveMappedMemory(entry.name, entry.isData);
+@@ -674,6 +679,10 @@ void LinkModules(const fs::path& directory)
+ 		{
+ 			switch (static_cast<ModuleHookType>(hook.type))
+ 			{
++			// Cemu owns RPX/RPL image allocations and releases them at title exit.
++			// These two WUMS loader hooks are not guest application lifecycle hooks.
++			case ModuleHookType::GetCustomRPLAllocator:
++			case ModuleHookType::ClearAllocatedRPLMemory:
+ 			case ModuleHookType::InitMalloc:
+ 			case ModuleHookType::FiniMalloc:
+ 			case ModuleHookType::InitNewlib:
+@@ -721,6 +730,24 @@ void LinkModules(const fs::path& directory)
+ 	for (const auto* module : installationOrder)
+ 	{
+ 		InstallImage(module->placement, module->linkedSections);
++		// AromaBaseModule's guest OSDynLoad hooks consult this table directly.
++		// Keep it consistent with the linker/HLE export map (especially mapped
++		// allocator function-pointer slots), rather than exposing console code.
++		for (size_t i = 0; i < module->linkedSections.size(); ++i)
++		{
++			const auto& section = module->linkedSections[i];
++			if (section.name != ".wums.exports")
++				continue;
++			auto* table = reinterpret_cast<uint32be*>(memory_getPointerFromVirtualOffset(module->placement.addresses[i]));
++			for (size_t row = 0; row < section.data.size() / 12; ++row)
++			{
++				const auto* name = MEMPTR<const char>(uint32(table[row * 3 + 1])).GetPtr();
++				const auto found = exports.find(ExportKey(module->metadata.exportName, name, table[row * 3] == 1));
++				if (found != exports.end())
++					table[row * 3 + 2] = found->second;
++			}
++		}
++
+ 		if (entries)
+ 		{
+ 			auto& entry = *entries++;
+@@ -762,7 +789,27 @@ void LinkModules(const fs::path& directory)
+ 	if (canDispatch && !s_pluginHeapAddress)
+ 		s_pluginHeapAddress = RPLLoader_AllocateBootDataSpace(kPluginHeapSize, 0x1000);
+ 	if (canDispatch)
++	{
++		const auto kernelCopy = exports.find(ExportKey("homebrew_kernel", "KernelCopyData", false));
++		if (kernelCopy != exports.end())
++			kernelCopy->second = RPLLoader_MakePPCCallable(CopyGuestPhysicalMemory);
++		exports.emplace(ExportKey("homebrew_kernel", "CemuAllocateCodeCave", false),
++			RPLLoader_MakePPCCallable(+[](PPCInterpreter_t* cpu) {
++				const auto size = cpu->gpr[3];
++				if (!size || size > 0x4000)
++					return osLib_returnFromFunction(cpu, 0);
++				const auto cave = RPLLoader_AllocateCodeCaveMem(64, size);
++				if (cave)
++					s_lowDataAllocations.push_back(cave);
++				osLib_returnFromFunction(cpu, cave.GetMPTR());
++			}));
+ 		s_moduleExports = std::move(exports);
++	}
++}
++
++bool HasNativePluginBackend()
++{
++	return std::ranges::find(s_moduleNames, "homebrew_wupsbackend") != s_moduleNames.end();
+ }
+ 
+ uint32 FindModuleHandle(std::string_view name)
+@@ -1116,3 +1163,89 @@ void ResetPlugin()
+ 	s_contexts.clear();
+ }
+ }
++
++namespace Aroma
++{
++namespace
++{
++std::mutex s_preparedRPXMutex;
++std::optional<std::vector<uint8>> s_preparedRPX;
++std::optional<uint64> s_preparedRPXTitle;
++bool IsHomebrewWrapper(uint64 titleId)
++{
++	// Mocha substitutes H&S (or Daily Log) with the prepared homebrew image.
++	const auto regionalBase = titleId & ~uint64(0x300);
++	return regionalBase == 0x000500101004e000ull || regionalBase == 0x000500101004b000ull;
++}
++}
++
++bool PrepareHomebrewRPX(std::string_view sdPath, uint32 offset, uint32 size)
++{
++	const fs::path relative(sdPath);
++	if (sdPath.empty() || relative.is_absolute() || sdPath.find('\\') != std::string_view::npos)
++		return false;
++	for (const auto& component : relative)
++		if (component == ".." || component == ".")
++			return false;
++	const std::string path = "/vol/external01/" + relative.generic_string();
++	sint32 status;
++	auto* file = fsc_open(path.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
++	if (!file)
++		return false;
++	const uint32 total = fsc_getFileSize(file);
++	if (!size && offset <= total)
++		size = total - offset;
++	if (offset > total || size > total - offset || size < 52 || size > 64 * 1024 * 1024)
++	{
++		fsc_close(file);
++		return false;
++	}
++	std::vector<uint8> bytes(size);
++	fsc_setFileSeek(file, offset);
++	const auto read = fsc_readFile(file, bytes.data(), size);
++	fsc_close(file);
++	constexpr uint8 magic[] = {0x7f, 'E', 'L', 'F', 1, 2, 1, 0xca, 0xfe};
++	if (read != size || memcmp(bytes.data(), magic, sizeof(magic)) ||
++		bytes[16] != 0xfe || bytes[17] != 1 || bytes[18] != 0 || bytes[19] != 20)
++		return false;
++	std::lock_guard lock(s_preparedRPXMutex);
++	s_preparedRPX = std::move(bytes);
++	s_preparedRPXTitle.reset();
++	cemuLog_log(LogType::Force, "Aroma Mocha: Prepared SD RPX {} ({} bytes at offset {})", sdPath, size, offset);
++	return true;
++}
++
++void CancelPreparedHomebrewRPX()
++{
++	std::lock_guard lock(s_preparedRPXMutex);
++	s_preparedRPX.reset();
++	s_preparedRPXTitle.reset();
++}
++
++bool HasPreparedHomebrewWrapper(uint64 titleId)
++{
++	std::lock_guard lock(s_preparedRPXMutex);
++	return IsHomebrewWrapper(titleId) && s_preparedRPX.has_value();
++}
++
++bool ArmPreparedHomebrewRPX(uint64 wrapperTitleId, uint64 currentTitleId)
++{
++	std::lock_guard lock(s_preparedRPXMutex);
++	if (!IsHomebrewWrapper(wrapperTitleId) || !s_preparedRPX)
++		return false;
++	s_preparedRPXTitle = currentTitleId;
++	cemuLog_log(LogType::Force, "Aroma Mocha: Homebrew wrapper reload retains title {:016x} content and saves", currentTitleId);
++	return true;
++}
++
++std::optional<std::vector<uint8>> TakePreparedHomebrewRPX(uint64 titleId)
++{
++	std::lock_guard lock(s_preparedRPXMutex);
++	if (!s_preparedRPXTitle)
++		return std::nullopt;
++	auto result = *s_preparedRPXTitle == titleId ? std::move(s_preparedRPX) : std::nullopt;
++	s_preparedRPXTitle.reset();
++	s_preparedRPX.reset();
++	return result;
++}
++}
+diff --git a/src/Cafe/Aroma/WupsLoader.h b/src/Cafe/Aroma/WupsLoader.h
+index a5832db5..b5bedd02 100644
+--- a/src/Cafe/Aroma/WupsLoader.h
++++ b/src/Cafe/Aroma/WupsLoader.h
+@@ -2,6 +2,13 @@
+ 
+ namespace Aroma
+ {
++bool HasNativePluginBackend();
++// Mocha RPX-only reload: retain the active title's content and save identity.
++bool PrepareHomebrewRPX(std::string_view sdPath, uint32 offset, uint32 size);
++void CancelPreparedHomebrewRPX();
++bool HasPreparedHomebrewWrapper(uint64 titleId);
++bool ArmPreparedHomebrewRPX(uint64 wrapperTitleId, uint64 currentTitleId);
++std::optional<std::vector<uint8>> TakePreparedHomebrewRPX(uint64 titleId);
+ void LinkModules(const fs::path& directory);
+ void MapPlugin(const fs::path& path);
+ uint32 FindModuleHandle(std::string_view name);
+diff --git a/src/Cafe/CafeSystem.cpp b/src/Cafe/CafeSystem.cpp
+index 271cc191..6b9fa0b9 100644
+--- a/src/Cafe/CafeSystem.cpp
++++ b/src/Cafe/CafeSystem.cpp
+@@ -1,3 +1,4 @@
++#include "Cafe/OS/libs/coreinit/coreinit.h"
+ #include "Cafe/Aroma/WupsLoader.h"
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "WindowSystem.h"
+@@ -150,6 +151,16 @@ void LoadMainExecutable()
+ 	// extract and load RPX
+ 	uint32 rpxSize = 0;
+ 	uint8* rpxData = fsc_extractFile(_pathToExecutable.c_str(), &rpxSize);
++	if (auto prepared = Aroma::TakePreparedHomebrewRPX(CafeSystem::GetForegroundTitleId()))
++	{
++		free(rpxData);
++		rpxSize = static_cast<uint32>(prepared->size());
++		rpxData = static_cast<uint8*>(malloc(rpxSize));
++		if (rpxData)
++			memcpy(rpxData, prepared->data(), rpxSize);
++		cemuLog_log(LogType::Force, "Aroma Mocha: Loading prepared executable ({} bytes); existing assets and save identity retained", rpxSize);
++	}
++
+ 	if (rpxData == nullptr)
+ 	{
+ 		cemuLog_log(LogType::Force, "Failed to load \"{}\"", _pathToExecutable);
+@@ -198,7 +209,7 @@ void LoadMainExecutable()
+ fs::path getTitleSavePath()
+ {
+ 	const uint64 titleId = CafeSystem::GetForegroundTitleId();
+-	return ActiveSettings::GetMlcPath("usr/save/{:08X}/{:08X}/user/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
++	return ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/user/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
+ }
+ 
+ void InfoLog_TitleLoaded()
+@@ -403,6 +414,9 @@ void cemu_initForGame()
+ 			cemuLog_log(LogType::Force, "WUMS: {}", error.what());
+ 		}
+ 	}
++	if (Aroma::HasNativePluginBackend())
++		cemuLog_log(LogType::Force, "Aroma: Guest WUPS backend owns plugin discovery and loading from the emulated SD");
++	else
+ 	for (const auto& plugin : LaunchSettings::AromaPlugins())
+ 	{
+ 		try { Aroma::MapPlugin(plugin); }
+@@ -431,7 +445,8 @@ void cemu_initForGame()
+ 	// check for debugger entrypoint bp
+     if (g_gdbstub)
+     {
+-        g_gdbstub->HandleEntryStop(_entryPoint);
++        g_gdbstub->HandleEntryStop(LaunchSettings::PythonDebugStartPaused()
++            ? PPCInterpreter_makeCallableExportDepr(coreinit_start) : _entryPoint);
+         if (!g_gdbstub->Initialize())
+         {
+             cemuLog_log(LogType::Force, "[GDBStub] Could not start debugger listener; continuing without the entry breakpoint");
+diff --git a/src/Cafe/Filesystem/fscDeviceHostFS.cpp b/src/Cafe/Filesystem/fscDeviceHostFS.cpp
+index 85a04afe..57f27f03 100644
+--- a/src/Cafe/Filesystem/fscDeviceHostFS.cpp
++++ b/src/Cafe/Filesystem/fscDeviceHostFS.cpp
+@@ -108,12 +108,14 @@ void FSCVirtualFile_Host::fscSetFileLength(uint64 endOffset)
+ 	if (m_type != FSC_TYPE_FILE)
+ 		return;
+ 	m_fs->SetPosition(endOffset);
+-	bool r = m_fs->SetEndOfFile();
+-	m_seek = std::min(m_seek, endOffset);
+-	m_fileSize = m_seek;
+-	m_fs->SetPosition(m_seek);
+-	if (!r)
++	if (m_fs->SetEndOfFile())
++	{
++		m_seek = std::min(m_seek, endOffset);
++		m_fileSize = endOffset;
++	}
++	else
+ 		cemuLog_log(LogType::Force, "fscSetFileLength: Failed to set size to 0x{:x}", endOffset);
++	m_fs->SetPosition(m_seek);
+ }
+ 
+ bool FSCVirtualFile_Host::fscDirNext(FSCDirEntry* dirEntry)
+diff --git a/src/Cafe/HW/Espresso/Debugger/GDBStub.cpp b/src/Cafe/HW/Espresso/Debugger/GDBStub.cpp
+index 915f0524..f978a710 100644
+--- a/src/Cafe/HW/Espresso/Debugger/GDBStub.cpp
++++ b/src/Cafe/HW/Espresso/Debugger/GDBStub.cpp
+@@ -289,6 +289,10 @@ GDBServer::~GDBServer()
+ 
+ bool GDBServer::Initialize()
+ {
++	// Title reloads reuse this debugger and its listener. Rebinding would
++	// discard the live socket and disable Python debugging during WiiLoad.
++	if (m_server_socket != INVALID_SOCKET && m_thread.joinable())
++		return true;
+ 	cemuLog_createLogFile(false);
+ 
+ 	if (m_server_socket = socket(PF_INET, SOCK_STREAM, 0); m_server_socket == SOCKET_ERROR)
+diff --git a/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp b/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
+index a7167ba9..2e20a0c2 100644
+--- a/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
++++ b/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp
+@@ -163,7 +163,7 @@ void LatteCP_signalEnterWait()
+ 
+ /*
+ * Read a U32 from the command buffer
+-* If no data is available then wait in a busy loop
++* If no data is available, service pending work before waiting for submission
+ */
+ uint32 LatteCP_readU32Deprc()
+ {
+@@ -191,7 +191,7 @@ uint32 LatteCP_readU32Deprc()
+ 		// still no command data available, do some other tasks
+ 		LatteTiming_HandleTimedVsync();
+ 		LatteAsyncCommands_checkAndExecute();
+-		std::this_thread::yield();
++		TCL::TCLGPUWaitForRBWord();
+ 		performanceMonitor.gpuTime_idleTime.endMeasuring();
+ 	}
+ 	UNREACHABLE;
+diff --git a/src/Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLAttrDecoder.cpp b/src/Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLAttrDecoder.cpp
+index e5e306ac..d0e5b95d 100644
+--- a/src/Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLAttrDecoder.cpp
++++ b/src/Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLAttrDecoder.cpp
+@@ -307,6 +307,10 @@ void LatteDecompiler_emitAttributeDecodeGLSL(LatteDecompilerShader* shaderContex
+ 			// seen in One Piece
+ 			src->addFmt("attrDecoder.xyzw = floatBitsToInt(vec4(attrDataSem{}.xyzw));" _CRLF, attributeInputIndex);
+ 		}
++		else if (attrib->format == Latte::E_HWFMT::HWFMT_8_8_8_8 && attrib->nfa == 2 && attrib->isSigned != 0)
++		{
++			src->addFmt("attrDecoder = floatBitsToUint(vec4(bitfieldExtract(ivec4(attrDataSem{}.xyzw), 0, 8)));" _CRLF, attributeInputIndex);
++		}
+ 		else if (attrib->format == Latte::E_HWFMT::HWFMT_8_8 && attrib->nfa == 0 && attrib->isSigned == 0)
+ 		{
+ 			if( (attrib->offset&3) == 2 && LatteGPUState.glVendor == GLVENDOR_AMD && g_renderer->GetType() == RendererAPI::OpenGL )
+diff --git a/src/Cafe/HW/MMU/MMU.cpp b/src/Cafe/HW/MMU/MMU.cpp
+index 11df031b..040efa5c 100644
+--- a/src/Cafe/HW/MMU/MMU.cpp
++++ b/src/Cafe/HW/MMU/MMU.cpp
+@@ -108,11 +108,12 @@ void MMURange::unmapMem()
+ 	m_isMapped = false;
+ }
+ 
++MMURange mmuRange_COREINIT_COMPAT{0x01000000, 0x00100000, MMU_MEM_AREA_ID::CODE_COREINIT, "COREINIT_COMPAT", MMURange::MFLAG::FLAG_OPTIONAL};
+ MMURange mmuRange_LOW0					{ 0x00010000, 0x000F0000, MMU_MEM_AREA_ID::CODE_LOW0, "CODE_LOW0" }; // code cave (Cemuhook)
+ MMURange mmuRange_TRAMPOLINE_AREA		{ 0x00E00000, 0x00200000, MMU_MEM_AREA_ID::CODE_TRAMPOLINE, "TRAMPOLINE_AREA" }; // code area for trampolines and imports
+-MMURange mmuRange_CODECAVE				{ 0x01800000, 0x00400000, MMU_MEM_AREA_ID::CODE_CAVE, "CODECAVE" }; // code cave area (4MiB)
+-MMURange mmuRange_TEXT_AREA				{ 0x02000000, 0x0C000000, MMU_MEM_AREA_ID::CODE_MAIN, "TEXT_AREA" }; // module text sections go here (0x02000000 to 0x10000000, 224MiB)
+-MMURange mmuRange_CEMU_AREA				{ 0x0E000000, 0x01C00000, MMU_MEM_AREA_ID::CEMU_PRIVATE, "CEMU_AREA", MMURange::MFLAG::FLAG_MAP_EARLY }; // Cemu-only, 28MiB
++MMURange mmuRange_CODECAVE				{ std::getenv("CEMU_CAKE_TEST_LAYOUT") ? 0x00880000u : MEMORY_CODECAVEAREA_ADDR, MEMORY_CODECAVEAREA_SIZE, MMU_MEM_AREA_ID::CODE_CAVE, "CODECAVE" }; // code cave area (4MiB)
++MMURange mmuRange_TEXT_AREA				{ 0x02000000, std::getenv("CEMU_CAKE_TEST_LAYOUT") ? 0x0DC00000u : 0x0C000000u, MMU_MEM_AREA_ID::CODE_MAIN, "TEXT_AREA" }; // module text sections go here (0x02000000 to 0x10000000, 224MiB)
++MMURange mmuRange_CEMU_AREA				{ std::getenv("CEMU_CAKE_TEST_LAYOUT") ? 0x50000000u : 0x0E000000u, 0x01C00000, MMU_MEM_AREA_ID::CEMU_PRIVATE, "CEMU_AREA", MMURange::MFLAG::FLAG_MAP_EARLY }; // Cemu-only, 28MiB
+ MMURange mmuRange_IOSU_AREA				{ 0x0FC00000, 0x00400000, MMU_MEM_AREA_ID::IOSU_PRIVATE, "IOSU_AREA", MMURange::MFLAG::FLAG_MAP_EARLY }; // Cemu-only, 4MiB
+ MMURange mmuRange_MEM2					{ 0x10000000, 0x40000000, MMU_MEM_AREA_ID::MEM2_DATA, "MEM2" }; // main memory area (1GB)
+ MMURange mmuRange_OVERLAY_AREA			{ 0xA0000000, 0x1C000000, MMU_MEM_AREA_ID::OVERLAY, "OVERLAY_AREA", MMURange::MFLAG::FLAG_OPTIONAL }; // has to be requested, 448MiB
+diff --git a/src/Cafe/HW/MMU/MMU.h b/src/Cafe/HW/MMU/MMU.h
+index 8a685686..d66ec0fb 100644
+--- a/src/Cafe/HW/MMU/MMU.h
++++ b/src/Cafe/HW/MMU/MMU.h
+@@ -22,6 +22,7 @@ enum class MMU_MEM_AREA_ID
+ {
+ 	CODE_LOW0,
+ 	CODE_TRAMPOLINE,
++	CODE_COREINIT,
+ 	CODE_CAVE,
+ 	CODE_MAIN,
+ 	MEM2_DATA,
+@@ -279,3 +280,5 @@ namespace MMU
+ }
+ 
+ #define MMU_IsInPPCMemorySpace(__ptr) ((const uint8*)(__ptr) >= memory_base && (const uint8*)(__ptr) < (memory_base + 0x100000000))
++
++extern MMURange mmuRange_COREINIT_COMPAT;
+diff --git a/src/Cafe/IOSU/fsa/iosu_fsa.cpp b/src/Cafe/IOSU/fsa/iosu_fsa.cpp
+index 821cba16..8959c5ca 100644
+--- a/src/Cafe/IOSU/fsa/iosu_fsa.cpp
++++ b/src/Cafe/IOSU/fsa/iosu_fsa.cpp
+@@ -1,3 +1,4 @@
++#include "config/LaunchSettings.h"
+ #include "Cafe/Aroma/ContentRedirection.h"
+ #include "Common/CafeStaticVar.h"
+ #include "fsa_types.h"
+@@ -878,6 +879,11 @@ namespace iosu
+ 				{
+ 					cemu_assert(clientHandle < sFSAClientArray.size());
+ 					cemu_assert(sFSAClientArray[clientHandle].isAllocated);
++					if (LaunchSettings::AromaEnabled() && cmd->args[0] == 0x28)
++					{
++						IOS_ResourceReply(cmd, IOS_ERROR_OK);
++						continue;
++					}
+ 					FSAHandleCommandIoctl(sFSAClientArray.data() + clientHandle, cmd, (FSA_CMD_OPERATION_TYPE)cmd->args[0].value(), MEMPTR<void>(cmd->args[1]), MEMPTR<void>(cmd->args[3]));
+ 				}
+ 				else if (cmd->cmdId == IPCCommandId::IOS_IOCTLV)
+diff --git a/src/Cafe/IOSU/legacy/iosu_crypto.cpp b/src/Cafe/IOSU/legacy/iosu_crypto.cpp
+index 74536a16..ee926f2d 100644
+--- a/src/Cafe/IOSU/legacy/iosu_crypto.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_crypto.cpp
+@@ -49,6 +49,14 @@ void iosuCrypto_readSeepromData(void* output, sint32 wordIndex, sint32 size)
+ 	memcpy(output, seepromMem + wordIndex * 2, size);
+ }
+ 
++bool iosuCrypto_readSeepromBytes(void* output, uint32 wordIndex, uint32 size)
++{
++	if (!hasSeepromMem || !output || wordIndex >= 256 || size > 512 - wordIndex * 2)
++		return false;
++	memcpy(output, seepromMem + wordIndex * 2, size);
++	return true;
++}
++
+ bool iosuCrypto_getDeviceId(uint32* deviceId)
+ {
+ 	uint32be deviceIdBE;
+diff --git a/src/Cafe/IOSU/legacy/iosu_crypto.h b/src/Cafe/IOSU/legacy/iosu_crypto.h
+index d4fc49b9..dc70e316 100644
+--- a/src/Cafe/IOSU/legacy/iosu_crypto.h
++++ b/src/Cafe/IOSU/legacy/iosu_crypto.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
+ void iosuCrypto_init();
++// BSP EE reads: reject missing console data and requests outside the 512-byte EEPROM.
++bool iosuCrypto_readSeepromBytes(void* output, uint32 wordIndex, uint32 size);
+ 
+ bool iosuCrypto_getDeviceId(uint32* deviceId);
+ void iosuCrypto_getDeviceSerialString(char* serialString);
+diff --git a/src/Cafe/IOSU/legacy/iosu_mcp.cpp b/src/Cafe/IOSU/legacy/iosu_mcp.cpp
+index 94cd69cb..ac196c90 100644
+--- a/src/Cafe/IOSU/legacy/iosu_mcp.cpp
++++ b/src/Cafe/IOSU/legacy/iosu_mcp.cpp
+@@ -3,6 +3,9 @@
+ #include "Cafe/OS/libs/nn_common.h"
+ 
+ #include "config/CemuConfig.h"
++#include "config/LaunchSettings.h"
++#include "config/ActiveSettings.h"
++#include "Cafe/Aroma/WupsLoader.h"
+ #include "Cafe/TitleList/GameInfo.h"
+ #include "util/helpers/helpers.h"
+ #include "Cafe/TitleList/TitleList.h"
+@@ -230,6 +233,55 @@ namespace iosu
+ 				{
+ 					cemu_assert(clientHandle < sMCPClientArray.size());
+ 					cemu_assert(sMCPClientArray[clientHandle].isAllocated);
++					// Mocha's public IPC extension is ioctl 100 (decimal), not 0x100.
++					if (LaunchSettings::AromaEnabled() && cmd->args[0] == 100 &&
++						uint32(cmd->args[2]) >= 4 && uint32(cmd->args[4]) >= 4 &&
++						memory_isAddressRangeAccessible(cmd->args[1], cmd->args[2]) &&
++						memory_isAddressRangeAccessible(cmd->args[3], cmd->args[4]))
++					{
++						auto* input = MEMPTR<uint32be>(cmd->args[1]).GetPtr();
++						if (input[0] == 0xfc && uint32(cmd->args[2]) >= 272)
++						{
++							bool prepared = false;
++							if (input[1] == 0x42424242)
++							{
++								Aroma::CancelPreparedHomebrewRPX();
++								prepared = true;
++							}
++							else if (input[1] == 0)
++							{
++								const auto* path = reinterpret_cast<const char*>(input + 4);
++								const auto* end = static_cast<const char*>(memchr(path, 0, 256));
++								prepared = end && Aroma::PrepareHomebrewRPX(std::string_view(path, end - path), input[3], input[2]);
++							}
++							IOS_ResourceReply(cmd, prepared ? IOS_ERROR_OK : IOS_ERROR_INVALID);
++							continue;
++						}
++						if (input[0] == 0xf9) // IPC_CUSTOM_COPY_ENVIRONMENT_PATH
++						{
++							std::error_code ec;
++							const auto directory = LaunchSettings::AromaModuleDirectory();
++							const auto environment = directory ? directory->parent_path() : LaunchSettings::AromaEnvironmentDirectory();
++							const auto relative = fs::relative(environment, ActiveSettings::GetUserDataPath("sdcard"), ec);
++							const auto relativeText = relative.generic_string();
++							const std::string path = "fs:/vol/external01/" + relativeText;
++							if (!ec && !relativeText.empty() && relativeText != ".." && !relativeText.starts_with("../") &&
++								path.size() + 1 <= uint32(cmd->args[4]))
++							{
++								memcpy(MEMPTR<void>(cmd->args[3]).GetPtr(), path.c_str(), path.size() + 1);
++								IOS_ResourceReply(cmd, IOS_ERROR_OK);
++								continue;
++							}
++						}
++						if (input[0] == 0xf8 && uint32(cmd->args[4]) >= 8) // IPC_CUSTOM_GET_MOCHA_API_VERSION
++						{
++							auto* output = MEMPTR<uint32be>(cmd->args[3]).GetPtr();
++							output[0] = 0xcafebabe;
++							output[1] = 1;
++							IOS_ResourceReply(cmd, IOS_ERROR_OK);
++							continue;
++						}
++					}
+ 					IOS_ResourceReply(cmd, (IOS_ERROR)0x80000000);
+ 					continue;
+ 				}
+@@ -260,6 +312,13 @@ namespace iosu
+ 			sMCPIoMsgQueue = (IOSMsgQueueId)IOS_CreateMessageQueue(_m_sMCPIoMsgQueueMsgBuffer.GetPtr(), _m_sMCPIoMsgQueueMsgBuffer.GetCount());
+ 			IOS_ERROR r = IOS_RegisterResourceManager("/dev/mcp", sMCPIoMsgQueue);
+ 			IOS_DeviceAssociateId("/dev/mcp", 11);
++			if (LaunchSettings::AromaEnabled())
++			{
++				// libmocha opens this capability endpoint before negotiating with MCP.
++				// Reuse MCP client lifetime/dispatch; unsupported hax ioctls still fail.
++				IOS_RegisterResourceManager("/dev/iosuhax", sMCPIoMsgQueue);
++				IOS_DeviceAssociateId("/dev/iosuhax", 11);
++			}
+ 			cemu_assert(!IOS_ResultIsError(r));
+ 			sMCPIoThread = std::thread(MCPIoThread);
+ 		}
+diff --git a/src/Cafe/OS/RPL/rpl.cpp b/src/Cafe/OS/RPL/rpl.cpp
+index 7c25ace0..5833e5a7 100644
+--- a/src/Cafe/OS/RPL/rpl.cpp
++++ b/src/Cafe/OS/RPL/rpl.cpp
+@@ -41,6 +41,15 @@ PPCCodeHeap rplLoaderHeap_lowerAreaCodeMem2(nullptr, MEMORY_CODE_TRAMPOLINE_AREA
+ PPCCodeHeap rplLoaderHeap_codeArea2(nullptr, MEMORY_CODEAREA_SIZE);
+ 
+ ChunkedFlatAllocator<64 * 1024> g_heapTrampolineArea;
++// Separate the relocated test title from normal system module allocations.
++constexpr uint32 kCakeTestText = 0x0e180000;
++constexpr uint32 kCakeTestData = 0x10502200;
++static PPCCodeHeap s_cakeTestHeap(nullptr, 0x00c00000);
++
++static bool UsesCakeTestTextHeap(std::string_view name)
++{
++	return std::getenv("CEMU_CAKE_TEST_LAYOUT") && (name == "turbo" || name == "cake_returns");
++}
+ 
+ std::vector<RPLDependency*> s_rplDependencyList;
+ std::vector<RPLModule*> s_rplModuleList;
+@@ -543,9 +552,16 @@ bool RPLLoader_LoadSections(sint32 aProcId, RPLModule* rplLoaderContext)
+ 	uint32 regionLoaderinfoSize = regionMappingTable.region[RPL_MAPPING_REGION_LOADERINFO].endAddress - regionMappingTable.region[RPL_MAPPING_REGION_LOADERINFO].baseAddress;
+ 	uint32 regionTextSize = regionMappingTable.region[RPL_MAPPING_REGION_TEXT].endAddress - regionMappingTable.region[RPL_MAPPING_REGION_TEXT].baseAddress;
+ 
+-	rplLoaderContext->regionMappingBase_data = RPLLoader_AllocateDataSpace(rplLoaderContext, regionDataSize, 0x1000);
++	const bool cakeLayout = std::getenv("CEMU_CAKE_TEST_LAYOUT") && rplLoaderContext->moduleName == "turbo";
++	if (cakeLayout && !rplLoader_applicationHasMemoryControl &&
++	    rplLoader_currentDataAllocatorAddr < kCakeTestData)
++		rplLoader_currentDataAllocatorAddr = kCakeTestData;
++	rplLoaderContext->regionMappingBase_data = RPLLoader_AllocateDataSpace(rplLoaderContext, regionDataSize, cakeLayout ? 0x200 : 0x1000);
+ 	rplLoaderContext->regionMappingBase_loaderInfo = RPLLoader_AllocateDataSpace(rplLoaderContext, regionLoaderinfoSize, 0x1000);
+-	rplLoaderContext->regionMappingBase_text = rplLoaderHeap_codeArea2.alloc(regionTextSize + 0x1000, 0x1000);
++	if (cakeLayout)
++		s_cakeTestHeap.setHeapBase(memory_getPointerFromVirtualOffset(kCakeTestText));
++	auto& textHeap = UsesCakeTestTextHeap(rplLoaderContext->moduleName) ? s_cakeTestHeap : rplLoaderHeap_codeArea2;
++	rplLoaderContext->regionMappingBase_text = textHeap.alloc(regionTextSize + 0x1000, 0x1000);
+ 	rplLoader_maxCodeAddress = std::max(rplLoader_maxCodeAddress, rplLoaderContext->regionMappingBase_text.GetMPTR() + regionTextSize + 0x1000);
+ 	PPCRecompiler_allocateRange(rplLoaderContext->regionMappingBase_text.GetMPTR(), regionTextSize + 0x1000);
+ 
+@@ -1478,9 +1494,11 @@ void RPLLoader_InitState()
+ 	cemu_assert_debug(!rplLoaderHeap_workarea.hasAllocations());
+ 	rplLoaderHeap_lowerAreaCodeMem2.setHeapBase(memory_getPointerFromVirtualOffset(MEMORY_CODE_TRAMPOLINE_AREA_ADDR));
+ 	rplLoaderHeap_codeArea2.setHeapBase(memory_getPointerFromVirtualOffset(MEMORY_CODEAREA_ADDR));
++
+ 	rplLoaderHeap_workarea.setHeapBase(memory_getPointerFromVirtualOffset(MEMORY_RPLLOADER_AREA_ADDR));
+ 	g_heapTrampolineArea.setBaseAllocator(&rplLoaderHeap_lowerAreaCodeMem2);
+     RPLLoader_UnloadAll();
++
+ }
+ 
+ void RPLLoader_BeginCemuhookCRC(RPLModule* rpl)
+@@ -1785,6 +1803,18 @@ void RPLLoader_LinkSingleModule(RPLModule* rplLoaderContext, bool resolveOnlyExp
+ 	else
+ 		RPLLoader_HandleRelocs(rplLoaderContext, sharedImportTracking, 0);
+ 
++	// Model the occupied words observed in the retail loader's text tail.
++	// Only the captured first words are known, so leave the rest untouched.
++	if (!resolveOnlyExports && std::getenv("CEMU_CAKE_TEST_LAYOUT") &&
++	    rplLoaderContext->moduleName == "turbo" &&
++	    rplLoaderContext->regionSize_text >= 0xb03604)
++	{
++		const uint32 text = rplLoaderContext->regionMappingBase_text.GetMPTR();
++		memory_writeU32(text + 0xb03000, 0x3d600103);
++		memory_writeU32(text + 0xb03400, 0x3d600102);
++		memory_writeU32(text + 0xb03600, 0x3d600103);
++	}
++
+ 	RPLLoader_FlushMemory(rplLoaderContext);
+ }
+ 
+@@ -1877,7 +1907,9 @@ void RPLLoader_UnloadModule(RPLDependency* rplDependency, bool skipPPCCalls)
+ 		}
+ 	}
+ 	// release memory
+-	rplLoaderHeap_codeArea2.free(rpl->regionMappingBase_text.GetPtr());
++	auto& textHeap = UsesCakeTestTextHeap(rpl->moduleName)
++		? s_cakeTestHeap : rplLoaderHeap_codeArea2;
++	textHeap.free(rpl->regionMappingBase_text.GetPtr());
+ 	rpl->regionMappingBase_text = nullptr;
+ 
+ 	// for some reason freeing the data allocations causes a crash in MP10 on boot
+@@ -2017,6 +2049,10 @@ void RPLLoader_AddDependency(std::string_view name, bool isMainExecutable)
+ 	RPLDependency* newDependency = new RPLDependency();
+ 	newDependency->isMainExecutable = isMainExecutable;
+ 	newDependency->moduleName = moduleName;
++	if (LaunchSettings::AromaEnabled() && name.starts_with("~/") &&
++	    name.ends_with(".rpl") && name.find("..") == std::string_view::npos &&
++	    name.find('\\') == std::string_view::npos && !name.substr(2).starts_with('/'))
++		newDependency->aromaSDPath = name.substr(2);
+ 	newDependency->referenceCount = 1;
+ 	newDependency->coreinitHandle = rplLoader_currentHandleCounter;
+ 	newDependency->tlsModuleIndex = rplLoader_currentTlsModuleIndex;
+@@ -2203,6 +2239,14 @@ void RPLLoader_LoadDependency(RPLDependency* dependency)
+ 	// attempt to load RPLs from Cemu's /cafeLibs/ directory first
+ 	std::string rplFilename = dependency->moduleName;
+ 	rplFilename.append(dependency->isMainExecutable ? ".rpx" : ".rpl");
++	if (!dependency->aromaSDPath.empty())
++	{
++		const auto path = ActiveSettings::GetUserDataPath("sdcard/{}", dependency->aromaSDPath);
++		auto fileData = FileStream::LoadIntoMemory(path);
++		if (fileData)
++			dependency->rplLoaderContext = RPLLoader_LoadFromMemory(fileData->data(), fileData->size(), rplFilename);
++		return;
++	}
+ 	if (ActiveSettings::LoadSharedLibrariesEnabled() && !dependency->isMainExecutable)
+ 	{
+ 		const auto cafeLibsFilePath = ActiveSettings::GetUserDataPath("cafeLibs/{}", rplFilename);
+@@ -2529,17 +2573,21 @@ private:
+ 	std::vector<allocEntry_t> list_allocatedEntries;
+ };
+ 
+-SimpleHeap<uint32, uint32> heapCodeCaveArea(MEMORY_CODECAVEAREA_ADDR, MEMORY_CODECAVEAREA_SIZE);
++static auto& GetCodeCaveHeap()
++{
++	static SimpleHeap<uint32, uint32> heap(mmuRange_CODECAVE.getBase(), mmuRange_CODECAVE.getSize());
++	return heap;
++}
+ 
+ MEMPTR<void> RPLLoader_AllocateCodeCaveMem(uint32 alignment, uint32 size)
+ {
+-	uint32 addr = heapCodeCaveArea.alloc(size, std::max(alignment, 256u));
++	uint32 addr = GetCodeCaveHeap().alloc(size, std::max(alignment, 256u));
+ 	return MEMPTR<void>{addr};
+ }
+ 
+ void RPLLoader_ReleaseCodeCaveMem(MEMPTR<void> addr)
+ {
+-	heapCodeCaveArea.free(addr.GetMPTR());
++	GetCodeCaveHeap().free(addr.GetMPTR());
+ }
+ 
+ void RPLLoader_UnloadAll()
+@@ -2570,6 +2618,8 @@ void RPLLoader_UnloadAll()
+ 	rplSymbolStorage_unloadAll();
+ 	// free all code imports
+ 	g_heapTrampolineArea.releaseAll();
++
++
+ 	list_mappedFunctionImports.clear();
+ 	g_map_callableExports.clear();
+ 	rplLoader_applicationHasMemoryControl = false;
+diff --git a/src/Cafe/OS/RPL/rpl_structs.h b/src/Cafe/OS/RPL/rpl_structs.h
+index 3b1dae0f..b2740fe2 100644
+--- a/src/Cafe/OS/RPL/rpl_structs.h
++++ b/src/Cafe/OS/RPL/rpl_structs.h
+@@ -226,6 +226,7 @@ struct RPLModule
+ struct RPLDependency
+ {
+ 	std::string moduleName;
++	std::string aromaSDPath;
+ 	bool isMainExecutable{false};
+ 	bool loadAttempted{false};
+ 	bool hleEntrypointCalled{false};
+diff --git a/src/Cafe/OS/libs/TCL/TCL.cpp b/src/Cafe/OS/libs/TCL/TCL.cpp
+index d5ac3110..a537d3c5 100644
+--- a/src/Cafe/OS/libs/TCL/TCL.cpp
++++ b/src/Cafe/OS/libs/TCL/TCL.cpp
+@@ -3,6 +3,7 @@
+ #include "HW/Latte/Core/LattePM4.h"
+ #include "OS/libs/coreinit/coreinit_Time.h"
+ #include "Common/CafeStaticVar.h"
++#include <condition_variable>
+ 
+ namespace TCL
+ {
+@@ -72,6 +73,8 @@ namespace TCL
+ 	std::atomic<uint32> tclRingBufferA[TCL_RING_BUFFER_SIZE];
+ 	std::atomic<uint32> tclRingBufferA_readIndex{0};
+ 	std::atomic<uint32> tclRingBufferA_writeIndex{0};
++	static std::mutex s_ringWaitMutex;
++	static std::condition_variable s_ringWait;
+ 
+ 	// GPU code calls this to grab the next command word
+ 	bool TCLGPUReadRBWord(uint32& cmdWord)
+@@ -85,6 +88,16 @@ namespace TCL
+ 		return true;
+ 	}
+ 
++	void TCLGPUWaitForRBWord()
++	{
++		std::unique_lock lock(s_ringWaitMutex);
++		// Wake periodically for VSync and other work independent of the ring.
++		s_ringWait.wait_for(lock, std::chrono::microseconds(100), [] {
++			return tclRingBufferA_readIndex.load(std::memory_order::relaxed)
++				!= tclRingBufferA_writeIndex.load(std::memory_order::acquire);
++		});
++	}
++
+ 	void TCLWaitForRBSpace(uint32be numU32s)
+ 	{
+ 		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
+@@ -114,7 +127,11 @@ namespace TCL
+ 			cmdLen--;
+ 		}
+ 
+-		tclRingBufferA_writeIndex.store(writeIndex, std::memory_order::release);
++		{
++			std::lock_guard lock(s_ringWaitMutex);
++			tclRingBufferA_writeIndex.store(writeIndex, std::memory_order::release);
++		}
++		s_ringWait.notify_one();
+ 	}
+ 
+ 	#define EVENT_TYPE_TS		5
+diff --git a/src/Cafe/OS/libs/TCL/TCL.h b/src/Cafe/OS/libs/TCL/TCL.h
+index b2be915c..273e07f4 100644
+--- a/src/Cafe/OS/libs/TCL/TCL.h
++++ b/src/Cafe/OS/libs/TCL/TCL.h
+@@ -20,6 +20,7 @@ namespace TCL
+ 
+ 	// called from Latte code
+ 	bool TCLGPUReadRBWord(uint32& cmdWord);
++	void TCLGPUWaitForRBWord();
+ 	void TCLGPUNotifyNewRetirementTimestamp();
+ 
+ 	COSModule* GetModule();
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit.cpp b/src/Cafe/OS/libs/coreinit/coreinit.cpp
+index edf28033..caa92f9e 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit.cpp
+@@ -372,6 +372,7 @@ namespace coreinit
+ 
+ 		void RPLUnmapped() override
+ 		{
++			coreinit::ResetIM();
+ 			ResetAsyncCallback();
+ 			ResetFS();
+ 			coreinit::ShutdownCodeGen();
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_BSP.cpp b/src/Cafe/OS/libs/coreinit/coreinit_BSP.cpp
+index c7f68649..d71cf5a4 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_BSP.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_BSP.cpp
+@@ -1,5 +1,6 @@
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "coreinit_BSP.h"
++#include "Cafe/IOSU/legacy/iosu_crypto.h"
+ 
+ namespace coreinit
+ {
+@@ -12,8 +13,22 @@ namespace coreinit
+ 		return true;
+ 	}
+ 
++	sint32 bspRead(const char* entity, uint8 instance, const char* attribute, uint32 size, void* output)
++	{
++		if (!entity || !attribute || !output)
++			return 0x4000; // BSP_ERROR_INVALID_PARAMETER
++		if (strcmp(entity, "EE") != 0)
++			return 1; // BSP_ERROR_UNKNOWN_ENTITY
++		if (strcmp(attribute, "access") != 0)
++			return 2; // BSP_ERROR_UNKNOWN_ATTRIBUTE
++		if (!size || (size & 1) || size > 512u - uint32(instance) * 2)
++			return 0x80; // BSP_ERROR_SPECIFIED_SIZE_INVALID
++		return iosuCrypto_readSeepromBytes(output, instance, size) ? 0 : 0x1000;
++	}
++
+ 	void InitializeBSP()
+ 	{
+ 		cafeExportRegister("coreinit", bspGetHardwareVersion, LogType::Placeholder);
++		cafeExportRegister("coreinit", bspRead, LogType::Placeholder);
+ 	}
+ }
+\ No newline at end of file
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_DynLoad.cpp b/src/Cafe/OS/libs/coreinit/coreinit_DynLoad.cpp
+index 65016f3a..384e1756 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_DynLoad.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_DynLoad.cpp
+@@ -158,14 +158,18 @@ namespace coreinit
+ 		if (moduleHandle == RPL_INVALID_HANDLE || !Aroma::FindModuleName(moduleHandle).empty())
+ 			return;
+ 
+-		for (const auto& cb : notifyCallbacks) 
++		const auto moduleName = RPLLoader_GetModuleNameByHandle(moduleHandle);
++		if (moduleName.empty())
++			return;
++
++		for (const auto& cb : notifyCallbacks)
+ 		{
++			RPLModule* module = RPLLoader_GetModuleByName(moduleName);
++			if (!module)
++				break;
++
+ 			MEMPTR<OSDynLoad_NotifyData> notifyData;
+ 			notifyData = (OSDynLoad_NotifyData*)OSDynLoad_AllocatorAlloc(sizeof(OSDynLoad_NotifyData), 4);
+-			RPLModule* module = RPLLoader_GetModuleByName(RPLLoader_GetModuleNameByHandle(moduleHandle));
+-
+-			if (!module) 
+-				break;
+ 
+ 			notifyData->name = module->ppcName.GetMPTR();
+ 
+@@ -242,6 +246,10 @@ namespace coreinit
+ 		if (count == 0)
+ 			return 1;
+ 		auto modules = RPLLoader_GetModuleList();
++		const auto unnamed = std::getenv("CEMU_CAKE_TEST_UNNAMED_RPL")
++			? std::ranges::find_if(modules, [](const auto* module) { return module->moduleName == "cake_returns"; })
++			: modules.end();
++		const auto unnamedIndex = static_cast<size_t>(unnamed - modules.begin());
+ 		for (uint32 i = first; i < first + count; i++)
+ 		{
+ 			auto& outEntry = outInfos[i - first];
+@@ -250,19 +258,23 @@ namespace coreinit
+ 				memset(&outEntry, 0, sizeof(OSDynLoad_NotifyData));
+ 				continue;
+ 			}
+-			outEntry.name = modules[i]->ppcName.GetMPTR();
+-
+-			outEntry.textAddr = modules[i]->regionMappingBase_text.GetBEValue();
+-			outEntry.textOffset = modules[i]->regionMappingBase_text.GetMPTR() - modules[i]->regionOrigAddr_text;
+-			outEntry.textSize = modules[i]->regionSize_text;
+-
+-			outEntry.dataAddr = modules[i]->regionMappingBase_data;
+-			outEntry.dataOffset = modules[i]->regionMappingBase_data - modules[i]->regionOrigAddr_data;
+-			outEntry.dataSize = modules[i]->regionSize_data;
+-
+-			outEntry.readAddr = modules[i]->regionMappingBase_data;
+-			outEntry.readOffset = modules[i]->regionMappingBase_data - modules[i]->regionOrigAddr_data;
+-			outEntry.readSize = modules[i]->regionSize_data;
++			// Put the unnamed record first while keeping all other records intact.
++			const auto index = unnamed == modules.end() || i > unnamedIndex
++				? i : (i == 0 ? unnamedIndex : i - 1);
++			const auto* module = modules[index];
++			outEntry.name = unnamed != modules.end() && i == 0 ? nullptr : module->ppcName.GetPtr();
++
++			outEntry.textAddr = module->regionMappingBase_text.GetBEValue();
++			outEntry.textOffset = module->regionMappingBase_text.GetMPTR() - module->regionOrigAddr_text;
++			outEntry.textSize = module->regionSize_text;
++
++			outEntry.dataAddr = module->regionMappingBase_data;
++			outEntry.dataOffset = module->regionMappingBase_data - module->regionOrigAddr_data;
++			outEntry.dataSize = module->regionSize_data;
++
++			outEntry.readAddr = outEntry.dataAddr;
++			outEntry.readOffset = outEntry.dataOffset;
++			outEntry.readSize = outEntry.dataSize;
+ 		}
+ 
+ 		return 1;
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp b/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
+index 261c3000..79c1cbea 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_FS.cpp
+@@ -1,4 +1,6 @@
+ #include "Cafe/Aroma/ContentRedirection.h"
++#include "config/LaunchSettings.h"
++#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+ #include <OS/RPL/rpl.h>
+ #include "config/ActiveSettings.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_SystemInfo.h"
+@@ -155,6 +157,29 @@ namespace coreinit
+ 		return FS_RESULT::SUCCESS;
+ 	}
+ 
++	FS_RESULT FSUnmount(FSClient_t* client, FSCmdBlock_t* cmd, const char* target, FS_ERROR_MASK errorMask)
++	{
++		if (!client || !cmd || !target)
++			return FS_RESULT::ERR_PLACEHOLDER;
++		if (_sdCard01Mounted && s_sdCardMountPath == target)
++		{
++			if (!fsc_unmount(target, FSC_PRIORITY_BASE))
++				return FS_RESULT::ERR_PLACEHOLDER;
++			_sdCard01Mounted = false;
++			s_sdCardMountPath.clear();
++			return FS_RESULT::SUCCESS;
++		}
++		if (_mlc01Mounted && s_mlcMountPath == target)
++		{
++			if (!fsc_unmount(target, FSC_PRIORITY_BASE))
++				return FS_RESULT::ERR_PLACEHOLDER;
++			_mlc01Mounted = false;
++			s_mlcMountPath.clear();
++			return FS_RESULT::SUCCESS;
++		}
++		return FS_RESULT::NOT_FOUND;
++	}
++
+ 	FS_RESULT FSBindMount(FSClient_t* fsClient, FSCmdBlock_t* fsCmdBlock, char* mountPathSrc, char* mountPathOut, FS_ERROR_MASK errMask)
+ 	{
+ 		if (strcmp(mountPathSrc, "/dev/sdcard01") == 0)
+@@ -2446,7 +2471,7 @@ namespace coreinit
+ 		if (result != FSA_RESULT::OK)
+ 			return result;
+ 
+-		result = __FSPrepareCmd_ReadFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~0x2);
++		result = __FSPrepareCmd_ReadFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~FSA_CMD_FLAG_SET_POS);
+ 		if (result == FSA_RESULT::OK)
+ 		{
+ 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+@@ -2456,6 +2481,27 @@ namespace coreinit
+ 		return result;
+ 	}
+ 
++	FSA_RESULT FSAReadFileWithPos(FSAClientHandle client, void* buffer, uint32 size, uint32 count, uint32 pos, FSFileHandle2 handle, uint32 flags)
++	{
++		if (!FSAShimCheckClientHandle(client))
++			return FSA_RESULT::INVALID_CLIENT_HANDLE;
++		StackAllocator<MEMPTR<iosu::fsa::FSAShimBuffer>, 1> shimBuffer;
++		FSA_RESULT result = FSAShimAllocateBuffer(shimBuffer.GetPointer());
++		if (result != FSA_RESULT::OK)
++			return result;
++		result = __FSPrepareCmd_ReadFile(shimBuffer->GetPtr(), client, buffer, size, count, pos, handle, flags | FSA_CMD_FLAG_SET_POS);
++		if (result == FSA_RESULT::OK)
++			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
++		FSAShimFreeBuffer(shimBuffer->GetPtr());
++		return result;
++	}
++
++	FSA_RESULT __FSAShimDecodeIosErrorToFsaStatus(sint32 handle, IOS_ERROR result)
++	{
++		// IOSU's filesystem service already returns FSA status codes here.
++		return __FSADecodeIOSErrorToFSA(result);
++	}
++
+ 	FSA_RESULT FSAWriteFile(FSAClientHandle client, void* buffer, uint32_t size, uint32_t count, FSFileHandle2 handle, uint32_t flags)
+ 	{
+ 		if (!FSAShimCheckClientHandle(client))
+@@ -2466,7 +2512,7 @@ namespace coreinit
+ 		if (result != FSA_RESULT::OK)
+ 			return result;
+ 
+-		result = __FSPrepareCmd_WriteFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~0x2);
++		result = __FSPrepareCmd_WriteFile(shimBuffer->GetPtr(), client, buffer, size, count, 0, handle, flags & ~FSA_CMD_FLAG_SET_POS);
+ 		if (result == FSA_RESULT::OK)
+ 		{
+ 			result = __FSAIPCSubmitCommand(shimBuffer->GetPtr());
+@@ -2680,9 +2726,71 @@ namespace coreinit
+ 		s_fsa_activeClients.clear();
+ 	}
+ 
++
++	// Aroma's content-redirection module calls these firmware-private helpers by
++	// fixed Cafe OS address. Reuse the same request builders as public FS/FSA.
++	static void InitializeAromaFSFirmwareABI()
++	{
++		if (!LaunchSettings::AromaEnabled())
++			return;
++		if (!mmuRange_COREINIT_COMPAT.isMapped())
++			mmuRange_COREINIT_COMPAT.mapMem();
++		PPCRecompiler_allocateRange(mmuRange_COREINIT_COMPAT.getBase(), mmuRange_COREINIT_COMPAT.getSize());
++		const auto install = [](uint32 address, const char* name) {
++			const auto entry = rpl_mapHLEImport(nullptr, "coreinit", name, false);
++			cemu_assert(entry != MPTR_NULL);
++			memory_writeU32(address, memory_readU32(entry));
++			memory_writeU32(address + 4, 0x4e800020); // blr
++		};
++		cafeExportRegister("coreinit", __FSPrepareCmd_ReadFile, LogType::CoreinitFile);
++		install(0x0105facc, "__FSPrepareCmd_ReadFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_WriteFile, LogType::CoreinitFile);
++		install(0x0105fbf4, "__FSPrepareCmd_WriteFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_OpenFile, LogType::CoreinitFile);
++		install(0x0105f988, "__FSPrepareCmd_OpenFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_CloseFile, LogType::CoreinitFile);
++		install(0x0105fe00, "__FSPrepareCmd_CloseFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_GetStatFile, LogType::CoreinitFile);
++		install(0x0105fd98, "__FSPrepareCmd_GetStatFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_QueryInfo, LogType::CoreinitFile);
++		install(0x01060518, "__FSPrepareCmd_QueryInfo");
++		cafeExportRegister("coreinit", __FSPrepareCmd_SetPosFile, LogType::CoreinitFile);
++		install(0x0105fd30, "__FSPrepareCmd_SetPosFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_GetPosFile, LogType::CoreinitFile);
++		install(0x0105fcfc, "__FSPrepareCmd_GetPosFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_IsEof, LogType::CoreinitFile);
++		install(0x0105fd64, "__FSPrepareCmd_IsEof");
++		cafeExportRegister("coreinit", __FSPrepareCmd_TruncateFile, LogType::CoreinitFile);
++		install(0x0105fe34, "__FSPrepareCmd_TruncateFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_Remove, LogType::CoreinitFile);
++		install(0x0105fea8, "__FSPrepareCmd_Remove");
++		cafeExportRegister("coreinit", __FSPrepareCmd_Rename, LogType::CoreinitFile);
++		install(0x0105ffc0, "__FSPrepareCmd_Rename");
++		cafeExportRegister("coreinit", __FSPrepareCmd_FlushFile, LogType::CoreinitFile);
++		install(0x0105fdcc, "__FSPrepareCmd_FlushFile");
++		cafeExportRegister("coreinit", __FSPrepareCmd_ChangeMode, LogType::CoreinitFile);
++		install(0x010603f4, "__FSPrepareCmd_ChangeMode");
++		cafeExportRegister("coreinit", __FSPrepareCmd_OpenDir, LogType::CoreinitFile);
++		install(0x0105f858, "__FSPrepareCmd_OpenDir");
++		cafeExportRegister("coreinit", __FSPrepareCmd_ReadDir, LogType::CoreinitFile);
++		install(0x0105f8ec, "__FSPrepareCmd_ReadDir");
++		cafeExportRegister("coreinit", __FSPrepareCmd_CloseDir, LogType::CoreinitFile);
++		install(0x0105f954, "__FSPrepareCmd_CloseDir");
++		cafeExportRegister("coreinit", __FSPrepareCmd_RewindDir, LogType::CoreinitFile);
++		install(0x0105f920, "__FSPrepareCmd_RewindDir");
++		cafeExportRegister("coreinit", __FSPrepareCmd_MakeDir, LogType::CoreinitFile);
++		install(0x0105f714, "__FSPrepareCmd_MakeDir");
++		cafeExportRegister("coreinit", __FSPrepareCmd_ChangeDir, LogType::CoreinitFile);
++		install(0x0105f458, "__FSPrepareCmd_ChangeDir");
++		cafeExportRegister("coreinit", _FSAStatusToFSStatus, LogType::CoreinitFile);
++		install(0x01067548, "_FSAStatusToFSStatus");
++		cemuLog_log(LogType::Force, "Aroma: Installed Cafe OS private FSA request helpers");
++	}
++
+ 	void InitializeFS()
+ 	{
+ 		sFSInitialized = true;
++		InitializeAromaFSFirmwareABI();
+ 		sFSShutdown = false;
+ 		_sdCard01Mounted = false;
+ 		_mlc01Mounted = false;
+@@ -2696,6 +2804,7 @@ namespace coreinit
+ 		cafeExportRegister("coreinit", FSGetMountSourceNext, LogType::CoreinitFile);
+ 
+ 		cafeExportRegister("coreinit", FSMount, LogType::CoreinitFile);
++		cafeExportRegister("coreinit", FSUnmount, LogType::CoreinitFile);
+ 		cafeExportRegister("coreinit", FSBindMount, LogType::CoreinitFile);
+ 
+ 		// client management
+@@ -2808,6 +2917,8 @@ namespace coreinit
+ 		cafeExportRegister("coreinit", FSATruncateFile, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", FSARemove, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", FSAReadFile, LogType::Placeholder);
++		cafeExportRegister("coreinit", FSAReadFileWithPos, LogType::Placeholder);
++		cafeExportRegister("coreinit", __FSAShimDecodeIosErrorToFsaStatus, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", FSAWriteFile, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", FSAGetStat, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", FSAGetStatusStr, LogType::Placeholder);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_IM.cpp b/src/Cafe/OS/libs/coreinit/coreinit_IM.cpp
+index 85e811c5..e1376938 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_IM.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_IM.cpp
+@@ -1,4 +1,6 @@
+ #include "Cafe/OS/common/OSCommon.h"
++#include "Cafe/OS/libs/coreinit/coreinit.h"
++#include "Cafe/OS/libs/coreinit/coreinit_IM.h"
+ 
+ // APD = Automatic Power Down
+ 
+@@ -121,8 +123,84 @@ namespace coreinit
+ 		osLib_returnFromFunction(hCPU, IM_ERROR_NONE);
+ 	}
+ 
++	// The Wii U Menu subscribes asynchronously to the console's IM events.
++	constexpr uint32 IM_EVENT_SYNC = 1u << 7;
++	constexpr sint32 IM_HANDLE = 1;
++	struct IMNotification
++	{
++		MPTR event{};
++		MPTR callback{};
++		MPTR context{};
++	};
++	static std::mutex s_imMutex;
++	static IMNotification s_imNotification;
++
++	void ResetIM()
++	{
++		std::lock_guard lock(s_imMutex);
++		s_imNotification = {};
++	}
++
++	bool PressConsoleSync()
++	{
++		IMNotification request;
++		{
++			std::lock_guard lock(s_imMutex);
++			request = std::exchange(s_imNotification, {});
++		}
++		if (!request.callback)
++		{
++			cemuLog_log(LogType::Force, "Console SYNC pressed without an active IM subscription");
++			return false;
++		}
++		cemuLog_log(LogType::Force, "Console SYNC delivered to IM callback {:08x}", request.callback);
++		memory_writeU32(request.event, IM_EVENT_SYNC);
++		coreinitAsyncCallback_add(request.callback, 2, IM_ERROR_NONE, request.context);
++		return true;
++	}
++
++	static sint32 IM_Open()
++	{
++		return IM_HANDLE;
++	}
++
++	static sint32 IM_Close(sint32 handle)
++	{
++		if (handle != IM_HANDLE)
++			return -4;
++		ResetIM();
++		return IM_ERROR_NONE;
++	}
++
++	static sint32 IM_GetEventNotify(sint32 handle, MPTR request, MPTR event, MPTR callback, MPTR context)
++	{
++		if (handle != IM_HANDLE || !request || !event || !callback)
++			return -4;
++		std::lock_guard lock(s_imMutex);
++		if (s_imNotification.callback)
++			return -8;
++		s_imNotification = {event, callback, context};
++		cemuLog_log(LogType::Force, "IM event subscription: output {:08x}, callback {:08x}", event, callback);
++		return IM_ERROR_NONE;
++	}
++
++	static sint32 IM_CancelGetEventNotify(sint32 handle, MPTR request, MPTR callback, MPTR context)
++	{
++		if (handle != IM_HANDLE || !request)
++			return -4;
++		ResetIM();
++		if (callback)
++			coreinitAsyncCallback_add(callback, 2, IM_ERROR_NONE, context);
++		return IM_ERROR_NONE;
++	}
++
+ 	void InitializeIM()
+ 	{
++		ResetIM();
++		cafeExportRegister("coreinit", IM_Open, LogType::Placeholder);
++		cafeExportRegister("coreinit", IM_Close, LogType::Placeholder);
++		cafeExportRegister("coreinit", IM_GetEventNotify, LogType::Placeholder);
++		cafeExportRegister("coreinit", IM_CancelGetEventNotify, LogType::Placeholder);
+ 		osLib_addFunction("coreinit", "IMIsAPDEnabledBySysSettings", coreinitExport_IMIsAPDEnabledBySysSettings);
+ 		osLib_addFunction("coreinit", "IMGetTimeBeforeAPD", coreinitExport_IMGetTimeBeforeAPD);
+ 		osLib_addFunction("coreinit", "IMGetTimeBeforeDimming", coreinitExport_IMGetTimeBeforeDimming);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_IM.h b/src/Cafe/OS/libs/coreinit/coreinit_IM.h
+index 8f19d5f0..b4964c7b 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_IM.h
++++ b/src/Cafe/OS/libs/coreinit/coreinit_IM.h
+@@ -3,4 +3,6 @@
+ namespace coreinit
+ {
+ 	void InitializeIM();
++	void ResetIM();
++	bool PressConsoleSync();
+ };
+\ No newline at end of file
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_MCP.cpp b/src/Cafe/OS/libs/coreinit/coreinit_MCP.cpp
+index afbe0bfa..fa645d0c 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_MCP.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_MCP.cpp
+@@ -1,6 +1,7 @@
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "Cafe/IOSU/legacy/iosu_ioctl.h"
+ #include "Cafe/IOSU/legacy/iosu_mcp.h"
++#include "Cafe/IOSU/legacy/iosu_crypto.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_IOS.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_MCP.h"
+ 
+@@ -65,7 +66,13 @@ sint32 MCP_GetSysProdSettings(MCPHANDLE mcpHandle, SysProdSettings* sysProdSetti
+ 	sysProdSettings->gameRegion = (uint8)CafeSystem::GetForegroundTitleRegion();
+ 	sysProdSettings->platformRegion = (uint8)CafeSystem::GetPlatformRegion();
+ 
+-	// contains Wii U serial parts at +0x1A and +0x22?
++	// MCPSysProdSettings code_id/serial_id back Homebrew on Menu's save key.
++	// Read the user's existing EEPROM dump; never log the identifying values.
++	auto* bytes = reinterpret_cast<uint8*>(sysProdSettings);
++	iosuCrypto_readSeepromBytes(bytes + 0x1a, 0xac, 8);
++	iosuCrypto_readSeepromBytes(bytes + 0x22, 0xb0, 12);
++	bytes[0x21] = 0;
++	bytes[0x2d] = 0;
+ 	return 0;
+ }
+ 
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Memory.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Memory.cpp
+index 80ec212d..4821841c 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Memory.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Memory.cpp
+@@ -122,10 +122,17 @@ namespace coreinit
+ 
+ 	MPTR OSEffectiveToPhysical(MPTR effectiveAddr)
+ 	{
++		if (!memory_isAddressRangeAccessible(effectiveAddr, 1))
++			return MPTR_NULL;
+ 		MPTR physicalAddr = memory_virtualToPhysical(effectiveAddr);
+ 		return physicalAddr;
+ 	}
+ 
++	bool OSIsAddressValid(uint32 address)
++	{
++		return memory_isAddressRangeAccessible(address, 1);
++	}
++
+ 	void OSMemoryBarrier()
+ 	{
+ 		// no-op
+@@ -202,6 +209,7 @@ namespace coreinit
+ 
+ 	void InitializeMemory()
+ 	{
++		cafeExportRegister("coreinit", OSIsAddressValid, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", DCInvalidateRange, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", DCFlushRange, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", DCFlushRangeNoSync, LogType::Placeholder);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_MessageQueue.cpp b/src/Cafe/OS/libs/coreinit/coreinit_MessageQueue.cpp
+index dcca09c4..666b9dca 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_MessageQueue.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_MessageQueue.cpp
+@@ -1,5 +1,7 @@
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_MessageQueue.h"
++#include "Cafe/OS/libs/coreinit/coreinit_FS.h"
++#include "Cafe/OS/RPL/rpl.h"
+ 
+ namespace coreinit
+ {
+@@ -124,8 +126,57 @@ namespace coreinit
+ 		return g_systemMessageQueue.GetPtr();
+ 	}
+ 
++	CafeStaticVar<OSMessageQueue> s_appIOQueue{g_coreinitStaticData};
++	CafeStaticVar<OSMessage, 64> s_appIOMessages{g_coreinitStaticData};
++	CafeStaticVar<OSThread_t> s_appIOThread{g_coreinitStaticData};
++	CafeStaticVar<uint8, 0x10000, 32> s_appIOStack{g_coreinitStaticData};
++	bool s_appIOStarted = false;
++
++	static void AppIOThreadEntry(PPCInterpreter_t* cpu)
++	{
++		OSMessage message{};
++		for (;;)
++		{
++			OSReceiveMessage(s_appIOQueue.GetPtr(), &message, OS_MESSAGE_BLOCK);
++			// FSMessage places its function type in the final OSMessage word.
++			if (message.data2 != 8 || message.message == 0)
++			{
++				cemuLog_log(LogType::Force, "AppIO: Unsupported completion type {}", uint32(message.data2));
++				continue;
++			}
++			auto* result = MEMPTR<FSAsyncResult>(uint32(message.message)).GetPtr();
++			// Copy before invoking guest code: it may immediately reuse the command block.
++			const FSAsyncResult completion = *result;
++			if (completion.fsAsyncParamsNew.userCallback)
++				PPCCoreCallback(completion.fsAsyncParamsNew.userCallback, completion.fsClient.GetPtr(),
++					completion.fsCmdBlock.GetPtr(), sint32(uint32(completion.fsStatusNew)),
++					completion.fsAsyncParamsNew.userContext);
++		}
++	}
++
++	OSMessageQueue* OSGetDefaultAppIOQueue()
++	{
++		__OSLockScheduler();
++		if (!s_appIOStarted)
++		{
++			const auto size = s_appIOStack.GetByteSize();
++			s_appIOStarted = __OSCreateThreadType(s_appIOThread.GetPtr(),
++				RPLLoader_MakePPCCallable(AppIOThreadEntry), 0, nullptr,
++				s_appIOStack.GetPtr() + size, size, 16, 7, OSThread_t::THREAD_TYPE::TYPE_APP);
++			if (s_appIOStarted)
++				OSResumeThread(s_appIOThread.GetPtr());
++			else
++				cemuLog_log(LogType::Force, "AppIO: Could not create completion thread");
++		}
++		__OSUnlockScheduler();
++		return s_appIOStarted ? s_appIOQueue.GetPtr() : nullptr;
++	}
++
+ 	void InitializeMessageQueue()
+ 	{
++		s_appIOStarted = false;
++		OSInitMessageQueue(s_appIOQueue.GetPtr(), s_appIOMessages.GetPtr(), s_appIOMessages.GetCount());
++		cafeExportRegister("coreinit", OSGetDefaultAppIOQueue, LogType::CoreinitThread);
+ 		OSInitMessageQueue(g_systemMessageQueue.GetPtr(), _systemMessageQueueArray.GetPtr(), _systemMessageQueueArray.GetCount());
+ 
+ 		cafeExportRegister("coreinit", OSInitMessageQueueEx, LogType::CoreinitThread);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
+index 45075cf1..2303e2cc 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Misc.cpp
+@@ -688,6 +688,12 @@ namespace coreinit
+ 		return s_currentTitleId;
+ 	}
+ 
++	uint64 OSGetOSID()
++	{
++		// Retail Cafe OS firmware identity used by Cemu's HLE environment.
++		return 0x000500101000400Aull;
++	}
++
+ 	uint32 s_sdkVersion;
+ 
+ 	uint32 __OSGetProcessSDKVersion()
+@@ -811,6 +817,8 @@ namespace coreinit
+ 
+ 	void ScheduleTitleLaunch(uint64 titleId)
+ 	{
++		if (Aroma::ArmPreparedHomebrewRPX(titleId, CafeSystem::GetForegroundTitleId()))
++			titleId = CafeSystem::GetForegroundTitleId();
+ 		s_scheduledTitle.store(titleId);
+ 		s_sendLaunchExitMessage.store(titleId != 0);
+ 	}
+@@ -931,6 +939,7 @@ namespace coreinit
+ 		cafeExportRegister("coreinit", OSGetPFID, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", OSGetUPID, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", OSGetTitleID, LogType::Placeholder);
++		cafeExportRegister("coreinit", OSGetOSID, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", __OSGetProcessSDKVersion, LogType::Placeholder);
+ 
+ 		g_homeButtonMenuEnabled = true; // enabled by default
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
+index bb310778..a170e164 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Scheduler.cpp
+@@ -118,6 +118,7 @@ namespace coreinit
+ 		cafeExportRegister("coreinit", __OSLockScheduler, LogType::Placeholder);
+ 		cafeExportRegister("coreinit", __OSUnlockScheduler, LogType::Placeholder);
+ 
++		cafeExportRegister("coreinit", OSIsInterruptEnabled, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", OSDisableInterrupts, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", OSEnableInterrupts, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", OSRestoreInterrupts, LogType::CoreinitThread);
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Spinlock.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Spinlock.cpp
+index 3d235107..7a6e9b13 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Spinlock.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Spinlock.cpp
+@@ -206,11 +206,13 @@ namespace coreinit
+ 			spinlock->count -= 1;
+ 			return true;
+ 		}
+-		// release spinlock
+-		OSRestoreInterrupts(spinlock->interruptMask);
++		// Native coreinit clears the owner before restoring interrupt scheduling.
++		// Restoring first can let a waiter run while this thread still owns it.
++		const uint32 interruptMask = spinlock->interruptMask;
+ 		spinlock->interruptMask = 1;
+-		while (!spinlock->ownerThread.atomic_compare_exchange(currentThread, nullptr));
+ 		__OSDeboostThread(currentThread);
++		while (!spinlock->ownerThread.atomic_compare_exchange(currentThread, nullptr));
++		OSRestoreInterrupts(interruptMask);
+ 		return true;
+ 	}
+ 
+diff --git a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+index 591a5511..da399cc7 100644
+--- a/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
++++ b/src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp
+@@ -1,3 +1,4 @@
++#include <unordered_map>
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "Cafe/Aroma/WupsLoader.h"
+ #include "Cafe/HW/Espresso/PPCCallback.h"
+@@ -133,10 +134,35 @@ namespace coreinit
+ 
+ 
+ 	// add thread to active queue
++	// OSSetThreadRunQuantum takes microseconds (0 means no voluntary quantum).
++	// Cemu schedules using Espresso instruction-cycle budgets.
++	std::unordered_map<OSThread_t*, uint32> s_threadQuantumOverrides;
++
++	uint32 ThreadTimesliceBudget(OSThread_t* thread)
++	{
++		__OSLockScheduler();
++		const auto found = s_threadQuantumOverrides.find(thread);
++		const auto budget = found == s_threadQuantumOverrides.end() ? ppcThreadQuantum : found->second;
++		__OSUnlockScheduler();
++		return budget;
++	}
++
++	bool OSSetThreadRunQuantum(OSThread_t* thread, uint32 quantumUS)
++	{
++		if (!thread || (quantumUS && (quantumUS < 10 || quantumUS > 0xfffff)))
++			return false;
++		const uint64 cycles = quantumUS ? uint64(quantumUS) * ESPRESSO_CORE_CLOCK / 1000000 : uint64(INT32_MAX / 2);
++		__OSLockScheduler();
++		s_threadQuantumOverrides[thread] = static_cast<uint32>(std::min<uint64>(cycles, INT32_MAX / 2));
++		__OSUnlockScheduler();
++		return true;
++	}
++
+ 	void __OSActivateThread(OSThread_t* thread)
+ 	{
+ 		cemu_assert_debug(__OSHasSchedulerLock());
+ 
++		s_threadQuantumOverrides.erase(thread);
+ 		g_activeThreadQueue->addThread(thread, &thread->activeThreadChain); // todo - check if thread already in queue
+ 
+ 		MPTR threadMPTR = memory_getVirtualOffsetFromPointer(thread);
+@@ -184,6 +210,7 @@ namespace coreinit
+ 		cemu_assert_debug(noHit == false);
+ 		srwlock_activeThreadList.UnlockWrite();
+ 		
++		s_threadQuantumOverrides.erase(thread);
+ 		g_activeThreadQueue->removeThread(thread, &thread->activeThreadChain); // todo - check if thread in queue
+ 		
+ 		cemu_assert_debug(thread->state == OSThread_t::THREAD_STATE::STATE_NONE);
+@@ -1174,7 +1201,7 @@ namespace coreinit
+ 		OSSetCurrentThread(OSGetCoreId(), thread);
+ 		__OSThreadLoadContext(hCPU, thread);
+ 		thread->context.upir = coreIndex;
+-		thread->quantumTicks = ppcThreadQuantum;
++		thread->quantumTicks = ThreadTimesliceBudget(thread);
+ 		// statistics
+ 		thread->wakeUpTime = PPCInterpreter_getMainCoreCycleCounter();
+ 		thread->wakeUpCount = thread->wakeUpCount + 1;
+@@ -1186,7 +1213,8 @@ namespace coreinit
+ 	{
+ 		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
+ 		// run one timeslice
+-		hCPU->remainingCycles = ppcThreadQuantum;
++		hCPU->remainingCycles = ThreadTimesliceBudget(thread);
++		thread->quantumTicks = hCPU->remainingCycles;
+ 		hCPU->skippedCycles = 0;
+ 		// we add a slight randomized variance to the thread quantum to avoid getting stuck in repeated code sequences where one or multiple threads always unload inside a lock
+ 		// this was seen in Mario Party 10 during early boot where several OSLockMutex operations would align in such a way that one thread would never successfully acquire the lock
+@@ -1602,6 +1630,7 @@ namespace coreinit
+ 		cafeExportRegister("coreinit", OSCreateThreadType, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", OSCreateThread, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", __OSCreateThreadType, LogType::CoreinitThread);
++		cafeExportRegister("coreinit", OSSetThreadRunQuantum, LogType::CoreinitThread);
+ 		cafeExportRegister("coreinit", OSExitThread, LogType::CoreinitThread);
+ 
+ 		cafeExportRegister("coreinit", OSGetCurrentThread, LogType::CoreinitThread);
+diff --git a/src/Cafe/OS/libs/drmapp/drmapp.cpp b/src/Cafe/OS/libs/drmapp/drmapp.cpp
+index 0d44e5a1..f2a2d2a5 100644
+--- a/src/Cafe/OS/libs/drmapp/drmapp.cpp
++++ b/src/Cafe/OS/libs/drmapp/drmapp.cpp
+@@ -9,6 +9,12 @@ namespace drmapp
+ 		return 1;
+ 	}
+ 
++	uint32 NupChkIsSyncButtonAllowed()
++	{
++		// Cemu does not run a console system update that could inhibit SYNC.
++		return 1;
++	}
++
+ 	uint32 PatchChkIsFinished()
+ 	{
+ 		cemuLog_logDebug(LogType::Force, "drmapp.PatchChkIsFinished() - placeholder");
+@@ -38,6 +44,7 @@ namespace drmapp
+ 		void RPLMapped() override
+ 		{
+ 			cafeExportRegisterFunc(NupChkIsFinished, "drmapp", "NupChkIsFinished__3RplFv", LogType::Placeholder);
++			cafeExportRegisterFunc(NupChkIsSyncButtonAllowed, "drmapp", "NupChkIsSyncButtonAllowed__3RplFv", LogType::Placeholder);
+ 			cafeExportRegisterFunc(PatchChkIsFinished, "drmapp", "PatchChkIsFinished__3RplFv", LogType::Placeholder);
+ 			cafeExportRegisterFunc(AocChkIsFinished, "drmapp", "AocChkIsFinished__3RplFv", LogType::Placeholder);
+ 			cafeExportRegisterFunc(TicketChkIsFinished, "drmapp", "TicketChkIsFinished__3RplFv", LogType::Placeholder);
+diff --git a/src/Cafe/OS/libs/nn_act/nn_act.cpp b/src/Cafe/OS/libs/nn_act/nn_act.cpp
+index a2d2b7c8..c2e69efb 100644
+--- a/src/Cafe/OS/libs/nn_act/nn_act.cpp
++++ b/src/Cafe/OS/libs/nn_act/nn_act.cpp
+@@ -150,7 +150,7 @@ namespace act
+ 			return 0;
+ 		}
+ 
+-		sint32 g_initializeCount = 0; // inc in Initialize and dec in Finalize
++		std::atomic<sint32> g_initializeCount{0}; // inc in Initialize and dec in Finalize
+ 		uint32 Initialize()
+ 		{
+ 			// usually uses a mutex which is initialized in -> global constructor keyed to'_17_act_shim_util_cpp
+@@ -167,6 +167,13 @@ namespace act
+ 			return 0;
+ 		}
+ 
++		uint32 Finalize()
++		{
++			auto count = g_initializeCount.load();
++			while (count > 0 && !g_initializeCount.compare_exchange_weak(count, count - 1)) {}
++			return 0;
++		}
++
+ 		NN_ERROR_CODE GetErrorCode(betype<nnResult>* nnResult)
+ 		{
+ 			NN_ERROR_CODE errCode = NNResultToErrorCode(*nnResult, NN_RESULT_MODULE_NN_ACT);
+@@ -698,6 +705,7 @@ namespace nn::act
+ 			g_initializeCount = 0;
+ 			g_isParentalControlCheckEnabled = false;
+ 			osLib_addFunction("nn_act", "Initialize__Q2_2nn3actFv", nnActExport_Initialize);
++			cafeExportRegisterFunc(Finalize, "nn_act", "Finalize__Q2_2nn3actFv", LogType::Placeholder);
+ 
+ 			osLib_addFunction("nn_act", "CreateConsoleAccount__Q2_2nn3actFv", nnActExport_CreateConsoleAccount);
+ 
+diff --git a/src/Cafe/OS/libs/nn_ccr/nn_ccr.cpp b/src/Cafe/OS/libs/nn_ccr/nn_ccr.cpp
+index ac2edaab..633de1a1 100644
+--- a/src/Cafe/OS/libs/nn_ccr/nn_ccr.cpp
++++ b/src/Cafe/OS/libs/nn_ccr/nn_ccr.cpp
+@@ -9,6 +9,25 @@ namespace nn::ccr
+ 		return -1;
+ 	}
+ 
++	// The retail Menu calls into CCR for the DRC radio. Until a radio session
++	// exists, report the timed-out state and leave the PIN output untouched.
++	static sint32 CCRSysStartPairing(uint32 slot, uint32 timeout)
++	{
++		cemuLog_log(LogType::Force, "CCRSysStartPairing: slot {}, timeout {}s, no DRC radio session", slot, timeout);
++		return -1;
++	}
++
++	static uint32 CCRSysGetPairingState()
++	{
++		return 2; // CCR_SYS_PAIRING_TIMED_OUT
++	}
++
++	static sint32 CCRSysGetPincode(uint32be*)
++	{
++		cemuLog_log(LogType::Force, "CCRSysGetPincode: no DRC radio session");
++		return -1;
++	}
++
+ 	class : public COSModule
+ 	{
+ 		public:
+@@ -20,6 +39,9 @@ namespace nn::ccr
+ 		void RPLMapped() override
+ 		{
+ 			cafeExportRegister("nn_ccr", CCRSysCaffeineBootCheck, LogType::Placeholder);
++			cafeExportRegister("nn_ccr", CCRSysStartPairing, LogType::Placeholder);
++			cafeExportRegister("nn_ccr", CCRSysGetPairingState, LogType::Placeholder);
++			cafeExportRegister("nn_ccr", CCRSysGetPincode, LogType::Placeholder);
+ 		};
+ 
+ 	}s_COSnnccrModule;
+diff --git a/src/Cafe/OS/libs/nsysnet/nsysnet.cpp b/src/Cafe/OS/libs/nsysnet/nsysnet.cpp
+index 4f32b822..cc4e00dc 100644
+--- a/src/Cafe/OS/libs/nsysnet/nsysnet.cpp
++++ b/src/Cafe/OS/libs/nsysnet/nsysnet.cpp
+@@ -1,5 +1,6 @@
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "nsysnet.h"
++#include "config/LaunchSettings.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
+ #include "Cafe/IOSU/legacy/iosu_crypto.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
+@@ -197,6 +198,7 @@ typedef struct
+ 	bool isExternal;
+ 	// socket options
+ 	bool isNonBlocking;
++	uint16 guestBoundPort; // preserves getsockname after explicit FTP port forwarding
+ }virtualSocket_t;
+ 
+ typedef struct
+@@ -865,7 +867,21 @@ void nsysnetExport_bind(PPCInterpreter_t* hCPU)
+ 		sockaddr hostAddr;
+ 		hostAddr.sa_family = _swapEndianU16(addr->sa_family);
+ 		memcpy(hostAddr.sa_data, addr->sa_data, 14);
++		const auto ftpPort = LaunchSettings::AromaFTPPort();
++		const bool forwardFTP = LaunchSettings::AromaEnabled() && ftpPort &&
++			vs->type == WU_SOCK_STREAM && hostAddr.sa_family == AF_INET &&
++			static_cast<uint8>(hostAddr.sa_data[0]) == 0 && static_cast<uint8>(hostAddr.sa_data[1]) == 21;
++		if (forwardFTP)
++		{
++			hostAddr.sa_data[0] = static_cast<char>(*ftpPort >> 8);
++			hostAddr.sa_data[1] = static_cast<char>(*ftpPort & 255);
++		}
+ 		sint32 hr = bind(vs->s, &hostAddr, sizeof(sockaddr));
++		if (forwardFTP && hr == 0)
++		{
++			vs->guestBoundPort = 21;
++			cemuLog_log(LogType::Force, "Aroma FTPiiU: guest TCP 21 is listening on host TCP {}", *ftpPort);
++		}
+ 		r = _translateError(hr, GETLASTERR);
+ 
+ 
+@@ -1308,6 +1324,11 @@ void nsysnetExport_getsockname(PPCInterpreter_t* hCPU)
+ 		{
+ 			addr->sa_family = _swapEndianU16(hostAddr.sa_family);
+ 			memcpy(addr->sa_data, hostAddr.sa_data, 14);
++			if (vs->guestBoundPort)
++			{
++				addr->sa_data[0] = static_cast<uint8>(vs->guestBoundPort >> 8);
++				addr->sa_data[1] = static_cast<uint8>(vs->guestBoundPort & 255);
++			}
+ 		}
+ 		else
+ 		{
+diff --git a/src/Cafe/OS/libs/padscore/padscore.cpp b/src/Cafe/OS/libs/padscore/padscore.cpp
+index 92eb9d55..874c4a1f 100644
+--- a/src/Cafe/OS/libs/padscore/padscore.cpp
++++ b/src/Cafe/OS/libs/padscore/padscore.cpp
+@@ -2,6 +2,7 @@
+ #include "Cafe/HW/Espresso/PPCCallback.h"
+ #include "Cafe/OS/libs/padscore/padscore.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
++#include "Cafe/OS/libs/coreinit/coreinit.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_SystemInfo.h"
+ #include "WindowSystem.h"
+@@ -668,6 +669,52 @@ namespace padscore
+ 		osLib_returnFromFunction(hCPU, new_max_count);
+ 	}
+ 
++	// Guest pairing UI state. Host Bluetooth discovery is independent of this state.
++	static MPTR s_wpadSyncCallback = 0;
++	static std::chrono::steady_clock::time_point s_wpadSyncDeadline{};
++	static std::mutex s_wpadSyncMutex;
++
++	static MPTR WPADSetSyncDeviceCallback(MPTR callback)
++	{
++		std::lock_guard lock(s_wpadSyncMutex);
++		return std::exchange(s_wpadSyncCallback, callback);
++	}
++
++	static bool WPADIsBusyForSync()
++	{
++		std::lock_guard lock(s_wpadSyncMutex);
++		return std::chrono::steady_clock::now() < s_wpadSyncDeadline;
++	}
++
++	static bool WPADStartSyncDevice()
++	{
++		std::lock_guard lock(s_wpadSyncMutex);
++		if (std::chrono::steady_clock::now() < s_wpadSyncDeadline)
++			return false;
++		s_wpadSyncDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
++		if (s_wpadSyncCallback)
++			coreinitAsyncCallback_add(s_wpadSyncCallback, 2, 0, 0);
++		cemuLog_log(LogType::Force, "WPAD controller sync window started");
++		return true;
++	}
++
++	static bool WPADCancelSyncDevice()
++	{
++		std::lock_guard lock(s_wpadSyncMutex);
++		const bool wasActive = std::chrono::steady_clock::now() < s_wpadSyncDeadline;
++		s_wpadSyncDeadline = {};
++		if (wasActive && s_wpadSyncCallback)
++			coreinitAsyncCallback_add(s_wpadSyncCallback, 2, 1, 0);
++		return wasActive;
++	}
++
++	static void ResetWPADSyncState()
++	{
++		std::lock_guard lock(s_wpadSyncMutex);
++		s_wpadSyncCallback = 0;
++		s_wpadSyncDeadline = {};
++	}
++
+ 	void export_WPADInit()
+ 	{
+ 		if (g_wpad_state != kWPADStateShutdown)
+@@ -806,6 +853,7 @@ namespace padscore
+ 
+ 		void RPLUnmapped() override
+ 		{
++			ResetWPADSyncState();
+ 			coreinit::OSCancelAlarm(g_padscore.alarm.GetPtr());
+ 			s_padscoreStaticData.Deallocate();
+ 		}
+@@ -830,6 +878,10 @@ namespace padscore
+ 			cafeExportRegister("padscore", WPADIsMplsAttached, LogType::InputAPI);
+ 			cafeExportRegister("padscore", WPADGetAccGravityUnit, LogType::InputAPI);
+ 
++			cafeExportRegister("padscore", WPADStartSyncDevice, LogType::InputAPI);
++			cafeExportRegister("padscore", WPADIsBusyForSync, LogType::InputAPI);
++			cafeExportRegister("padscore", WPADCancelSyncDevice, LogType::InputAPI);
++			cafeExportRegister("padscore", WPADSetSyncDeviceCallback, LogType::InputAPI);
+ 			// wpad
+ 			//osLib_addFunction("padscore", "WPADInit", padscore::export_WPADInit);
+ 
+diff --git a/src/Cafe/OS/libs/sysapp/sysapp.cpp b/src/Cafe/OS/libs/sysapp/sysapp.cpp
+index ccc545bd..0f0e1df9 100644
+--- a/src/Cafe/OS/libs/sysapp/sysapp.cpp
++++ b/src/Cafe/OS/libs/sysapp/sysapp.cpp
+@@ -1,6 +1,8 @@
++#include "Cafe/Aroma/WupsLoader.h"
+ #include "Cafe/OS/common/OSCommon.h"
+ #include "sysapp.h"
+ #include "Cafe/CafeSystem.h"
++#include "Cafe/TitleList/TitleList.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_FG.h"
+ #include "Cafe/OS/libs/coreinit/coreinit_Misc.h"
+ 
+@@ -651,6 +653,27 @@ namespace sysapp
+ 		coreinit::ScheduleTitleLaunch(titleId);
+ 	}
+ 
++	struct SettingsArgsIn
++	{
++		sysStandardArguments_t stdArgs;
++		uint32be jumpTo;
++		uint32be firstBootKind;
++	};
++	static_assert(sizeof(SettingsArgsIn) == 0x10);
++
++	void _SYSLaunchSettings(SettingsArgsIn* args)
++	{
++		coreinit::__OSClearCopyData();
++		if (args)
++		{
++			_SYSSerializeStandardArgsIn(&args->stdArgs);
++			SYSSerializeSysArgs("jump_to", reinterpret_cast<char*>(&args->jumpTo), 4);
++			SYSSerializeSysArgs("first_boot_kind", reinterpret_cast<char*>(&args->firstBootKind), 4);
++		}
++		_SYSAppendCallerInfo();
++		coreinit::ScheduleTitleLaunch(::_SYSGetSystemApplicationTitleId(1));
++	}
++
+ 	struct EManualArgs
+ 	{
+ 		sysStandardArguments_t stdArgs;
+@@ -672,8 +695,20 @@ namespace sysapp
+ 		_SYSSwitchToEManual(&args);
+ 	}
+ 
++	bool SYSCheckTitleExists(uint64 titleId)
++	{
++		if (Aroma::HasPreparedHomebrewWrapper(titleId))
++			return true;
++		if (titleId == CafeSystem::GetForegroundTitleId())
++			return true;
++		uint16 version = 0;
++		return CafeTitleList::HasTitle(titleId, version);
++	}
++
+ 	void load()
+ 	{
++		cafeExportRegister("sysapp", _SYSLaunchSettings, LogType::Placeholder);
++		cafeExportRegister("sysapp", SYSCheckTitleExists, LogType::Placeholder);
+ 		cafeExportRegisterFunc(SYSClearSysArgs, "sysapp", "SYSClearSysArgs", LogType::Placeholder);
+ 		cafeExportRegisterFunc(_SYSLaunchTitleByPathFromLauncher, "sysapp", "_SYSLaunchTitleByPathFromLauncher", LogType::Placeholder);
+ 		cafeExportRegisterFunc(SYSRelaunchTitle, "sysapp", "SYSRelaunchTitle", LogType::Placeholder);
+diff --git a/src/Common/unix/FileStream_unix.cpp b/src/Common/unix/FileStream_unix.cpp
+index b54d3ef6..e4628769 100644
+--- a/src/Common/unix/FileStream_unix.cpp
++++ b/src/Common/unix/FileStream_unix.cpp
+@@ -101,9 +101,15 @@ uint64 FileStream::GetSize()
+ 
+ bool FileStream::SetEndOfFile()
+ {
+-	assert_dbg();
+-	return true;
+-	//return ::SetEndOfFile(m_hFile) != 0;
++	if (!m_isValid || m_path.empty())
++		return false;
++	m_fileStream.flush();
++	const auto position = m_prevOperationWasWrite ? m_fileStream.tellp() : m_fileStream.tellg();
++	if (position == std::streampos(-1))
++		return false;
++	std::error_code error;
++	fs::resize_file(m_path, static_cast<uint64>(position), error);
++	return !error;
+ }
+ 
+ void FileStream::extract(std::vector<uint8>& data)
+@@ -212,7 +218,9 @@ FileStream::~FileStream()
+ 
+ FileStream::FileStream(const fs::path& path, bool isOpen, bool isWriteable)
+ {
+-	fs::path CIPath = findPathCI(path);
++	const fs::path CIPath = findPathCI(path);
++	if (!isOpen || isWriteable)
++		m_path = fs::absolute(CIPath);
+ 	if (isOpen)
+ 	{
+ 		m_fileStream.open(CIPath, isWriteable ? (std::ios_base::in | std::ios_base::out | std::ios_base::binary) : (std::ios_base::in | std::ios_base::binary));
+diff --git a/src/Common/unix/FileStream_unix.h b/src/Common/unix/FileStream_unix.h
+index 29261ddd..cdf2836a 100644
+--- a/src/Common/unix/FileStream_unix.h
++++ b/src/Common/unix/FileStream_unix.h
+@@ -56,6 +56,7 @@ class FileStream
+ 
+ 	bool m_isValid{};
+ 	std::fstream m_fileStream;
++	fs::path m_path;
+ 	bool m_prevOperationWasWrite{false};
+ 
+ };
+diff --git a/src/config/LaunchSettings.cpp b/src/config/LaunchSettings.cpp
+index cef9327d..12133b68 100644
+--- a/src/config/LaunchSettings.cpp
++++ b/src/config/LaunchSettings.cpp
+@@ -82,6 +82,7 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
+ 		("verbose", "Log to stdout")
+ #endif
+ 
++		("aroma-ftp-port", po::value<unsigned>(), "Map Aroma FTPiiU guest TCP port 21 to this unprivileged host port (1024-65535)")
+ 		("aroma-plugin", po::wvalue<std::vector<std::wstring>>()->composing(), "Map an Aroma plugin for guest debugging (repeat in startup order)")
+ 		("aroma-link-modules", po::wvalue<std::wstring>(), "Link Aroma modules from a directory for guest debugging")
+ 		("game,g", po::wvalue<std::wstring>(), "Path of game to launch")
+@@ -100,6 +101,7 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
+ 		("force-interpreter", po::value<bool>()->implicit_value(true), "Force interpreter CPU emulation, disables recompiler. Useful for debugging purposes where you want to get accurate memory accesses and stack traces.")
+ 		("force-multicore-interpreter", po::value<bool>()->implicit_value(true), "Force multi-core interpreter CPU emulation, disables recompiler. Only useful for getting stack traces, but slightly faster than the single-core interpreter mode.")
+ 		("enable-gdbstub", po::value<bool>()->implicit_value(true), "Enable GDB stub to debug executables inside Cemu using an external debugger")
++		("python-debug-start-paused", po::bool_switch(), "Pause before guest system and Aroma startup for Python debugging")
+ 		("python-debug", po::value<bool>()->implicit_value(true), "Enable the loopback debugger for tools/python/cemu_debug.py (no debugger window)")
+ 		("open-debugger", po::value<bool>()->implicit_value(true), "Open the PPC debugger window on startup");
+ 
+@@ -163,6 +165,14 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
+ 				s_aroma_plugin.emplace_back(path);
+ 		if (vm.count("aroma-link-modules"))
+ 			s_aroma_module_directory = vm["aroma-link-modules"].as<std::wstring>();
++		if (vm.count("aroma-ftp-port"))
++		{
++			const auto port = vm["aroma-ftp-port"].as<unsigned>();
++			if (port < 1024 || port > 65535)
++				throw std::invalid_argument("--aroma-ftp-port must be in 1024-65535");
++			s_aroma_ftp_port = static_cast<uint16>(port);
++		}
++
+ 
+ 		if (vm.count("game"))
+ 		{
+@@ -226,6 +236,10 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
+ 		if (vm.count("python-debug"))
+ 			s_enable_gdbstub = vm["python-debug"].as<bool>();
+ 
++		s_python_debug_start_paused = vm["python-debug-start-paused"].as<bool>();
++		if (s_python_debug_start_paused)
++			s_enable_gdbstub = true;
++
+ 		if (vm.count("open-debugger"))
+ 			s_open_debugger = vm["open-debugger"].as<bool>();
+ 
+diff --git a/src/config/LaunchSettings.h b/src/config/LaunchSettings.h
+index 540e29a7..2256bfa9 100644
+--- a/src/config/LaunchSettings.h
++++ b/src/config/LaunchSettings.h
+@@ -20,6 +20,7 @@ public:
+ 	static fs::path AromaEnvironmentDirectory();
+ 	static std::optional<fs::path> AromaModuleDirectory();
+ 	static bool AromaEnabled();
++	static std::optional<uint16> AromaFTPPort() { return s_aroma_ftp_port; }
+ 	static std::optional<fs::path> GetLoadFile() { return s_load_game_file; }
+ 	static std::optional<uint64> GetLoadTitleID() {return s_load_title_id;}
+ 	static std::optional<fs::path> GetMLCPath() { return s_mlc_path; }
+@@ -34,6 +35,7 @@ public:
+ 	static void ClearCosArgstr() { s_cos_argstr.reset(); }
+ 	static std::unordered_map<fs::path, std::wstring>& CosMounts() { return s_cos_mounts; }
+ 
++	static bool PythonDebugStartPaused() { return s_python_debug_start_paused; }
+ 	static bool GDBStubEnabled() { return s_enable_gdbstub; }
+ 	static bool OpenDebuggerEnabled() { return s_open_debugger; }
+ 	static bool NSightModeEnabled() { return s_nsight_mode; }
+@@ -49,6 +51,7 @@ public:
+ private:
+ 	inline static std::vector<fs::path> s_aroma_plugin{};
+ 	inline static std::optional<fs::path> s_aroma_module_directory{};
++	inline static std::optional<uint16> s_aroma_ftp_port{};
+ 	inline static std::optional<fs::path> s_load_game_file{};
+ 	inline static std::optional<uint64> s_load_title_id{};
+ 	inline static std::optional<fs::path> s_mlc_path{};
+@@ -63,6 +66,7 @@ private:
+ 	inline static std::unordered_map<fs::path, std::wstring> s_cos_mounts{};
+ 
+ 	inline static bool s_enable_gdbstub = false;
++	inline static bool s_python_debug_start_paused = false;
+ 	inline static bool s_open_debugger = false;
+ 	inline static bool s_nsight_mode = false;
+ 
+diff --git a/src/gui/wxgui/MainWindow.cpp b/src/gui/wxgui/MainWindow.cpp
+index 4b15d958..97063a81 100644
+--- a/src/gui/wxgui/MainWindow.cpp
++++ b/src/gui/wxgui/MainWindow.cpp
+@@ -33,6 +33,15 @@
+ 
+ // External functionality headers
+ #include "input/InputManager.h"
++#include "input/api/DRC/DRCInput.h"
++#include "Cafe/OS/libs/coreinit/coreinit_IM.h"
++#include "Cafe/OS/libs/coreinit/coreinit_Scheduler.h"
++#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
++#if BOOST_OS_LINUX
++#include <csignal>
++#include <atomic>
++#endif
++#include <wx/timer.h>
+ #include "Cafe/TitleList/TitleList.h"
+ #include "Cemu/DiscordPresence/DiscordPresence.h"
+ #include "util/ScreenSaver/ScreenSaver.h"
+@@ -65,6 +74,17 @@
+ 
+ extern WindowSystem::WindowInfo g_window_info;
+ extern std::shared_mutex g_mutex;
++#if BOOST_OS_LINUX
++namespace
++{
++static_assert(std::atomic<int>::is_always_lock_free);
++std::atomic<int> s_globalPauseRequest{0};
++void RequestGlobalPause(int signal)
++{
++    s_globalPauseRequest.store(signal, std::memory_order_relaxed);
++}
++}
++#endif
+ 
+ enum
+ {
+@@ -83,13 +103,15 @@ enum
+ 	MAINFRAME_MENU_ID_FILE_RECENT_LAST = MAINFRAME_MENU_ID_FILE_RECENT_0 + 15,
+ 	// options
+ 	MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN = 20200,
+-	MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW,
++		MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW,
+ 	MAINFRAME_MENU_ID_OPTIONS_GRAPHIC,
+ 	MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2,
+ 	MAINFRAME_MENU_ID_OPTIONS_GENERAL,
+ 	MAINFRAME_MENU_ID_OPTIONS_GENERAL2,
+ 	MAINFRAME_MENU_ID_OPTIONS_AUDIO,
+ 	MAINFRAME_MENU_ID_OPTIONS_INPUT,
++	MAINFRAME_MENU_ID_OPTIONS_NATIVE_GAMEPAD,
++	MAINFRAME_MENU_ID_OPTIONS_CONSOLE_SYNC,
+ 	MAINFRAME_MENU_ID_OPTIONS_HOTKEY,
+ 	MAINFRAME_MENU_ID_OPTIONS_MAC_SETTINGS,
+ 	// options -> account
+@@ -109,6 +131,7 @@ enum
+ 	MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_PORTUGUESE,
+ 	MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_RUSSIAN,
+ 	MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_TAIWANESE,
++	MAINFRAME_MENU_ID_OPTIONS_PAUSE = 20599,
+ 	// tools
+ 	MAINFRAME_MENU_ID_TOOLS_MEMORY_SEARCHER = 20600,
+ 	MAINFRAME_MENU_ID_TOOLS_TITLE_MANAGER,
+@@ -185,6 +208,7 @@ EVT_MENU_RANGE(MAINFRAME_MENU_ID_FILE_RECENT_0 + 0, MAINFRAME_MENU_ID_FILE_RECEN
+ EVT_MENU_RANGE(MAINFRAME_MENU_ID_OPTIONS_ACCOUNT_1, MAINFRAME_MENU_ID_OPTIONS_ACCOUNT_12, MainWindow::OnAccountSelect)
+ EVT_MENU_RANGE(MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_JAPANESE, MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_TAIWANESE, MainWindow::OnConsoleLanguage)
+ // options menu
++EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_PAUSE, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GRAPHIC, MainWindow::OnOptionsInput)
+@@ -193,6 +217,8 @@ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GENERAL, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GENERAL2, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_AUDIO, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_INPUT, MainWindow::OnOptionsInput)
++EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_NATIVE_GAMEPAD, MainWindow::OnOptionsInput)
++EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_CONSOLE_SYNC, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_HOTKEY, MainWindow::OnOptionsInput)
+ EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_MAC_SETTINGS, MainWindow::OnOptionsInput)
+ // tools menu
+@@ -320,6 +346,10 @@ MainWindow::MainWindow()
+ 	SendMessage(this->GetHWND(), WM_SETICON, ICON_SMALL, (LPARAM)hWindowIcon);
+ #endif
+ 
++	// Publish before queuing the command-line launch event.
++	if (LaunchSettings::GDBStubEnabled())
++		g_gdbstub = std::make_unique<GDBServer>(GetConfig().gdb_port);
++
+ 	auto* main_sizer = new wxBoxSizer(wxVERTICAL);
+     auto load_file = LaunchSettings::GetLoadFile();
+     auto load_title_id = LaunchSettings::GetLoadTitleID();
+@@ -361,9 +391,23 @@ MainWindow::MainWindow()
+ 
+ 	m_last_mouse_move_time = std::chrono::steady_clock::now();
+ 
++#if BOOST_OS_LINUX
++    std::signal(SIGUSR1, RequestGlobalPause);
++    std::signal(SIGUSR2, RequestGlobalPause);
++    m_globalPauseTimer.SetOwner(this);
++    Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
++        const int request = s_globalPauseRequest.exchange(0, std::memory_order_relaxed);
++        if (request == SIGUSR1)
++            SetEmulationPaused(false);
++        else if (request == SIGUSR2)
++            SetEmulationPaused(!m_emulationPaused);
++    }, m_globalPauseTimer.GetId());
++    m_globalPauseTimer.Start(40);
++#endif
+ 	m_timer = new wxTimer(this, MAINFRAME_ID_TIMER1);
+ 	m_timer->Start(500);
+ 
++
+ 	LoadSettings();
+ 
+ 	#ifdef ENABLE_DISCORD_RPC
+@@ -374,10 +418,6 @@ MainWindow::MainWindow()
+ 	Bind(wxEVT_OPEN_GRAPHIC_PACK, &MainWindow::OnGraphicWindowOpen, this);
+ 	Bind(wxEVT_LAUNCH_GAME, &MainWindow::OnLaunchFromFile, this);
+ 
+-	if (LaunchSettings::GDBStubEnabled())
+-	{
+-			g_gdbstub = std::make_unique<GDBServer>(GetConfig().gdb_port);
+-	}
+ 
+ 	if (LaunchSettings::OpenDebuggerEnabled())
+ 		OpenPPCDebugger();
+@@ -438,6 +478,10 @@ wxString MainWindow::GetInitialWindowTitle()
+ 
+ void MainWindow::OnClose(wxCloseEvent& event)
+ {
++#if BOOST_OS_LINUX
++    m_globalPauseTimer.Stop();
++#endif
++	SetEmulationPaused(false);
+ 	if (m_debugger_window)
+ 	{
+ 		m_debugger_window->CleanupForDestroy();
+@@ -889,6 +933,9 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
+ {
+ 	switch (event.GetId())
+ 	{
++	case MAINFRAME_MENU_ID_OPTIONS_PAUSE:
++		SetEmulationPaused(!m_emulationPaused);
++		break;
+ 	case MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN:
+ 	{
+ 		const bool state = m_fullscreenMenuItem->IsChecked();
+@@ -925,6 +972,68 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
+ 		OpenSettings();
+ 		break;
+ 	}
++	case MAINFRAME_MENU_ID_OPTIONS_CONSOLE_SYNC:
++	{
++		if (!CafeSystem::IsTitleRunning() || !coreinit::PressConsoleSync())
++			wxMessageBox(_("The Wii U Menu has no active subscription to console SYNC events."), _("Wii U Console SYNC"), wxOK | wxICON_INFORMATION, this);
++		break;
++	}
++
++#ifdef __linux__
++	case MAINFRAME_MENU_ID_OPTIONS_NATIVE_GAMEPAD:
++	{
++		wxDialog dialog(this, wxID_ANY, _("Native Wii U GamePad"));
++		auto* layout = new wxBoxSizer(wxVERTICAL);
++		auto* enabled = new wxCheckBox(&dialog, wxID_ANY, _("Enable native GamePad input"));
++		auto* local = new wxTextCtrl(&dialog, wxID_ANY, "192.168.1.10");
++		auto* peer = new wxTextCtrl(&dialog, wxID_ANY, "192.168.1.11");
++		auto* status = new wxStaticText(&dialog, wxID_ANY,
++			_("Uses an existing GamePad Wi-Fi link. Pairing is pending."));
++		auto* connection = new wxStaticText(&dialog, wxID_ANY, _("No GamePad packets received."));
++		DRCInput::Sample sample;
++		enabled->SetValue(DRCInput::Read(sample));
++		layout->Add(enabled, 0, wxALL, 8);
++		layout->Add(new wxStaticText(&dialog, wxID_ANY, _("Local GamePad interface IPv4 address")), 0, wxLEFT | wxRIGHT, 8);
++		layout->Add(local, 0, wxEXPAND | wxALL, 8);
++		layout->Add(new wxStaticText(&dialog, wxID_ANY, _("GamePad IPv4 address")), 0, wxLEFT | wxRIGHT, 8);
++		layout->Add(peer, 0, wxEXPAND | wxALL, 8);
++		layout->Add(status, 0, wxALL, 8);
++		layout->Add(connection, 0, wxALL, 8);
++		layout->Add(new wxButton(&dialog, wxID_CANCEL, _("Close")), 0, wxALIGN_RIGHT | wxALL, 8);
++		layout->SetMinSize(540, -1);
++		dialog.SetSizerAndFit(layout);
++
++		wxTimer timer(&dialog);
++		dialog.Bind(wxEVT_TIMER, [&](wxTimerEvent&)
++		{
++			bool receiving = false;
++			const bool listening = DRCInput::Read(sample, &receiving);
++			connection->SetLabel(receiving ? _("GamePad input received.") :
++				listening ? _("Waiting for GamePad input.") : _("Native input is off."));
++		}, timer.GetId());
++		timer.Start(100);
++
++		auto apply = [&]
++		{
++			const bool ok = DRCInput::Configure(enabled->GetValue(),
++				local->GetValue().ToStdString(), peer->GetValue().ToStdString());
++			if (!ok)
++			{
++				enabled->SetValue(DRCInput::Read(sample));
++				status->SetLabel(_("Could not bind the receiver. Check both IPv4 addresses."));
++			}
++			return ok;
++		};
++		enabled->Bind(wxEVT_CHECKBOX, [&](wxCommandEvent&)
++		{
++			if (apply())
++				status->SetLabel(_("Uses an existing GamePad Wi-Fi link. Pairing is pending."));
++		});
++		dialog.ShowModal();
++		break;
++	}
++#endif
++
+ 	case MAINFRAME_MENU_ID_OPTIONS_INPUT:
+ 	{
+ 		auto* frame = new InputSettings2(this);
+@@ -1771,8 +1880,41 @@ void MainWindow::SetFullScreen(bool state)
+ 		SetMenuVisible(true);
+ }
+ 
++void MainWindow::SetEmulationPaused(bool pause)
++{
++    if (m_emulationPaused == pause || (pause && !CafeSystem::IsTitleRunning()))
++        return;
++
++    __OSLockScheduler();
++    for (sint32 i = 0; i < activeThreadCount; ++i)
++    {
++        const MPTR address = activeThread[i];
++        auto* thread = reinterpret_cast<OSThread_t*>(memory_getPointerFromPhysicalOffset(address));
++        if (pause)
++        {
++            m_pauseThreads.insert(address);
++            coreinit::__OSSuspendThreadNolock(thread);
++        }
++        else if (m_pauseThreads.erase(address))
++        {
++            coreinit::__OSResumeThreadInternal(thread, 1);
++        }
++    }
++    m_emulationPaused = pause;
++    if (!pause)
++        m_pauseThreads.clear();
++    __OSUnlockScheduler();
++
++    if (m_menuBar)
++    {
++        if (auto* item = m_menuBar->FindItem(MAINFRAME_MENU_ID_OPTIONS_PAUSE))
++            item->SetItemLabel(pause ? _("&Resume	F4") : _("&Pause	F4"));
++    }
++}
++
+ void MainWindow::EndEmulation() // unfinished - memory leaks and crashes after repeated use (after 3x usually)
+ {
++	SetEmulationPaused(false);
+ 	CafeSystem::ShutdownTitle();
+ 	DestroyCanvas();
+ 	m_game_launched = false;
+@@ -2258,6 +2400,8 @@ void MainWindow::RecreateMenu()
+ 
+ 	// options submenu
+ 	wxMenu* optionsMenu = new wxMenu();
++    optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_PAUSE, m_emulationPaused ? _("&Resume	F4") : _("&Pause	F4"))
++        ->Enable(m_game_launched);
+ 	m_fullscreenMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN, _("&Fullscreen"));
+ 	m_fullscreenMenuItem->Check(FullscreenEnabled());
+ 
+@@ -2270,6 +2414,10 @@ void MainWindow::RecreateMenu()
+ 	#endif
+ 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_GENERAL2, _("&General settings"));
+ 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_INPUT, _("&Input settings"));
++	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_CONSOLE_SYNC, _("Press Wii U Console SYNC"));
++#ifdef __linux__
++	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_NATIVE_GAMEPAD, _("Native Wii U GamePad..."));
++#endif
+ 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_HOTKEY, _("&Hotkey settings"));
+ 
+ 	optionsMenu->AppendSeparator();
+diff --git a/src/gui/wxgui/MainWindow.h b/src/gui/wxgui/MainWindow.h
+index 483b67fa..dcb724ee 100644
+--- a/src/gui/wxgui/MainWindow.h
++++ b/src/gui/wxgui/MainWindow.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <set>
++
+ #include <wx/wx.h>
+ #include <wx/dataview.h>
+ #include <wx/infobar.h>
+@@ -102,6 +104,7 @@ public:
+ 	void OnFileExit(wxCommandEvent& event);
+ 	void OnNFCMenu(wxCommandEvent& event);
+ 	void OnOptionsInput(wxCommandEvent& event);
++	void SetEmulationPaused(bool pause);
+ 	void OnAccountSelect(wxCommandEvent& event);
+ 	void OnConsoleLanguage(wxCommandEvent& event);
+ 	void OnHelpAbout(wxCommandEvent& event);
+@@ -180,6 +183,11 @@ private:
+ 
+ 	bool m_menu_visible = false;
+ 	bool m_game_launched = false;
++	bool m_emulationPaused = false;
++	std::set<MPTR> m_pauseThreads;
++#if BOOST_OS_LINUX
++    wxTimer m_globalPauseTimer;
++#endif
+ 
+ 	#ifdef ENABLE_DISCORD_RPC
+ 	std::unique_ptr<DiscordPresence> m_discord;
+diff --git a/src/input/CMakeLists.txt b/src/input/CMakeLists.txt
+index 4978ef0a..9fbfac4a 100644
+--- a/src/input/CMakeLists.txt
++++ b/src/input/CMakeLists.txt
+@@ -1,4 +1,6 @@
+ add_library(CemuInput
++	api/DRC/DRCInput.cpp
++	api/DRC/DRCInput.h
+ 	InputManager.cpp
+ 	InputManager.h
+ 	ControllerFactory.cpp
+diff --git a/src/input/emulated/VPADController.cpp b/src/input/emulated/VPADController.cpp
+index a791c5fe..0686c632 100644
+--- a/src/input/emulated/VPADController.cpp
++++ b/src/input/emulated/VPADController.cpp
+@@ -1,5 +1,6 @@
+ #include "input/emulated/VPADController.h"
+ #include "input/api/Controller.h"
++#include "input/api/DRC/DRCInput.h"
+ #ifdef HAS_SDL
+ #include "input/api/SDL/SDLController.h"
+ #endif
+@@ -77,7 +78,14 @@ void VPADController::VPADRead(VPADStatus_t& status, const BtnRepeat& repeat)
+ 
+ 	m_homebutton_down |= is_home_down();
+ 
+-	const auto axis = get_axis();
++	DRCInput::Sample native;
++	const bool nativeInput = player_index() == 0 && DRCInput::Read(native);
++	if (nativeInput)
++	{
++		status.hold = native.buttons;
++		m_homebutton_down |= (native.buttons & VPAD_HOME) != 0;
++	}
++	const auto axis = nativeInput ? glm::vec2{native.sticks[0], native.sticks[1]} : get_axis();
+ 	status.leftStick.x = axis.x;
+ 	status.leftStick.y = axis.y;
+ 
+@@ -95,7 +103,7 @@ void VPADController::VPADRead(VPADStatus_t& status, const BtnRepeat& repeat)
+ 	else if (axis.y >= kAxisThreshold || (HAS_FLAG(last_hold, VPAD_STICK_L_UP) && axis.y >= kHoldAxisThreshold))
+ 		status.hold |= VPAD_STICK_L_UP;
+ 
+-	const auto rotation = get_rotation();
++	const auto rotation = nativeInput ? glm::vec2{native.sticks[2], native.sticks[3]} : get_rotation();
+ 	status.rightStick.x = rotation.x;
+ 	status.rightStick.y = rotation.y;
+ 
+@@ -136,14 +144,26 @@ void VPADController::VPADRead(VPADStatus_t& status, const BtnRepeat& repeat)
+ 	m_last_holdvalue = currentHold;
+ 
+ 	// touch
+-	update_touch(status);
++	if (nativeInput)
++	{
++		if (native.touching)
++			m_last_touch_position = {native.touchX, native.touchY};
++		status.tpData.x = static_cast<uint16>(m_last_touch_position.x);
++		status.tpData.y = static_cast<uint16>(m_last_touch_position.y);
++		status.tpData.touch = native.touching ? kTpTouchOn : kTpTouchOff;
++		status.tpData.validity = native.touching ? kTpValid : kTpInvalid;
++		status.tpProcessed1 = status.tpProcessed2 = status.tpData;
++	}
++	else
++		update_touch(status);
+ 
+ 	// motion
+ 	status.dir.x = {1, 0, 0};
+ 	status.dir.y = {0, 1, 0};
+ 	status.dir.z = {0, 0, 1};
+ 	status.accXY = {1.0f, 0.0f};
+-	update_motion(status);
++	if (!nativeInput)
++		update_motion(status);
+ }
+ 
+ void VPADController::update()
+diff --git a/docs/native-gamepad.md b/docs/native-gamepad.md
+new file mode 100644
+index 00000000..40ef96ec
+--- /dev/null
++++ b/docs/native-gamepad.md
+@@ -0,0 +1,27 @@
++# Native Wii U GamePad backend
++
++The Linux input prototype receives native 128-byte DRC datagrams on UDP port 50022 and feeds buttons, sticks, and touch into VPAD channel 0. It requires a network on which the GamePad is already associated and sending input. The prototype does not configure the wireless adapter, pair the GamePad, or transmit console-side protocol traffic.
++
++Set `CEMU_DRC_BIND_ADDRESS` to the console-side IPv4 address on the dedicated link and `CEMU_DRC_PEER_ADDRESS` to the GamePad's IPv4 address. Both are required. Configure player 1 as a Wii U GamePad in Cemu. With the receiver enabled, native input expires after 150 ms without a valid packet. Use an isolated GamePad link since the receiver filters by source IP and relies on the network for peer authentication.
++
++## Console interfaces
++
++- The renderer has independent TV and GamePad scanout paths. Native streaming needs a DRC scanout sink that runs even when the desktop pad window is closed.
++- AX produces a separate DRC audio mix. VPAD has a motor-pattern queue. A native transport needs to deliver both to the physical pad.
++- `mic.rpl` and `camera.rpl` are present in the NAND dump. Cemu needs physical microphone samples in the guest MIC ring buffer and physical camera frames in the guest CAM callback path.
++- The dumped `nsysccr.rpl` exports `CCRCDCPerIrdaControl`. Wii Fit U imports it for Fit Meter communication. Supporting the meter requires the GamePad's bidirectional infrared transceiver and a guest implementation of its control path.
++- The inspected `h264.rpl` exposes H264DEC entry points. Those exports do not provide the outgoing GamePad video encoder. The outgoing stream and the location of the original encoding path are still under investigation.
++
++[DRC input protocol](https://libdrc.org/docs/re/sc-input.html) · [Nintendo's Fit Meter pairing instructions](https://en-americas-support.nintendo.com/app/answers/detail/a_id/9009/p/172)
++
++## Pending Sync work
++
++The Linux Options menu enables input on an existing GamePad Wi-Fi link. The console's SYNC button is a separate feature. Options → Press Wii U Console SYNC sends an IM_EVENT_SYNC notification to the guest when it has subscribed through IM_GetEventNotify. With the Wii U Menu open, the second press should bring up Nintendo's four-symbol screen on the emulated TV. The same pairing session must accept those symbols when entered on the physical GamePad after pressing its own SYNC button. Verify the Nintendo screen and successful pairing together on hardware.
++
++A VA-API probe on the Radeon produced 864×480 constrained-baseline H.264 with no B-frames and five slices starting at macroblocks 0, 324, 648, 972, and 1296. GamePad decoding still requires verifying the full bitstream contract and transport on hardware.
++
++The Native Wii U GamePad settings should expose Capture Wi-Fi and Release Wi-Fi. A privileged helper should own the selected adapter only for the pairing and runtime session and restore NetworkManager control on release or exit. The UI should obtain the link addresses from that session.
++
++The retail Menu registers for IM event bit 7 and re-registers after each callback. The callback calls WPADStartSyncDevice before the Menu proceeds into its sync UI. Cemu now exposes the guest WPAD sync state and callbacks. Pairing state still needs to be connected to the physical adapter and Nintendo's CCR calls.
++
++Physical console TCP syslog uses the MochaPayload discovery beacon (UDP 4445) followed by an inbound console connection to TCP 7965. During the hardware test the first SYNC press logged Bluetooth pairing loop 3, and the second press was followed by pairing loop 0. The Wii U Menu in Cemu received the virtual IM event and invoked WPADStartSyncDevice. No over-the-air GamePad handshake was captured in that TCP log.
+diff --git a/src/input/api/DRC/DRCInput.cpp b/src/input/api/DRC/DRCInput.cpp
+new file mode 100644
+index 00000000..161da75c
+--- /dev/null
++++ b/src/input/api/DRC/DRCInput.cpp
+@@ -0,0 +1,182 @@
++#include "DRCInput.h"
++
++#include <algorithm>
++
++#ifdef __linux__
++#include <arpa/inet.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <chrono>
++#include <cstdlib>
++#include <mutex>
++#include <string>
++#endif
++
++namespace DRCInput
++{
++std::optional<Sample> Decode(std::span<const std::uint8_t> bytes)
++{
++	if (bytes.size() != 128)
++		return std::nullopt;
++
++	Sample sample;
++	sample.buttons = ((bytes[2] << 8) | bytes[3]) & 0xfffe;
++	if (bytes[80] & 0x40)
++		sample.buttons |= 0x00020000;
++	if (bytes[80] & 0x80)
++		sample.buttons |= 0x00040000;
++	for (std::size_t axis = 0; axis < sample.sticks.size(); ++axis)
++	{
++		const auto offset = 6 + axis * 2;
++		const int value = bytes[offset] | (bytes[offset + 1] << 8);
++		const int delta = value - 2050;
++		if (delta <= -115 || delta >= 115)
++			sample.sticks[axis] = std::clamp(delta / 1150.0f, -1.0f, 1.0f);
++	}
++
++	int x = 0, y = 0, pressure = 0;
++	for (std::size_t point = 0; point < 10; ++point)
++	{
++		const auto offset = 36 + point * 4;
++		x += bytes[offset] | ((bytes[offset + 1] & 15) << 8);
++		y += bytes[offset + 2] | ((bytes[offset + 3] & 15) << 8);
++		if (point < 2)
++			pressure |= (bytes[offset + 1] | bytes[offset + 3]) & 0x70;
++	}
++	sample.touchX = x / 10;
++	sample.touchY = y / 10;
++	sample.touching = pressure != 0;
++	return sample;
++}
++
++#ifdef __linux__
++namespace
++{
++class Receiver
++{
++public:
++	Receiver()
++	{
++		const char* bindAddress = std::getenv("CEMU_DRC_BIND_ADDRESS");
++		const char* peerAddress = std::getenv("CEMU_DRC_PEER_ADDRESS");
++		if (!bindAddress || !peerAddress)
++			return;
++
++		Configure(true, bindAddress, peerAddress);
++	}
++
++	bool Configure(bool enabled, std::string_view bindAddress, std::string_view peerAddress)
++	{
++		std::lock_guard lock(m_mutex);
++		if (!enabled)
++		{
++			if (m_fd >= 0)
++				close(m_fd);
++			m_fd = -1;
++			m_lastPacket = {};
++			return true;
++		}
++
++		in_addr peer{};
++		sockaddr_in local{};
++		local.sin_family = AF_INET;
++		local.sin_port = htons(50022);
++		if (inet_pton(AF_INET, std::string(bindAddress).c_str(), &local.sin_addr) != 1 ||
++			local.sin_addr.s_addr == INADDR_ANY ||
++			inet_pton(AF_INET, std::string(peerAddress).c_str(), &peer) != 1 || peer.s_addr == INADDR_ANY)
++			return false;
++
++		if (m_fd >= 0 && m_local.s_addr == local.sin_addr.s_addr)
++		{
++			if (m_peer.s_addr != peer.s_addr)
++				m_lastPacket = {};
++			m_peer = peer;
++			return true;
++		}
++		const int fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
++		if (fd < 0)
++			return false;
++		if (bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0)
++		{
++			close(fd);
++			return false;
++		}
++		if (m_fd >= 0)
++			close(m_fd);
++		m_fd = fd;
++		m_local = local.sin_addr;
++		m_peer = peer;
++		m_lastPacket = {};
++		return true;
++	}
++
++	~Receiver()
++	{
++		if (m_fd >= 0)
++			close(m_fd);
++	}
++
++	bool Read(Sample& sample, bool* receiving)
++	{
++		std::lock_guard lock(m_mutex);
++		if (m_fd < 0)
++			return false;
++		const auto now = std::chrono::steady_clock::now();
++		for (int i = 0; i < 64; ++i)
++		{
++			std::array<std::uint8_t, 128> packet;
++			sockaddr_in sender{};
++			socklen_t length = sizeof(sender);
++			const auto size = recvfrom(m_fd, packet.data(), packet.size(), MSG_TRUNC,
++				reinterpret_cast<sockaddr*>(&sender), &length);
++			if (size < 0)
++				break;
++			if (static_cast<std::size_t>(size) == packet.size() && sender.sin_addr.s_addr == m_peer.s_addr)
++			{
++				m_sample = *Decode(packet);
++				m_lastPacket = now;
++			}
++		}
++		const bool fresh = now - m_lastPacket < std::chrono::milliseconds(150);
++		if (receiving)
++			*receiving = fresh;
++		sample = fresh ? m_sample : Sample{};
++		return true;
++	}
++
++private:
++	int m_fd{-1};
++	in_addr m_peer{}, m_local{};
++	std::mutex m_mutex;
++	Sample m_sample{};
++	std::chrono::steady_clock::time_point m_lastPacket{};
++};
++Receiver& GetReceiver()
++{
++	static Receiver receiver;
++	return receiver;
++}
++}
++#endif
++
++bool Configure(bool enabled, std::string_view local, std::string_view peer)
++{
++#ifdef __linux__
++	return GetReceiver().Configure(enabled, local, peer);
++#else
++	return !enabled;
++#endif
++}
++
++bool Read(Sample& sample, bool* receiving)
++{
++	if (receiving)
++		*receiving = false;
++#ifdef __linux__
++	return GetReceiver().Read(sample, receiving);
++#else
++	return false;
++#endif
++}
++}
+diff --git a/src/input/api/DRC/DRCInput.h b/src/input/api/DRC/DRCInput.h
+new file mode 100644
+index 00000000..d3477c5b
+--- /dev/null
++++ b/src/input/api/DRC/DRCInput.h
+@@ -0,0 +1,23 @@
++#pragma once
++
++#include <array>
++#include <cstdint>
++#include <optional>
++#include <span>
++#include <string_view>
++
++namespace DRCInput
++{
++struct Sample
++{
++	std::uint32_t buttons{};
++	std::array<float, 4> sticks{};
++	std::uint16_t touchX{}, touchY{};
++	bool touching{};
++};
++
++std::optional<Sample> Decode(std::span<const std::uint8_t> bytes);
++// True when a native receiver owns VPAD channel 0. A stale connection returns neutral input.
++bool Read(Sample& sample, bool* receiving = nullptr);
++bool Configure(bool enabled, std::string_view local, std::string_view peer);
++}
+diff --git a/tools/drc/pairing_config.py b/tools/drc/pairing_config.py
+new file mode 100644
+index 00000000..64843f9c
+--- /dev/null
++++ b/tools/drc/pairing_config.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python3
++"""Generate a console-side GamePad pairing profile for DRC-patched hostapd."""
++import argparse
++import os
++import re
++import secrets
++import struct
++from pathlib import Path
++
++
++def attribute(kind, value):
++    return struct.pack(">HH", kind, len(value)) + value
++
++
++def profile(mac, psk):
++    suffix = mac.hex()
++    normal = f"WiiU{suffix}"
++    pairing = f"WiiU{suffix[:-1]}{suffix}_STA1"
++    symbols = "".join(str((mac[-1] >> shift) & 3) for shift in (6, 4, 2, 0))
++    credential = b"".join((
++        attribute(0x1026, b"\x01"),
++        attribute(0x1045, normal.encode()),
++        attribute(0x1003, b"\x00\x20"),
++        attribute(0x100F, b"\x00\x08"),
++        attribute(0x1027, psk.encode()),
++        attribute(0x1020, mac),
++    ))
++    return normal, pairing, symbols, attribute(0x100E, credential)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("interface")
++    parser.add_argument("ap_mac")
++    parser.add_argument("directory", type=Path)
++    parser.add_argument("--channel", type=int, default=36)
++    args = parser.parse_args()
++    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,15}", args.interface):
++        parser.error("invalid interface name")
++    if not re.fullmatch(r"(?:[a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}", args.ap_mac):
++        parser.error("expected a colon-separated MAC address")
++    if args.channel not in (36, 40, 44, 48, 149, 153, 157, 161):
++        parser.error("select a supported non-DFS 5 GHz channel")
++    mac = bytes.fromhex(args.ap_mac.replace(":", ""))
++    if not any(mac) or mac[0] & 1:
++        parser.error("the access point needs a unicast MAC address")
++    directory = args.directory.resolve()
++    if any(character.isspace() for character in str(directory)):
++        parser.error("profile directory must contain no whitespace")
++    os.umask(0o077)
++    directory.mkdir(mode=0o700)
++    psk = secrets.token_hex(32)
++    normal, pairing, symbols, credential = profile(mac, psk)
++    (directory / "credential.bin").write_bytes(credential)
++    common = (
++        f"interface={args.interface}\ndriver=nl80211\n"
++        f"hw_mode=a\nchannel={args.channel}\nieee80211n=1\nwmm_enabled=1\n"
++        f"ctrl_interface={directory}/ctrl\n"
++    )
++    (directory / "pairing.conf").write_text(
++        common + f"ssid={pairing}\nieee8021x=1\neap_server=1\neapol_version=1\n"
++        f"wps_state=2\ndevice_name={normal}\nmanufacturer=Broadcom\n"
++        f"device_type=6-a4c0e1f4-1\nconfig_methods=label\n"
++        f"skip_cred_build=1\nextra_cred={directory}/credential.bin\nwps_cred_processing=1\n"
++    )
++    (directory / "runtime.conf").write_text(
++        common + f"ssid={normal}\nignore_broadcast_ssid=1\nwpa=2\n"
++        f"wpa_key_mgmt=WPA-PSK\nrsn_pairwise=CCMP\nwpa_psk={psk}\n"
++    )
++    print(symbols)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/python/aroma_ftp_smoke_test.py b/tools/python/aroma_ftp_smoke_test.py
+new file mode 100644
+index 00000000..76d22ba2
+--- /dev/null
++++ b/tools/python/aroma_ftp_smoke_test.py
+@@ -0,0 +1,37 @@
++#!/usr/bin/env python3
++"""Verify an anonymous FTPiiU upload/download without leaving a test file."""
++import argparse
++from ftplib import FTP
++import hashlib
++from io import BytesIO
++import json
++import secrets
++import uuid
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--host", default="127.0.0.1")
++    parser.add_argument("--port", type=int, default=2121)
++    parser.add_argument("--directory", default="/fs/vol/external01/wiiu/apps")
++    args = parser.parse_args()
++    path = args.directory.rstrip("/") + "/.cemu-ftp-test-" + uuid.uuid4().hex
++    payload = secrets.token_bytes(4096)
++    with FTP() as ftp:
++        ftp.connect(args.host, args.port, timeout=15)
++        ftp.login()
++        try:
++            ftp.storbinary("STOR " + path, BytesIO(payload))
++            received = BytesIO()
++            ftp.retrbinary("RETR " + path, received.write)
++            result = {"size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
++                      "received_sha256": hashlib.sha256(received.getvalue()).hexdigest(),
++                      "success": received.getvalue() == payload}
++        finally:
++            ftp.delete(path)
++    print(json.dumps(result, indent=2))
++    return 0 if result["success"] else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/python/emulator_pause_hotkey.py b/tools/python/emulator_pause_hotkey.py
+new file mode 100644
+index 00000000..3a928a4e
+--- /dev/null
++++ b/tools/python/emulator_pause_hotkey.py
+@@ -0,0 +1,116 @@
++#!/usr/bin/env python3
++"""X11 F4 shortcut for emulator builds with a SIGUSR2 pause handler."""
++import argparse
++import os
++from pathlib import Path
++import select
++import signal
++import time
++
++from Xlib import X, XK, display, error
++
++
++def targets(display_conn, root, executables, sig=signal.SIGUSR2):
++    windows = root.get_full_property(display_conn.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType)
++    if windows is None:
++        return set()
++    pid_atom = display_conn.intern_atom("_NET_WM_PID")
++    handlers = 1 << (sig - 1)
++    result = set()
++    for wid in windows.value:
++        try:
++            prop = display_conn.create_resource_object("window", wid).get_full_property(
++                pid_atom, X.AnyPropertyType
++            )
++            if not prop or not len(prop.value):
++                continue
++            pid = int(prop.value[0])
++            proc = Path("/proc") / str(pid)
++            if proc.stat().st_uid != os.getuid() or Path(os.readlink(proc / "exe")) not in executables:
++                continue
++            caught = next(line.split()[1] for line in (proc / "status").read_text().splitlines()
++                          if line.startswith("SigCgt:"))
++            if int(caught, 16) & handlers:
++                result.add(pid)
++        except (OSError, StopIteration, error.BadWindow):
++            continue
++    return result
++
++
++def signal_targets(pids, display_conn, root, executables, sig=signal.SIGUSR2):
++    sent = 0
++    for pid in pids:
++        try:
++            fd = os.pidfd_open(pid)
++            try:
++                if pid in targets(display_conn, root, executables, sig):
++                    signal.pidfd_send_signal(fd, sig)
++                    sent += 1
++            finally:
++                os.close(fd)
++        except ProcessLookupError:
++            continue
++    return sent
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("emulator", type=Path, nargs="+")
++    parser.add_argument("--resume", action="store_true", help="Resume matching emulators once, then exit")
++    args = parser.parse_args()
++    executables = {path.resolve() for path in args.emulator}
++    conn = display.Display()
++    root = conn.screen().root
++    if args.resume:
++        active = targets(conn, root, executables, signal.SIGUSR1)
++        print(f"Resume requested for {signal_targets(active, conn, root, executables, signal.SIGUSR1)} emulator(s).")
++        return
++
++    key = conn.keysym_to_keycode(XK.string_to_keysym("F4"))
++    lock_keys = {conn.keysym_to_keycode(XK.string_to_keysym(name))
++                 for name in ("Caps_Lock", "Num_Lock", "Scroll_Lock")}
++    modifiers = [0]
++    for index, keys in enumerate(conn.get_modifier_mapping()):
++        if set(keys).intersection(lock_keys):
++            modifiers += [mask | (1 << index) for mask in modifiers]
++
++    grabbed = False
++    pressed = False
++    released_at = None
++    while True:
++        active = targets(conn, root, executables)
++        if bool(active) != grabbed:
++            if active:
++                failures = []
++                for mod in modifiers:
++                    root.grab_key(key, mod, False, X.GrabModeAsync, X.GrabModeAsync,
++                                  onerror=lambda *args: failures.append(args))
++                conn.sync()
++                if failures:
++                    raise RuntimeError("Another application has already registered global F4")
++            else:
++                for mod in modifiers:
++                    root.ungrab_key(key, mod)
++                conn.sync()
++                pressed = False
++                released_at = None
++            grabbed = bool(active)
++
++        if not conn.pending_events():
++            select.select([conn.fileno()], [], [], 0.04 if released_at is not None else 0.25)
++        while conn.pending_events():
++            event = conn.next_event()
++            if event.type == X.KeyRelease and event.detail == key:
++                released_at = time.monotonic()
++            elif event.type == X.KeyPress and event.detail == key:
++                if not pressed:
++                    signal_targets(active, conn, root, executables)
++                pressed = True
++                released_at = None
++        if released_at is not None and time.monotonic() - released_at >= 0.025:
++            pressed = False
++            released_at = None
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tools/python/wiiload_send.py b/tools/python/wiiload_send.py
+new file mode 100644
+index 00000000..2857f214
+--- /dev/null
++++ b/tools/python/wiiload_send.py
+@@ -0,0 +1,32 @@
++#!/usr/bin/env python3
++"""Send an RPX through the actual WiiLoad plugin; inspect its log for launch success."""
++import argparse
++from pathlib import Path
++import socket
++import struct
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("rpx", type=Path)
++    parser.add_argument("--host", default="127.0.0.1")
++    parser.add_argument("--port", type=int, default=4299)
++    parser.add_argument("--timeout", type=float, default=30)
++    args = parser.parse_args()
++    size = args.rpx.stat().st_size
++    if not 52 <= size <= 64 * 1024 * 1024:
++        parser.error("Expected an RPX between 52 bytes and 64 MiB")
++    data = args.rpx.read_bytes()
++    if data[:9] != b"\x7fELF\x01\x02\x01\xca\xfe" or data[16:20] != b"\xfe\x01\x00\x14":
++        parser.error("Expected a Wii U PowerPC RPX")
++    # 0.4 is deliberately uncompressed. The tested plugin's compressed path
++    # reuses the input temporary file as the output, then removes that path.
++    header = b"HAXX" + bytes((0, 4, 0, 0)) + struct.pack(">I", len(data))
++    with socket.create_connection((args.host, args.port), args.timeout) as connection:
++        connection.sendall(header)
++        connection.sendall(data)
++    print(f"Sent {len(data)} bytes through WiiLoad. Check the target log for executable entry.")
++
++
++if __name__ == "__main__":
++    main()

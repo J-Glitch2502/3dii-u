@@ -15,12 +15,21 @@ namespace {
 
 using Cipher = std::unique_ptr<AVAES, decltype(&av_free)>;
 
+// Shared APT compatibility key used by Azahar's built-in key data, derived from
+// its slot 0x31 X/Y and generator constant. This is not an OTP, account secret,
+// or console-unique identity. An SD override remains available for other peers.
+// Reference: Azahar core/hw/aes/key.cpp and its GPL-2.0-or-later key data.
+constexpr Block compatibility_key{0x59, 0xfc, 0x81, 0x7e, 0x64, 0x46, 0xea, 0x61, 0x90, 0x34, 0x7b, 0x20, 0xe9, 0xbd, 0xce, 0x52};
+
 Cipher load_cipher() {
     Cipher cipher(nullptr, av_free);
     FILE *file = fopen("fs:/vol/external01/3dii-u/mii_qr.key", "rb");
     if (!file) {
-        LOG("[apt] Mii QR needs the local key file at 3dii-u/mii_qr.key on the SD card\n");
-        return cipher;
+        cipher.reset(av_aes_alloc());
+        if (cipher && av_aes_init(cipher.get(), compatibility_key.data(), 128, 0) >= 0)
+            return cipher;
+        LOG("[apt] Could not initialize the shared APT compatibility cipher\n");
+        return Cipher(nullptr, av_free);
     }
     char text[64];
     const auto length = fread(text, 1, sizeof text, file);

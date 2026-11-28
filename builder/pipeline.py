@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Turns a 3DS game dump into a WUP for WUP Installer GX2, with its update and DLC if given. The app (builder/app.py) runs this; it works on its own too:
+"""Turns a 3DS game dump into a WUP install or an Aroma Homebrew bundle, with its update and DLC if given. The app (builder/app.py) runs this; it works on its own too:
 
     pipeline.py --game <dump> [--update <dump>] [--dlc <dump>] [--mod <folder or .zip> ...] [--keys <folder>] [--emulator <folder>] --otp <otp.bin> (--card D: | --out <folder>) [--keep] [--jobs N]
 
 --keys: the folder with boot9.bin and seeddb.bin from your own 3DS, ~/.3ds by default; only encrypted dumps need it, and they're decrypted the way
 cia_to_decrypted_3ds.py does it (decrypt.py). --emulator: a 3DS emulator's user folder (Azahar, Citra) or the 0004009b folder GodMode9 copies off
 your 3DS, for the system archives (shared font, Mii data) if this PC has none yet. --otp: your Wii U's otp.bin, for the common key the WUP is
-packed with.
+packed with; Homebrew output does not require otp.bin. Choose --output-format homebrew for a full WUHB, or add
+--homebrew-parts binary, shaders or both to export a small update for an existing matching Homebrew game.
 Lines starting with @ are for the app: @stage <name>, @progress <0-100>, @done <where it went>, @error <why>.
 
 It builds with tools/win/build3ds.py, in folders of its own (builder_work/, build_win_builder/), so it never touches the nine ports' builds."""
@@ -36,6 +37,8 @@ import decrypt  # noqa: E402
 import dumps  # noqa: E402
 import mods  # noqa: E402
 import shaderlogs  # noqa: E402
+import homebrew  # noqa: E402
+import wup_update  # noqa: E402
 import user_files  # noqa: E402
 from objcache import _checked, workspace_lock  # noqa: E402
 
@@ -50,15 +53,26 @@ STAGES = [('Reading your game', 2), ('Decrypting', 8), ('Unpacking', 7), ('Findi
           ('Making the title', 2), ('Packing the WUP', 10), ('Copying', 7)]
 
 
+def stages_for(output_format='wup', parts='full'):
+    names = list(STAGES[:3])
+    if parts != 'shaders': names += STAGES[3:5]
+    if parts != 'binary': names += [STAGES[5]]
+    if output_format in ('wup','wup-update'): names += STAGES[6:]
+    elif parts == 'full': names += [('Making the title', 2), ('Packing Homebrew', 10), ('Copying', 7)]
+    else: names += [('Exporting Homebrew update', 10), ('Copying', 7)]
+    return names
+
+
 class Progress:
     """@stage and @progress lines over the whole run, from each stage's share"""
     def __init__(self):
         self.done, self.share = 0, 0
 
     def stage(self, name):
-        for n, (s, w) in enumerate(STAGES):
+        stages = getattr(self, 'stages', STAGES)
+        for n, (s, w) in enumerate(stages):
             if s == name:
-                self.done = sum(x for _, x in STAGES[:n])
+                self.done = sum(x for _, x in stages[:n])
                 self.share = w
         print(f'@stage {name}', flush=True)
         self.at(0)
@@ -154,6 +168,19 @@ def console_learned(slug):
     return [os.path.join(kept, f) for f in sorted(os.listdir(kept)) if f.startswith('console_card_')] if os.path.isdir(kept) else []
 
 
+LANGUAGES = ('Japanese', 'English', 'French', 'German', 'Italian', 'Spanish',
+             'Simplified Chinese', 'Korean', 'Dutch', 'Portuguese', 'Russian', 'Traditional Chinese')
+
+def language_for_locale(locale):
+    language, *qualifiers = locale.lower().replace('_', '-').split('-')
+    if language == 'zh':
+        traditional = 'hant' in qualifiers or ('hans' not in qualifiers and any(
+            region in qualifiers for region in ('tw', 'hk', 'mo')))
+        return 'Traditional Chinese' if traditional else 'Simplified Chinese'
+    codes = dict(zip(('ja', 'en', 'fr', 'de', 'it', 'es', 'zh', 'ko', 'nl', 'pt', 'ru'), LANGUAGES))
+    return codes.get(language, 'English')
+
+
 def tool(name):
     """one of the repository's tool scripts, loaded by its path: the app carries them as files, not as modules"""
     import importlib.util
@@ -177,12 +204,15 @@ def valid_menu_shortcut(value):
 
 
 def make_title(game_dir, out, info, art=None, icon_art=None, style='picture', released='', case_scan=False, pad_bezel=None, pad_art=None,
-               boot_sound=None, screen_art=None, *, language=None):
+               boot_sound=None, screen_art=None, *, language=None, include_shaders=True):
     """the title every game gets, then its update, DLC and optional Download Play archive"""
     tool('make_game_title').make_title(os.path.join(out, 'title'), game_dir, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'shaders'),
                                        info['title_id'], info['name'], info['product'], ARCHIVES, art, icon_art, style, released, case_scan, pad_bezel,
-                                       pad_art, boot_sound, screen_art)
+                                       pad_art, boot_sound, screen_art, include_shaders=include_shaders)
     content = os.path.join(out, 'title', 'content')
+    if language is not None:
+        with open(os.path.join(content, 'language.txt'), 'w', encoding='ascii') as f:
+            f.write(f'{LANGUAGES.index(language)}\n')
     for f in os.listdir(game_dir):
         if f.startswith(('update_', 'dlc_')) or f == 'dlp_child.romfs':
             os.link(os.path.join(game_dir, f), os.path.join(content, f))
@@ -242,9 +272,9 @@ def card_error(e):
     return f'The SD card couldn\'t be written to: {e.strerror or e}'
 
 
-def check_card(card):
+def check_card(card, relative="install"):
     """a build that ends on the SD card finds out it can't write there first, not after minutes of building"""
-    install = os.path.join(card.rstrip('\\/') + os.sep, 'install')
+    install = os.path.join(card.rstrip('\\/') + os.sep, relative)
     try:
         wup_safety.check_output(install)
         os.makedirs(install, exist_ok=True)
@@ -283,9 +313,13 @@ def main():
     ap.add_argument('--keys', help='boot9.bin and seeddb.bin from your own 3DS (default ~/.3ds)')
     ap.add_argument('--emulator', help='a 3DS emulator\'s user folder (Azahar, Citra) or the 0004009b folder GodMode9 copies off your 3DS '
                                          '(title, in CTRNAND), for the system archives')
-    ap.add_argument('--otp', required=True)
-    ap.add_argument('--card', help='an SD card: the WUP goes in its install folder')
-    ap.add_argument('--out', help='a folder to put the WUP in instead')
+    ap.add_argument('--otp')
+    ap.add_argument('--output-format', choices=('wup','wup-update','homebrew'), default='wup')
+    ap.add_argument('--wup-update-parts', choices=wup_update.PARTS, default='both')
+    ap.add_argument('--wup-base-manifest', help='matching .base.json saved beside the original full WUP build')
+    ap.add_argument('--homebrew-parts', choices=homebrew.PARTS, default='full')
+    ap.add_argument('--card', help='an SD card: WUPs go in install, full Homebrew in wiiu/apps, update exports in wiiu/3dii-u/updates')
+    ap.add_argument('--out', help='a folder to put the selected output in instead')
     ap.add_argument('--keep', action='store_true', help='keep the work files, for a quicker rebuild')
     ap.add_argument('--art', help="a picture (the cover art, say) for the start-up screens; the game's own icon otherwise")
     ap.add_argument('--icon-art', help="a complete custom Wii U Menu icon; otherwise the game's own icon with a Virtual Console frame")
@@ -294,6 +328,7 @@ def main():
     ap.add_argument('--boot-sound', help="the game's own start-up sound, a .btsnd (tools/make_boot_sound.py); the one for every game otherwise")
     ap.add_argument('--save', help="a 3DS save to pack in, which the game takes on the console (saves.py): Checkpoint's, JKSM's or an emulator's folder")
     menu = ap.add_mutually_exclusive_group()
+    ap.add_argument('--menu-style', choices=('new', 'classic'), default='new', help='choose the in-game options layout when building code')
     menu.add_argument('--no-menu', action='store_true', help='disable the in-game options menu')
     menu.add_argument('--menu-shortcut', metavar='BUTTON+BUTTON', help='two different buttons to open the in-game menu, for example L+R')
     ap.add_argument('--language', choices=LANGUAGES, help='default game language, when supported (otherwise follows the console)')
@@ -374,6 +409,15 @@ def extract_dlp_child(parent, title_id, game_dir, tmp, keys):
 
 
 def build(a):
+    if a.output_format == 'wup' and a.homebrew_parts != 'full':
+        fail('Small update exports require Output: Homebrew.')
+    partial = a.output_format == 'homebrew' and a.homebrew_parts != 'full'
+    need_code = not partial or a.homebrew_parts != 'shaders'
+    is_update = a.output_format == 'wup-update'
+    if is_update and a.save:
+        fail('WUP updates contain executable/shader changes only. Import saves with a full base build or a save manager.')
+    need_shaders = (not partial or a.homebrew_parts != 'binary') and not (is_update and a.wup_update_parts == 'binary')
+    PROGRESS.stages = stages_for(a.output_format, a.wup_update_parts if is_update else a.homebrew_parts)
     try:
         for path in (WORK_GAMES, ARCHIVES, a.out):
             if path:
@@ -388,11 +432,11 @@ def build(a):
             fail('A Download Play child index must be between 0 and 255.')
         if os.environ.get('THREEDII_MEASURE') != '1' or a.card or a.update or a.dlc or a.mod or a.save:
             fail('Download Play child checks require a base game and THREEDII_MEASURE=1.')
-    problem = None if cemu_only else user_files.check_otp(a.otp)
+    problem = None if cemu_only or a.output_format == 'homebrew' else user_files.check_otp(a.otp or '')
     if problem:
         fail(problem)
     if a.card:
-        check_card(a.card)
+        check_card(a.card, 'wiiu/apps' if a.output_format == 'homebrew' else 'install')
 
     PROGRESS.stage('Reading your game')
     decrypt.use_keys(a.keys)
@@ -423,6 +467,28 @@ def build(a):
     known = None if a.cold else profile
     code_mods = any(m.changes_code() for m in mod_list)
     info = dict(known or derived(game))
+    if a.output_format in ('wup','wup-update'):
+        original_id=int(info['title_id'],16)
+        native_id=wup_update.native_base_id(original_id, game.title_id)
+        info['title_id']=f'{native_id:016X}'
+        if native_id!=original_id:
+            info['folder'] += '_NativeWUP'
+            print(f'Native WUP title ID: {original_id:016X} -> {native_id:016X}. Existing legacy installs remain separate.',flush=True)
+
+    input_summary = dict(program_id=f'{game.title_id:016X}', game_version=getattr(game,'version',0),
+                         update=dict(title_id=f'{update.title_id:016X}',version=update.version) if update else None,
+                         dlc=dict(title_id=f'{dlc.title_id:016X}',version=dlc.version) if dlc else None)
+    inventory_path = os.path.join(WORK_GAMES, '_wup', 'base-inventories', info['title_id'] + '.json')
+    selected_manifest = getattr(a, 'wup_base_manifest', None) or inventory_path
+    if is_update:
+        try:
+            base_record = wup_update.read_manifest(selected_manifest, int(info['title_id'],16))
+            if input_summary != base_record['inputs']:
+                fail('The game/update/DLC selection differs from the selected base build. Choose its matching inputs or build a new full WUP base.')
+            if a.wup_update_parts == 'binary' and wup_update.shader_contract(ROOT) != base_record['shader_contract']:
+                fail('Shader code changed since the selected base. Choose Binary + shaders.')
+        except ValueError as error: fail(str(error))
+
     child_id = None
     if child_index is not None:
         child_id = 0x0004000100000000 | (game.unique & ~0xFF) | child_index
@@ -486,12 +552,18 @@ def build(a):
     for d in plain.values():
         d.f.close()
     shutil.rmtree(tmp, ignore_errors=True)
-    if not dumps.have_system_archives(archives):  # a Miitopia built without them stopped on the console with FS "not found" (Nov 9)
+    with open(os.path.join(game_dir, 'code.bin'), 'rb') as source:
+        required_archives = dumps.archives_named(source.read())
+    try:
+        supplied = dumps.install_system_fallbacks(archives, required_archives, ROOT)
+        if supplied: print('Bundled open-source system archives: ' + ', '.join(supplied), flush=True)
+    except (OSError, dumps.DumpError) as e:
+        fail(str(e))
+    if not partial and not dumps.have_system_archives(archives):  # a Miitopia built without them stopped on the console with FS "not found" (Nov 9)
         fail('The 3DS system files are missing: the Mii data, without which Mii games stop, and the shared font. Give --emulator Azahar\'s '
              'user folder (after its File > Set Up System Files) or the 0004009b folder GodMode9 copies off your 3DS (title, in CTRNAND).')
-    with open(os.path.join(game_dir, 'code.bin'), 'rb') as f:  # and what this game's own code names of them (dumps.archives_named)
-        lacking = [t for t in dumps.archives_named(f.read()) if not dumps.have_system_archives(archives, (t,))]
-    if lacking:
+    lacking = [t for t in required_archives if not dumps.have_system_archives(archives, (t,))]
+    if lacking and not partial:
         t = lacking[0]
         fail(f'This game needs {dumps.ARCHIVE_NAMES.get(t, "a font")} to start. Your 3DS system files are missing a readable copy. '
              f'With GodMode9, copy the {t[:8]} folder off your 3DS ([1:] SYSNAND CTRNAND > title), '
@@ -526,6 +598,8 @@ def build(a):
     if not os.path.exists(b3.BIN + 'gcc.exe'):
         fail('The build tools aren\'t installed: see builder/README.md.')
     g = b3.Game(info['slug'], game_dir)  # the recipe every game gets, read from this game's own code (build3ds.py)
+    g.observation_slug = (known or derived(game))['slug']
+    g.skip_catalog = bool(a.cold or code_mods)
     if a.cold:
         g.twin = derived(game)['slug']  # its own folder in games/ is no other game's: nothing of it is borrowed
     # Cold checks exclude learned data, while testing the same compiler policy as a normal build.
@@ -541,26 +615,27 @@ def build(a):
     g.out, g.rpx, g.nm, g.shaders = out, os.path.join(out, info['slug'] + '.rpx'), os.path.join(out, 'game.nm'), os.path.join(out, 'shaders')
     os.makedirs(out, exist_ok=True)
 
-    PROGRESS.stage('Finding the game\'s code')
-    # What earlier runs reached stays, and the finders add to it: a tested game's list (its base code's alone), or an untested game's own
-    # games/g_<code>[_v<update>]/functions.txt, the entries its runs found missing (Kirby: Triple Deluxe's first call at 0x232670, 2026-11-08)
-    learned = os.path.join(ROOT, 'games', known['slug'] if known else info['slug'], 'functions.txt')
-    have_learned = not a.cold and not code_mods and not (known and update) and os.path.isfile(learned) and os.path.getsize(learned) > 0
-    if have_learned:
-        shutil.copyfile(learned, g.extra_functions)
-    have_upstream = g.upstream_functions and os.path.isfile(g.upstream_functions) and os.path.getsize(g.upstream_functions) > 0
-    if known and not update and not code_mods and (have_learned or have_upstream):
-        print('code entries: what this game\'s tested builds found', flush=True)
-    else:
-        env = dict(os.environ, RECOMP_CRO_BASE=b3.CRO_BASE)
-        for tool in ('find_entries.py', 'cro_entries.py'):
-            r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', tool), g.dir] + (['--write'] if tool == 'find_entries.py' else []), env=env,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
-            print(r.stdout.strip()[-300:], flush=True)
-            if r.returncode:
-                fail(f'{tool} failed')
+    if need_code:
+        PROGRESS.stage('Finding the game\'s code')
+        # What earlier runs reached stays, and the finders add to it: a tested game's list (its base code's alone), or an untested game's own
+        # games/g_<code>[_v<update>]/functions.txt, the entries its runs found missing (Kirby: Triple Deluxe's first call at 0x232670, 2026-11-08)
+        learned = os.path.join(ROOT, 'games', known['slug'] if known else info['slug'], 'functions.txt')
+        have_learned = not a.cold and not code_mods and not (known and update) and os.path.isfile(learned) and os.path.getsize(learned) > 0
+        if have_learned:
+            shutil.copyfile(learned, g.extra_functions)
+        have_upstream = g.upstream_functions and os.path.isfile(g.upstream_functions) and os.path.getsize(g.upstream_functions) > 0
+        if known and not update and not code_mods and (have_learned or have_upstream):
+            print('code entries: what this game\'s tested builds found', flush=True)
+        else:
+            env = dict(os.environ, RECOMP_CRO_BASE=b3.CRO_BASE)
+            for tool in ('find_entries.py', 'cro_entries.py'):
+                r = subprocess.run([sys.executable, os.path.join(ROOT, 'tools', tool), g.dir] + (['--write'] if tool == 'find_entries.py' else []), env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+                print(r.stdout.strip()[-300:], flush=True)
+                if r.returncode:
+                    fail(f'{tool} failed')
 
-    args = types.SimpleNamespace(jobs=a.jobs, force=False, extra_flags=None, only=None, opt=None)
+    args = types.SimpleNamespace(jobs=a.jobs, force=False, extra_flags='-DRECOMP_CLASSIC_MENU' if a.menu_style == 'classic' else None, only=None, opt=None)
     original_stdout = sys.stdout
     sys.stdout = held = Held(Watch(original_stdout, PROGRESS), b3.context)
     shader_stop = []
@@ -577,25 +652,24 @@ def build(a):
 
     alongside = threading.Thread(target=shaders)
     try:
-        PROGRESS.stage('Recompiling')
-        # Before the code: build_game_code makes native code of the geometry shaders in the logs' GSX records, which the app's logs hold as
-        # fingerprints until restore() (about a second). build_shaders' prepare_logs then does only the fragment part, alongside the code.
-        try:
+        # Resolve portable vertex/geometry records before parallel code and fragment compilation.
+        if need_code or need_shaders:
             with_vertex_programs(g, b3.build_shadergen(args))
-        except Exception as e:  # the build's stated reason, as with the shaders thread's own
-            import traceback
-            traceback.print_exc()
-            raise SystemExit(f'shader logs: {e!r}') from e
-        b3.prepare_vertex_logs = lambda g, shadergen: None
-        alongside.start()
-        try:
-            b3.build_code(g, args)
+            b3.prepare_vertex_logs = lambda game, shadergen: None
+        if need_code:
+            PROGRESS.stage('Recompiling')
+            if need_shaders: alongside.start()
+            try:
+                b3.build_code(g, args)
+            finally:
+                if need_shaders: alongside.join()
+        if need_shaders:
             PROGRESS.stage('Shaders')
-        finally:
-            alongside.join()
-        print(held.held.getvalue(), end='', flush=True)
-        if shader_stop:
-            raise shader_stop[0] if isinstance(shader_stop[0], SystemExit) else SystemExit(f'shaders: {shader_stop[0]!r}')
+            if need_code: alongside.join()
+            else: shaders()
+            print(held.held.getvalue(), end='', flush=True, file=sys.__stdout__)
+            if shader_stop:
+                raise shader_stop[0] if isinstance(shader_stop[0], SystemExit) else SystemExit(f'shaders: {shader_stop[0]!r}')
     except SystemExit as e:
         fail(f'The build stopped: {e}')
     finally:
@@ -608,6 +682,30 @@ def build(a):
         if os.path.isfile(gsl):
             shutil.copyfile(gsl, os.path.join(learned, 'dvlb.gsl'))
 
+    # Every game and packaging mode uses the same optional SD-root file.
+    import multiplayer
+    try:
+        room_file = multiplayer.write_config(a.card or a.out,
+                         os.path.join(ROOT, 'builder', 'multiplayer-defaults.json'))
+        print(f'Shared multiplayer settings: {room_file} (copy 3dii-u to the SD root)', flush=True)
+    except (OSError, ValueError, KeyError) as e:
+        fail(f'Multiplayer configuration could not be written: {e}')
+
+    if partial:
+        PROGRESS.stage('Exporting Homebrew update')
+        guide = os.path.join(HERE, 'HOMEBREW_GUIDE.txt')
+        meta = homebrew.identity(game_dir, game.title_id, info['name'], ROOT)
+        destination = os.path.join(a.card, 'wiiu', '3dii-u', 'updates') if a.card else a.out
+        if a.card: PROGRESS.stage('Copying')
+        try:
+            where = homebrew.export_update(g.rpx, g.shaders, destination, info['name'], a.homebrew_parts, meta, guide)
+        except (OSError, ValueError) as e: fail(f'Homebrew export failed: {e}')
+        if not a.keep: shutil.rmtree(game_dir, ignore_errors=True)
+        PROGRESS.done, PROGRESS.share = 100, 0
+        PROGRESS.at(1)
+        print(f'@done {where}', flush=True)
+        return
+
     PROGRESS.stage('Making the title')
     released, case_scan, title_shot = '', False, None
     if a.art_style == 'console' and a.tdb:
@@ -616,13 +714,18 @@ def build(a):
         case_scan = bool(a.art) and covers.is_case_scan(a.art, a.tdb)  # the folder is the covers' own
         title_shot = covers.title_screen(game.product, [game.name] + covers.other_names(game.product, a.tdb), a.tdb)
     make_title(game_dir, out, info, a.art, a.icon_art, a.art_style, released, case_scan, a.pad_bezel, a.pad_art, a.boot_sound, title_shot,
-               language=a.language)
+               language=a.language, include_shaders=need_shaders)
     if a.save:
         import saves
         try:
             saves.pack(a.save, os.path.join(out, 'title', 'content'))
         except (saves.SaveError, OSError) as e:
             fail(f"The 3DS save couldn't be packed in: {e}")
+    os.makedirs(os.path.join(out,'title','content'),exist_ok=True)
+    with open(os.path.join(out,'title','content','menu_enabled.txt'),'w',encoding='ascii',newline='\n') as f:
+        f.write('0\n' if a.no_menu else '1\n')
+    with open(os.path.join(out,'title','content','menu_shortcut.txt'),'w',encoding='ascii') as f:
+        f.write(((a.menu_shortcut or '') if not a.no_menu else '') + '\n')
     if a.no_menu:  # the game looks for it as it starts (frontend_wiiu.cpp)
         open(os.path.join(out, 'title', 'content', 'no_menu'), 'wb').close()
     elif a.menu_shortcut:
@@ -636,6 +739,22 @@ def build(a):
         print(f'@done {out}', flush=True)
         return
 
+    if a.output_format == 'homebrew':
+        PROGRESS.stage('Packing Homebrew')
+        destination = os.path.join(a.card, 'wiiu', 'apps') if a.card else a.out
+        path = os.path.join(destination, homebrew.filename(info['name']) + '.wuhb')
+        guide = os.path.join(HERE, 'HOMEBREW_GUIDE.txt')
+        meta = homebrew.identity(game_dir, game.title_id, info['name'], ROOT)
+        try:
+            where = homebrew.bundle(g.rpx, os.path.join(out, 'title'), path, info['name'],
+                                   os.path.join(b3.DKP, 'tools', 'bin', 'wuhbtool.exe'), meta, guide)
+        except (OSError, ValueError, subprocess.CalledProcessError) as e: fail(f'Homebrew packaging failed: {e}')
+        if not a.keep: shutil.rmtree(game_dir, ignore_errors=True)
+        PROGRESS.done, PROGRESS.share = 100, 0
+        PROGRESS.at(1)
+        print(f'@done {where}', flush=True)
+        return
+
     PROGRESS.stage('Packing the WUP')
     # A failed card copy leaves this completed output outside the extraction folder that the next attempt clears.
     if a.out:
@@ -643,7 +762,31 @@ def build(a):
     else:
         folder = workspace_child(workspace_child(WORK_GAMES, '_wup'), info['slug'])
         wup = workspace_child(folder, info['folder'])
-    pack_wup(a.otp, os.path.join(out, 'title'), wup)
+    title = os.path.join(out, 'title')
+    if is_update:
+        import xml.etree.ElementTree as ET
+        app_xml = ET.parse(os.path.join(title,'code','app.xml'))
+        base_id = app_xml.findtext('title_id')
+        base_version = int(app_xml.findtext('title_version'),16)
+        version, now = wup_update.update_build_info()
+        if base_version>version:
+            fail('This base version exceeds the fixed native update version. Use a matching base made with this Builder.')
+        update_title = os.path.join(out,'update')
+        try:
+            wup_update.make_update(title,update_title,a.wup_update_parts,version,now,base_manifest=selected_manifest,inputs=input_summary,contract=wup_update.shader_contract(ROOT))
+        except (ValueError,OSError) as error: fail('WUP update refused: '+str(error))
+        wup += '_Update_' + now.strftime('%Y%m%d_%H%M%S') + f'_v{version}'
+        title = update_title
+        print(f'Native WUP update: {base_id}, version {version}, built {now.isoformat()}',flush=True)
+
+    if not is_update:
+        pending_manifest = os.path.join(out,'base-manifest.json')
+        base_record = wup_update.remember_base(pending_manifest,title,int(info['title_id'],16),inputs=input_summary,root=ROOT)
+    pack_wup(a.otp, title, wup)
+    if not is_update:
+        wup_update.write_manifest(inventory_path,base_record)
+        wup_update.write_manifest(wup+'.base.json',base_record)
+        print('Base build manifest: '+wup+'.base.json',flush=True)
 
     where = wup
     if a.card:
@@ -655,10 +798,11 @@ def build(a):
             if shutil.disk_usage(install).free < size + (64 << 20):
                 fail(f'The SD card needs {size >> 20} MB free for this game.')
             where = copy_to(wup, install)
+            if not is_update: wup_update.write_manifest(where+'.base.json',base_record)
         except OSError as e:  # the WUP stays in the work folder, as with a folder build
             fail(card_error(e) + f' The game is built: it is in {wup}.')  # one line: the window reads @error lines
         if not a.out:
-            shutil.rmtree(workspace_child(folder, info['folder']), ignore_errors=True)
+            shutil.rmtree(wup, ignore_errors=True)
     if not a.keep:  # the runtime's objects stay: every game shares them
         shutil.rmtree(workspace_child(WORK_GAMES, info['slug']), ignore_errors=True)
         shutil.rmtree(workspace_child(b3.WORK, f'ppc_{info["slug"]}'), ignore_errors=True)

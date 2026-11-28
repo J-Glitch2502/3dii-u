@@ -6,12 +6,12 @@
 #include <coreinit/cache.h>
 #include <coreinit/filesystem_fsa.h>
 #include <coreinit/ios.h>
+#include <coreinit/debug.h>
 
 #include <cstring>
 
 #include "rt.h"
 #include "wiiu.h"
-#include "write_policy.h"
 
 extern "C" {
 FSError __real_FSAOpenFileEx(FSAClientHandle, const char *, const char *, FSMode, FSOpenFileFlags, uint32_t, FSAFileHandle *);
@@ -180,10 +180,6 @@ inline bool direct(FSAClientHandle c) {
 
 extern "C" {
 FSError __wrap_FSAOpenFileEx(FSAClientHandle c, const char *path, const char *mode, FSMode create, FSOpenFileFlags flags, uint32_t prealloc, FSAFileHandle *out) {
-    if ((!wiiu::readonly_mode(mode) || flags != FS_OPEN_FLAG_NONE || prealloc) && !wiiu::writable_path(path)) {
-        *out = (FSAFileHandle)-1;
-        return FS_ERROR_PERMISSION_ERROR;
-    }
     return direct(c) ? d_open(c, path, mode, create, flags, prealloc, out) : __real_FSAOpenFileEx(c, path, mode, create, flags, prealloc, out);
 }
 FSError __wrap_FSACloseFile(FSAClientHandle c, FSAFileHandle file) { return direct(c) ? d_close(c, file) : __real_FSACloseFile(c, file); }
@@ -211,7 +207,6 @@ FSError __wrap_FSATruncateFile(FSAClientHandle c, FSAFileHandle file) {
     return ask(c, FSA_COMMAND_TRUNCATE_FILE, s);
 }
 FSError __wrap_FSARemove(FSAClientHandle c, const char *path) {
-    if (!wiiu::writable_path(path)) return FS_ERROR_PERMISSION_ERROR;
     if (!direct(c)) return __real_FSARemove(c, path);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
@@ -219,7 +214,6 @@ FSError __wrap_FSARemove(FSAClientHandle c, const char *path) {
     return ask(c, FSA_COMMAND_REMOVE, s);
 }
 FSError __wrap_FSAMakeDir(FSAClientHandle c, const char *path, FSMode mode) {
-    if (!wiiu::mkdir_path(path)) return FS_ERROR_PERMISSION_ERROR;
     if (!direct(c)) return __real_FSAMakeDir(c, path, mode);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
@@ -228,7 +222,6 @@ FSError __wrap_FSAMakeDir(FSAClientHandle c, const char *path, FSMode mode) {
     return ask(c, FSA_COMMAND_MAKE_DIR, s);
 }
 FSError __wrap_FSARename(FSAClientHandle c, const char *from, const char *to) {
-    if (!wiiu::writable_path(from) || !wiiu::writable_path(to)) return FS_ERROR_PERMISSION_ERROR;
     if (!direct(c)) return __real_FSARename(c, from, to);
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
@@ -313,14 +306,42 @@ void fsa_direct_report() {
     else LOG("[fs] file calls go through the system's functions: %s\n", why);
 }
 
-// What SAVEFlushQuota asks for in the end, without the FS layer's hook. false: it wasn't done this way, so do it that way.
-bool fsa_direct_flush_quota(const char *path) {
+int fsa_report_save_quota(const char *path) {
+    const FSAClientHandle client = FSAAddClient(nullptr);
+    if (client < 0) return -1;
+    FSStat status{};
+    const FSError result = __wrap_FSAGetStat(client, path, &status);
+    FSADelClient(client);
+    if (result == FS_ERROR_OK) {
+        const bool quota = (status.flags & FS_STAT_QUOTA) == FS_STAT_QUOTA;
+        OSReport("[3dii-u save] mounted storage %s: %s, quota %llu bytes\n", path,
+                 quota ? "quota" : "directory", (unsigned long long)status.quotaSize);
+        return quota ? 1 : 0;
+    }
+    OSReport("[3dii-u save] mounted storage query %s failed: %d\n", path, (int)result);
+    return -1;
+}
+
+// Once direct I/O has been validated, keep quota flushes on that route too.
+// Propagate failures so the save worker retries without entering Aroma's hooked FS layer.
+bool fsa_direct_flush_quota(const char *path, int &result) {
     if (route != DIRECT) return false;
-    static FSAClientHandle client = FSAAddClient(nullptr);
-    if (client < 0) return false;
+    static FSAClientHandle client = -1;  // save worker serializes quota requests
+    if (client < 0) client = FSAAddClient(nullptr);
+    if (client < 0) {
+        result = client;
+        return true;
+    }
     alignas(64) FSAShimBuffer s;
     memset(&s, 0, sizeof s);
     put_path(s.request.flushQuota.path, path);
-    return ask(client, FSA_COMMAND_FLUSH_QUOTA, s) == FS_ERROR_OK;
+    result = ask(client, FSA_COMMAND_FLUSH_QUOTA, s);
+    if (result < 0) {
+        static int last_error;
+        if (result != last_error)
+            OSReport("[3dii-u save] direct quota flush failed: %d\n", result);
+        last_error = result;
+    }
+    return true;
 }
 }  // namespace wiiu

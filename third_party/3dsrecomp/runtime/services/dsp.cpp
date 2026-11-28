@@ -7,6 +7,9 @@ namespace kernel {
 
 namespace {
 struct DspState {
+#ifdef RECOMP_RESUMABLE
+    void state_fields(checkpoint::Archive &a) { a.fields(semaphore, pipe_irq, other_irq, game_waits, held, owed); }
+#endif
     std::shared_ptr<Event> semaphore = make_event(ONESHOT, "DSP semaphore");
     std::shared_ptr<Event> pipe_irq[4];   // per pipe channel (interrupt type 2)
     std::shared_ptr<Event> other_irq[2];  // interrupt types 0/1
@@ -31,6 +34,7 @@ static void dsp_interrupt() {  // (kernel lock held) the frame is there for the 
 }
 
 void dsp_tick() {
+    checkpoint::Scope state_lock(checkpoint::gate());
     // The sound doesn't wait for the kernel lock (lock_soon): a call of the game's can hold it for longer than there is sound queued, and one did
     // in Kid Icarus's loading screens (2026-11-11). A frame made without the lock is one the game hasn't come for, and an interrupt that
     // couldn't go to the game goes with the next frame that has the lock.
@@ -55,6 +59,7 @@ void dsp_tick() {
 }
 
 struct Dsp : Service {
+    SERVICE_CHECKPOINT(Dsp)
     using Service::Service;
     void handle(IPC &ipc) override {
         switch (ipc.cmd()) {
@@ -139,5 +144,10 @@ struct Dsp : Service {
 };
 
 void register_dsp() { register_service(std::make_shared<Dsp>("dsp::DSP")); }
+
+
+#ifdef RECOMP_RESUMABLE
+void checkpoint_dsp(checkpoint::Image &im) { im.take(dsp); }
+#endif
 
 }  // namespace kernel

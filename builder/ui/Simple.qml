@@ -101,6 +101,61 @@ ApplicationWindow {
             }
         }
 
+        RowLayout {
+            Layout.fillWidth: true
+            Label { text: "Output:" }
+            ComboBox {
+                Layout.preferredWidth: 220
+                Accessible.name: "Output package type"
+                readonly property var formats: ["wup", "wup-update", "homebrew"]
+                model: ["WUP install", "WUP update", "Homebrew (.wuhb)"]
+                currentIndex: formats.indexOf(app.outputFormat)
+                enabled: !win.busy
+                onActivated: function(index) { app.setOutputFormat(formats[index]) }
+            }
+            Button { text: "Homebrew import guide"; visible: app.outputFormat === "homebrew"; onClicked: app.homebrewGuide() }
+            Item { Layout.fillWidth: true }
+        }
+        RowLayout {
+            visible: app.outputFormat === "wup-update"
+            Label { text: "WUP update:" }
+            ComboBox {
+                Accessible.name: "WUP update contents"
+                model: ["Binary only", "Binary + shaders"]
+                currentIndex: app.wupUpdateParts === "binary" ? 0 : 1
+                enabled: !win.busy
+                onActivated: function(index) { app.setWupUpdateParts(index === 0 ? "binary" : "both") }
+            }
+        }
+        PathRow {
+            visible: app.outputFormat === "wup-update"
+            label: "Matching base manifest..."
+            text: app.wupBaseText
+            onChoose: app.chooseWupBase()
+        }
+        Button { visible: app.outputFormat === "wup-update" && app.hasWupBase; text: "Use last full base build"; onClicked: app.clearWupBase() }
+        Label {
+            visible: app.outputFormat === "wup-update"
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            text: "Install a matching base from this updated Builder first. Keep the base game and saves."
+        }
+        RowLayout {
+            visible: app.outputFormat === "homebrew"
+            Layout.fillWidth: true
+            Label { text: "Homebrew build:" }
+            ComboBox {
+                Layout.preferredWidth: 260
+                Accessible.name: "Homebrew build contents"
+                readonly property var keys: ["full", "binary", "shaders", "both"]
+                model: ["Full game (.wuhb)", "Binary only (.rpx)", "Shaders only", "Binary + shaders"]
+                currentIndex: keys.indexOf(app.homebrewParts)
+                enabled: !win.busy
+                onActivated: function(index) { app.setHomebrewParts(keys[index]) }
+            }
+            Item { Layout.fillWidth: true }
+        }
+
         TabBar {
             id: tabs
             objectName: "tabs"
@@ -119,9 +174,9 @@ ApplicationWindow {
             ColumnLayout {  // what every build needs
                 spacing: 8
                 PathRow { label: "Game..."; text: app.hasGame ? app.gameName + "   " + app.meta : "Choose one of your 3DS games"; onChoose: app.chooseGame() }
-                PathRow { label: "Wii U otp.bin..."; text: app.otpText; onChoose: app.chooseOtp() }
+                PathRow { visible: app.outputFormat !== "homebrew"; label: "Wii U otp.bin..."; text: app.otpText; onChoose: app.chooseOtp() }
                 PathRow { label: "3DS keys..."; text: app.keysText; onChoose: app.chooseKeys() }
-                PathRow { label: "3DS system files..."; text: app.sysText; onChoose: app.chooseSystem() }
+                PathRow { visible: app.outputFormat !== "homebrew" || app.homebrewParts === "full"; label: "3DS system files..."; text: app.sysText; onChoose: app.chooseSystem() }
                 GridLayout {
                     columns: 2
                     columnSpacing: 12
@@ -208,6 +263,13 @@ ApplicationWindow {
                     Label { text: "In-game menu:" }
                     RadioButton { text: "On"; checked: app.gameMenu; onClicked: app.setGameMenu(true) }
                     RadioButton { text: "Off"; checked: !app.gameMenu; onClicked: app.setGameMenu(false) }
+                }
+                RowLayout {
+                    visible: app.gameMenu
+                    enabled: !win.busy
+                    Label { text: "In-game menu style:" }
+                    RadioButton { text: "New"; checked: app.menuStyle === "new"; onClicked: app.setMenuStyle("new") }
+                    RadioButton { text: "Classic"; checked: app.menuStyle === "classic"; onClicked: app.setMenuStyle("classic") }
                 }
                 RowLayout {
                     visible: app.gameMenu

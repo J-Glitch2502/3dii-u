@@ -5,6 +5,7 @@
 // Surfaces hold PICA window rows: row 0 is y = 0, the bottom of the image, which is also how textures are sampled (t = 0 at row
 // 0). So a render target can be sampled as a texture as it is. Screens are rotated into place when they are presented.
 #include <coreinit/cache.h>
+#include <coreinit/debug.h>
 #include <coreinit/memdefaultheap.h>
 #include <coreinit/memexpheap.h>
 #include <coreinit/memfrmheap.h>
@@ -31,6 +32,14 @@
 #include <vpad/input.h>
 #include <whb/gfx.h>
 
+#include "uber_family.h"
+#include "network_menu.h"
+#include "chat_border.h"
+#include "azl/platform.hpp"
+#include "network_settings.h"
+#include "network_keyboard.h"
+#include "network_menu_model.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -39,6 +48,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gpu/pica.h"
@@ -48,11 +58,15 @@
 #include "services/services.h"
 #include "kernel.h"
 #include "latte_program.h"
+#include "gfd_index.h"
 #include "memory_fills.h"
+#include "checkpoint.h"
 #include "loader.h"
 #include "present_rule.h"
 #include "scaled_copy.h"
 #include "screen_layouts.h"
+#include "index_ranges.h"
+#include "darkmoon_policy.h"
 #include "surface_readback.h"
 #include "settings.h"
 #include "save_backup.h"
@@ -74,6 +88,13 @@ extern "C" void GX2SampleBottomGPUCycle(uint64_t *cycle);
 extern "C" uint64_t GX2GPUTimeToCPUTime(uint64_t time);
 
 namespace wiiu {
+bool keyboard_open();
+bool chat_visible();
+void draw_chat_on(GX2ColorBuffer *);
+#ifdef RECOMP_RESUMABLE
+void draw_state_saving_on(GX2ColorBuffer *cb);
+bool state_loading_visible();
+#endif
 static void relieve_mem1();  // fast memory found full the first time (beside tv_buffer_to_mem2, which it uses)
 }
 
@@ -90,9 +111,9 @@ u32 st_pace[5];       // (measuring builds) the top screen's pictures by the VBl
 // above, and a draw's steps one after another (lap). "nolaps" in the data folder leaves the steps out of a measuring build, to see
 // what reading the clock a dozen times a draw costs.
 bool prof_laps = true;
-inline OSTime prof_now() { return kMeasure ? OSGetSystemTime() : 0; }
+inline OSTime prof_now() { return cpu_timing_enabled() ? OSGetSystemTime() : 0; }
 inline void prof_add(int k, OSTime since) {
-    if (kMeasure) prof[k] += (u32)(OSGetSystemTime() - since);
+    if (since) prof[k] += (u32)(OSGetSystemTime() - since);
 }
 // ---- the GPU's own time, per pass: where the console's GPU spends a frame (the "[prof] GPU" line)
 // A pass is the draws into one target, a clear, a copy, or the present. Each starts with two stamps from the GPU's clock: the cycle its command processor
@@ -110,6 +131,7 @@ struct GtFrame {
 GtFrame gt[GT_FRAMES];
 u32 gt_cur;
 bool gt_on = true, gt_broken;
+std::atomic<bool> live_gpu_timing{false};  // opt-in GPU timestamps in a release build; no alarm-based CPU sampler
 struct GtSum {
     u32 tag;
     u8 kind;
@@ -123,7 +145,7 @@ volatile bool gt_reset;
 OSTime gt_last_end;
 
 void gt_mark(u8 kind, u32 tag) {
-    if (!kMeasure || !gt_on || gt_broken) return;
+    if ((!kMeasure && !live_gpu_timing.load(std::memory_order_relaxed)) || !gt_on || gt_broken) return;
     GtFrame &f = gt[gt_cur];
     if (!f.top) {
         f.top = (u64 *)MEMAllocFromDefaultHeapEx(GT_MARKS * 16, 0x100);
@@ -161,7 +183,7 @@ void gt_add(u8 kind, u32 tag, u64 ticks) {
 
 // At the end of a present, once the GPU has finished the frame before last: the oldest frame's stamps are read, and its slot is the next frame's.
 void gt_flip(u32 first_target) {
-    if (!kMeasure || !gt_on || gt_broken) return;
+    if ((!kMeasure && !live_gpu_timing.load(std::memory_order_relaxed)) || !gt_on || gt_broken) return;
     gt_mark(GT_END, 0);
     gt_cur = (gt_cur + 1) % GT_FRAMES;
     GtFrame &f = gt[gt_cur];
@@ -200,10 +222,10 @@ void gt_flip(u32 first_target) {
 
 OSTime prof_t;
 inline void lap_start() {
-    if (kMeasure && prof_laps) prof_t = OSGetSystemTime();
+    if (cpu_timing_enabled() && prof_laps) prof_t = OSGetSystemTime();
 }
 inline void lap(int k) {
-    if (!kMeasure || !prof_laps) return;
+    if (!cpu_timing_enabled() || !prof_laps) return;
     const OSTime n = OSGetSystemTime();
     prof[k] += (u32)(n - prof_t);
     prof_t = n;
@@ -238,7 +260,7 @@ void ring_next_segment() {
     const OSTime tw = OSGetSystemTime();
     if (ring_fence[ring_seg]) GX2WaitTimeStamp(ring_fence[ring_seg]);
     const u32 waited = (u32)(OSGetSystemTime() - tw);
-    if (kMeasure) prof[P_WAIT] += waited;
+    if (cpu_timing_enabled()) prof[P_WAIT] += waited;
     dyn_waited += waited;  // (this one the picture's size goes by: dyn_res_update)
     ring_off = RING_SIZE / 3 * ring_seg;
     ring_end = ring_off + RING_SIZE / 3;
@@ -289,6 +311,8 @@ struct PsEntry {
 };
 constexpr u32 COMPILED_HERE = 0x7ffffffe;  // a VsEntry or PsEntry index: the console compiled it, nothing to load from the shipped set
 constexpr u32 MISSED = ~0u;                // the set lacks it: the fallback draws, or the CPU does, until the console has compiled it
+const void *extra_ps_gsh;
+constexpr u32 EXTRA_PS_INDEX = 0x40000000;
 // GPU-thread owned, monotonic for this session: queued draws finish before a larger VS partition is published.
 uint32_t vertex_registers = shader_budget::kDefaultVertex;
 bool state_lost = true;  // the GPU's state no longer matches what was last set
@@ -309,6 +333,75 @@ std::unordered_map<u64, VsEntry> vs_table;
 std::unordered_map<u64, PsEntry> ps_table;
 GX2VertexShader *vs_passthrough, *vs_blit;
 GX2PixelShader *ps_blit, *ps_fallback, *ps_fallback_tex, *ps_uber, *ps_uber_lit;
+GX2PixelShader *ps_uber_family[2][8];
+GX2PixelShader *ps_uber_bounded[2][8][7][5];
+u32 ps_uber_bounded_index[2][8][7][5];
+void *bounded_ps_gsh;
+std::unordered_map<u64, PsEntry> material_fallbacks;
+std::unordered_set<GX2PixelShader *> generic_pixel_shaders, material_pixel_shaders, lighting_pixel_shaders, extension_pixel_shaders;
+u64 st_material_draws{}, st_lighting_draws{}, st_extension_draws{};
+std::atomic<bool> fallback_uv_select{true}, material_extension{true};
+std::atomic<unsigned> bounded_fallback{3};  // exact lighting family when available; otherwise material/general fallback
+u64 st_fragment_fallback[2]{}, st_fragment_specialized{}, st_fragment_simple{};
+u64 st_fallback_shape[2][7][5]{};
+std::atomic<bool> copy_rect_experiment{false};
+std::atomic<unsigned> index_range_experiment{0};
+gx2_indices::Ranges index_ranges;
+u64 index_range_hits=0,index_range_misses=0;
+std::atomic<int> viewport_nudge_override{-1};
+GX2PixelShader *uber_for(const DrawState &ds) {
+    u32 mask = 0;
+    for (u32 i = 0; i < 3; i++) if (ds.need_tex[i] && !ds.tex[i].null_tex) mask |= 1u << i;
+    unsigned mode = bounded_fallback.load(std::memory_order_relaxed);
+    if (g_game.program_id == 0x000400000010bf00ULL && !ds.lighting && ds.alpha_test && ds.tev_count == 6) {
+        // Hardware draw trace: this Triple Deluxe UI combiner loses artwork
+        // with full and material fallback, while the bounded shader draws it.
+        u32 words[FS_KEY_WORDS];
+        const u32 count = fs_key_words(ds, words);
+        const u64 key = fnv64(words, count * sizeof(u32));
+        if ((key == 0x598ffe1f5c6d8746ULL || key == 0xd55e3b5a791ff5b0ULL)
+            && bounded_ps_gsh && ps_uber_bounded_index[0][mask][6][0] != MISSED)
+            mode = 1;
+    }
+    if (mode && ds.tev_count <= 6) {
+        const u32 bucket = ds.lighting ? uber_light_bucket(std::min<u32>(ds.light.num_lights, 8)) : 0;
+        if (mode >= 2) {
+            const bool lighting = mode >= 3 && ds.lighting;
+            const u64 material = uber_material_key(ds, kUberLightCaps[bucket]);
+            const u64 keys[] = {lighting ? uber_lighting_material_key(ds, kUberLightCaps[bucket]) : 0,
+                                material_extension.load(std::memory_order_relaxed) ? material ^ kMaterialExtensionTag : 0,
+                                material};
+            for (u32 tier = 0; tier < 3; ++tier) {
+                if (!keys[tier]) continue;
+                const auto it = material_fallbacks.find(keys[tier]);
+                if (it == material_fallbacks.end()) continue;
+                auto &entry = it->second;
+                if (!entry.shader) {
+                    entry.shader = WHBGfxLoadGFDPixelShader(entry.index, bounded_ps_gsh);
+                    if (!entry.shader) FATAL("cannot load material fallback %u\n", entry.index);
+                    generic_pixel_shaders.insert(entry.shader);
+                    material_pixel_shaders.insert(entry.shader);
+                    if (tier == 0) lighting_pixel_shaders.insert(entry.shader);
+                    if (tier == 1) extension_pixel_shaders.insert(entry.shader);
+                }
+                return entry.shader;
+            }
+        }
+        auto &p = ps_uber_bounded[ds.lighting != 0][mask][ds.tev_count][bucket];
+        const u32 index = ps_uber_bounded_index[ds.lighting != 0][mask][ds.tev_count][bucket];
+        if (bounded_ps_gsh && index != MISSED) {
+            if (!p) {
+                p = WHBGfxLoadGFDPixelShader(index, bounded_ps_gsh);
+                generic_pixel_shaders.insert(p);
+            }
+            if (!p) FATAL("cannot load bounded fallback %u\n", index);
+            return p;
+        }
+    }
+    GX2PixelShader *p = ps_uber_family[ds.lighting != 0][mask];
+    return p ? p : ds.lighting ? ps_uber_lit : ps_uber;
+}
+GX2PixelShader *ps_depth_copy;
 GX2PixelShader *ps_decode[14];        // by texture format: decodes it on the GPU (gpu_decode); null in a pack from before it had that one
 // A bit per attribute format (s8, u8, s16, float) kept the old way: copied by itself, integers as floats made by the CPU. Files named "cpuattr"
 // (all), "cpuattr8" and "cpuattr16" set them, and "cemu" the signed bytes. None by default: bytes fetched a 4-byte word at a time (gpu_fetched)
@@ -323,7 +416,7 @@ bool gxt_cpu_tex;                     // a file named "cputex" in the data folde
 // lacked eleven, and the CPU shaded 47,000 vertices a frame, 3.5 fps in Cemu and about 2 on the user's console (2026-11-11).
 static bool glsl_vs = true;
 static bool glsl_force;  // "glslforce": the console's compiler is asked for every pixel shader the shipped set has too, which puts it under a real load in Cemu (it keeps the shipped ones)
-volatile bool uber_all;  // "uberall" (a file in the data folder, or set from the PC): every draw uses the uber shaders, which shows up a mistake in them
+std::atomic<bool> uber_all{false};  // "uberall" (a file in the data folder, or set from the PC): every draw uses the uber shaders, which shows up a mistake in them
 bool uber_fallback;  // a fragment state with no compiled shader draws with them
 bool stale_check;  // a file named "stalecheck": hashes each texture once a flip and logs those whose bytes changed with no notice. The renderer only looks again when told.
 // what the card thread still has to add to shader_misses.bin: this thread must never wait for the card
@@ -343,44 +436,42 @@ std::vector<u8> read_whole(const char *path, u32 align_to) {
     std::vector<u8> d;
     FILE *f = fopen(path, "rb");
     if (!f) return d;
-    fseek(f, 0, SEEK_END);
-    d.resize(ftell(f) + align_to);
-    fseek(f, 0, SEEK_SET);
-    fread(d.data(), 1, d.size() - align_to, f);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return d; }
+    const long length = ftell(f);
+    if (length < 0 || (size_t)length > SIZE_MAX - align_to || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return d;
+    }
+    d.resize((size_t)length + align_to);
+    const bool read_ok = fread(d.data(), 1, (size_t)length, f) == (size_t)length && !ferror(f);
     fclose(f);
-    d.resize(d.size() - align_to);
+    if (read_ok) d.resize((size_t)length);
+    else d.clear();
     return d;
 }
 
 // shaders.gsh is read as each shader is needed, not kept whole: with every lit state compiled ahead, Luigi's Mansion: Dark Moon's is 51 MB, which
 // stayed in a heap that a long session filled up. At boot the file is read once to note where each shader's header and program blocks are; a shader
 // is then two reads into a small GFD of its own, which WHB copies out of (its program in memory of its own), and which goes again.
-struct GfdShader {
-    u32 head_at, head_len, prog_at, prog_len;  // each block with its block header
-};
+using GfdShader = gfd_index::Shader;
 std::vector<GfdShader> gfd_vs, gfd_ps;
 std::vector<u8> gfd_file_head, gfd_end;  // the file's header and its end block
 FILE *gfd_file;
+// Small packs stay in RAM: a WUHB's streamed seeks pass through Aroma's
+// allocating hooks, and a hardware heartbeat dump caught that heap lock in
+// gfd_one. Keep the memory-saving stream path for packs above this fixed cap.
+constexpr size_t GFD_RESIDENT_LIMIT = 16u << 20;
+std::vector<u8> gfd_resident;
 u32 st_shipped_vs_reuses, st_shipped_ps_reuses;
 
 static void gfd_scan(const u8 *d, u32 n, const u8 *idx, u32 idx_size) {
-    constexpr u32 VS_HEAD = 3, VS_PROG = 5, PS_HEAD = 6, PS_PROG = 7, END = 1;
     auto be32 = [&](u32 at) { return (u32)d[at] << 24 | (u32)d[at + 1] << 16 | (u32)d[at + 2] << 8 | d[at + 3]; };
-    if (n < 32 || memcmp(d, "Gfx2", 4)) FATAL("shaders.gsh is not a GFD file\n");
-    const u32 first = be32(4);
-    if (first < 32 || first > n) FATAL("shaders.gsh has an invalid file header\n");
-    gfd_file_head.assign(d, d + first);
-    for (u32 at = first; at + 32 <= n && !memcmp(d + at, "BLK{", 4);) {
-        const u32 head = be32(at + 4), kind = be32(at + 16), size = be32(at + 20), len = head + size;
-        if (head < 32 || head > n - at || size > n - at - head) FATAL("shaders.gsh has an invalid block at %u\n", at);
-        if (kind == VS_HEAD) gfd_vs.push_back({at, len, 0, 0});
-        else if (kind == VS_PROG && !gfd_vs.empty()) gfd_vs.back().prog_at = at, gfd_vs.back().prog_len = len;
-        else if (kind == PS_HEAD) gfd_ps.push_back({at, len, 0, 0});
-        else if (kind == PS_PROG && !gfd_ps.empty()) gfd_ps.back().prog_at = at, gfd_ps.back().prog_len = len;
-        else if (kind == END) gfd_end.assign(d + at, d + at + len);
-        at += len;
-    }
-    if (gfd_vs.empty()) FATAL("shaders.gsh contains no vertex programs\n");
+    gfd_index::Index parsed;
+    if (const char *error = gfd_index::scan(d, n, parsed)) FATAL("shaders.gsh: %s\n", error);
+    gfd_vs = std::move(parsed.vs);
+    gfd_ps = std::move(parsed.ps);
+    gfd_file_head.assign(d, d + parsed.header_len);
+    gfd_end.assign(d + parsed.end_at, d + parsed.end_at + parsed.end_len);
     if (!idx || idx_size < 32) FATAL("shaders.idx is missing\n");
     auto index_word = [&](u32 at) { return (u32)idx[at] << 24 | (u32)idx[at + 1] << 16 | (u32)idx[at + 2] << 8 | idx[at + 3]; };
     if (index_word(0) != kShaderIndexMagic || index_word(4) != kShaderIndexVersion) FATAL("shaders.idx is the wrong version\n");
@@ -415,13 +506,19 @@ static std::vector<u8> gfd_one(const GfdShader &g) {
     std::vector<u8> out(gfd_file_head);
     const size_t at = out.size();
     out.resize(at + g.head_len + g.prog_len);
-    wiiu::romfs_begin();  // the content's reads take turns (the game's RomFS is read the same way)
-    fseek(gfd_file, g.head_at, SEEK_SET);
-    const size_t a = fread(out.data() + at, 1, g.head_len, gfd_file);
-    fseek(gfd_file, g.prog_at, SEEK_SET);
-    const size_t b = fread(out.data() + at + g.head_len, 1, g.prog_len, gfd_file);
-    wiiu::romfs_end();
-    if (a != g.head_len || b != g.prog_len) FATAL("shaders.gsh could not be read\n");
+    if (!gfd_resident.empty()) {
+        // gfd_scan checked both extents before this pack became resident.
+        memcpy(out.data() + at, gfd_resident.data() + g.head_at, g.head_len);
+        memcpy(out.data() + at + g.head_len, gfd_resident.data() + g.prog_at, g.prog_len);
+    } else {
+        wiiu::romfs_begin();
+        const bool head_seek = fseek(gfd_file, g.head_at, SEEK_SET) == 0;
+        const size_t a = head_seek ? fread(out.data() + at, 1, g.head_len, gfd_file) : 0;
+        const bool prog_seek = fseek(gfd_file, g.prog_at, SEEK_SET) == 0;
+        const size_t b = prog_seek ? fread(out.data() + at + g.head_len, 1, g.prog_len, gfd_file) : 0;
+        wiiu::romfs_end();
+        if (a != g.head_len || b != g.prog_len) FATAL("shaders.gsh could not be read\n");
+    }
     for (size_t blk : {at, at + g.head_len})
         for (int k = 0; k < 8; k++) out[blk + 24 + k] = 0;  // block id and index: 0
     out.insert(out.end(), gfd_end.begin(), gfd_end.end());
@@ -446,6 +543,11 @@ GX2VertexShader *load_vs(u32 index) {
 }
 GX2PixelShader *load_ps(u32 index) {
     wiiu::last_ps = index;
+    if (index & EXTRA_PS_INDEX) {
+        GX2PixelShader *shader = WHBGfxLoadGFDPixelShader(index & ~EXTRA_PS_INDEX, extra_ps_gsh);
+        if (!shader) FATAL("cannot load extra pixel shader %u\n", index);
+        return shader;
+    }
     if (index >= gfd_ps.size()) FATAL("no pixel shader %u\n", index);
     static std::vector<GX2PixelShader *> programs(gfd_ps.size());
     GX2PixelShader *&s = programs[index];
@@ -459,6 +561,94 @@ GX2PixelShader *load_ps(u32 index) {
     return s;
 }
 
+// This separate optional pack keeps shaders.gsh below its resident-size cap.
+// Its programs are copied to GX2 memory lazily; no SD reads occur during draws.
+void load_bounded_fallbacks() {
+    for (auto &lit : ps_uber_bounded_index) for (auto &mask : lit)
+        for (auto &stages : mask) for (auto &index : stages) index = MISSED;
+    FILE *file = fopen("fs:/vol/content/fallback-shaders.bin", "rb");
+    if (!file) return;  // packs from before bounded fallbacks remain valid
+    u32 header[3];
+    std::array<u64, 2048> keys;
+    if (fread(header, sizeof(u32), 3, file) != 3 || header[0] != 0x55465031 ||
+        !header[1] || header[1] > keys.size() || header[2] < 32 || header[2] > (16u << 20) ||
+        fread(keys.data(), sizeof(u64), header[1], file) != header[1]) {
+        fclose(file);
+        OSReport("[3dii-u shader] ignoring invalid bounded fallback header\n");
+        return;
+    }
+    void *pack = memalign(64, header[2]);
+    const bool valid = pack && fread(pack, 1, header[2], file) == header[2] && fgetc(file) == EOF;
+    fclose(file);
+    gfd_index::Index parsed;
+    const char *error = valid ? gfd_index::scan((const u8 *)pack, header[2], parsed) : "short read";
+    if (error || parsed.ps.size() != header[1] || !parsed.vs.empty()) {
+        free(pack);
+        OSReport("[3dii-u shader] ignoring invalid bounded fallback programs\n");
+        return;
+    }
+    std::unordered_map<u64, u32> indices;
+    for (u32 i = 0; i < header[1]; ++i) {
+        if (!indices.emplace(keys[i], i).second) {
+            free(pack);
+            OSReport("[3dii-u shader] ignoring duplicate bounded fallback key\n");
+            return;
+        }
+    }
+    u32 found = 0;
+    for (bool lit : {false, true}) for (u32 mask = 0; mask < 8; ++mask)
+        for (int stages = 0; stages <= 6; ++stages) for (u32 bucket = 0; bucket < (lit ? 5u : 1u); ++bucket) {
+            const std::string key = uber_family_key(lit, mask, stages, kUberLightCaps[bucket]);
+            const auto it = indices.find(fnv64(key.data(), key.size()));
+            if (it != indices.end()) {
+                ps_uber_bounded_index[lit][mask][stages][bucket] = it->second;
+                ++found;
+            }
+        }
+    for (const auto &[key, index] : indices) material_fallbacks.emplace(key, PsEntry{nullptr, index});
+    bounded_ps_gsh = pack;
+    OSReport("[3dii-u shader] %u fallback entries resident (%u bounded shapes, %u KB), programs loaded on demand\n", header[1], found, header[2] >> 10);
+}
+
+// An optional developer pack in the save directory adds previously missed pixel
+// shaders by key, while the bundle remains the source of the original tables.
+void load_extra_pixel_shaders() {
+    const std::string path = wiiu::data_dir() + "/extra-pixel-shaders.bin";
+    FILE *file = fopen(path.c_str(), "rb");
+    if (!file)
+        return;
+    u32 header[3];
+    std::array<u64, 1024> keys;
+    if (fread(header, sizeof(u32), 3, file) != 3 || header[0] != 0x4D505331 ||
+        !header[1] || header[1] > keys.size() || header[2] < 32 || header[2] > (16u << 20) ||
+        fread(keys.data(), sizeof(u64), header[1], file) != header[1]) {
+        fclose(file);
+        OSReport("[3dii-u shader] extra pixel shader pack has an invalid header\n");
+        return;
+    }
+    void *pack = memalign(64, header[2]);
+    const bool valid = pack && fread(pack, 1, header[2], file) == header[2] &&
+                       memcmp(pack, "Gfx2", 4) == 0 && fgetc(file) == EOF;
+    fclose(file);
+    if (!valid) {
+        free(pack);
+        OSReport("[3dii-u shader] extra pixel shader pack could not be read\n");
+        return;
+    }
+    gfd_index::Index parsed;
+    const char *error = gfd_index::scan((const u8 *)pack, header[2], parsed);
+    if (error || parsed.ps.size() != header[1]) {
+        OSReport("[3dii-u shader] ignoring extra shader pack: %s\n", error ? error : "pixel shader count mismatch");
+        free(pack);
+        return;
+    }
+    extra_ps_gsh = pack;
+    u32 added = 0;
+    for (u32 i = 0; i < header[1]; ++i)
+        added += ps_table.try_emplace(keys[i], PsEntry{nullptr, EXTRA_PS_INDEX | i}).second;
+    OSReport("[3dii-u shader] added %u precompiled pixel shaders\n", added);
+}
+
 void load_shader_tables() {
     static std::vector<u8> idx;
     idx = read_whole("fs:/vol/content/shaders.idx", 0);
@@ -467,13 +657,25 @@ void load_shader_tables() {
         std::vector<u8> file = read_whole("fs:/vol/content/shaders.gsh", 0);
         if (file.empty()) FATAL("shaders.gsh is missing\n");
         gfd_scan(file.data(), (u32)file.size(), idx.data(), (u32)idx.size());
-    }  // and the memory goes back
-    gfd_file = fopen("fs:/vol/content/shaders.gsh", "rb");
-    if (!gfd_file) FATAL("shaders.gsh is missing\n");
+        if (file.size() <= GFD_RESIDENT_LIMIT) gfd_resident = std::move(file);
+    }
+    if (gfd_resident.empty()) {
+        gfd_file = fopen("fs:/vol/content/shaders.gsh", "rb");
+        if (!gfd_file) FATAL("shaders.gsh is missing\n");
+        OSReport("[3dii-u shader] large pack uses streamed reads\n");
+    } else {
+        OSReport("[3dii-u shader] resident pack: %u bytes; no shader file seeks during drawing\n", (u32)gfd_resident.size());
+    }
     if (idx.size() < sizeof(ShaderIndexHeader)) FATAL("shaders.idx is missing\n");
     const auto *h = (const ShaderIndexHeader *)idx.data();
     if (h->magic != kShaderIndexMagic || h->version != kShaderIndexVersion) FATAL("shaders.idx is the wrong version\n");
+    if (!gfd_index::table_fits(idx.size(), sizeof(*h), sizeof(ShaderIndexEntry), h->num_ps, h->num_vs))
+        FATAL("shaders.idx has a truncated entry table\n");
     const auto *e = (const ShaderIndexEntry *)(h + 1);
+    for (u32 i = 0; i < h->num_ps; ++i)
+        if (e[i].index >= gfd_ps.size()) FATAL("shaders.idx pixel index %u is out of range\n", e[i].index);
+    for (u32 i = 0; i < h->num_vs; ++i)
+        if (e[h->num_ps + i].index >= gfd_vs.size()) FATAL("shaders.idx vertex index %u is out of range\n", e[h->num_ps + i].index);
     for (u32 i = 0; i < h->num_ps; i++, e++) ps_table[(u64)e->key_hi << 32 | e->key_lo].index = e->index;
     for (u32 i = 0; i < h->num_vs; i++, e++) {
         VsEntry &v = vs_table[(u64)e->key_hi << 32 | e->key_lo];
@@ -483,15 +685,27 @@ void load_shader_tables() {
     vs_passthrough = load_vs(h->passthrough_vs);
     vs_blit = load_vs(h->blit_vs);
     ps_blit = load_ps(h->blit_ps);
+    const auto depth_copy = ps_table.find(fnv64(kDepthCopyKey, strlen(kDepthCopyKey)));
+    if (depth_copy != ps_table.end()) ps_depth_copy = load_ps(depth_copy->second.index);
+    if (h->pad >= gfd_ps.size() || gfd_ps.size() - h->pad < 2) FATAL("shaders.idx fallback indices are out of range\n");
     ps_fallback = load_ps(h->pad);
     ps_fallback_tex = load_ps(h->pad + 1);
     const auto uber = ps_table.find(fnv64(kUberKey, strlen(kUberKey)));
     if (uber != ps_table.end()) ps_uber = load_ps(uber->second.index);
     const auto uber_lit = ps_table.find(fnv64(kUberLitKey, strlen(kUberLitKey)));
     if (uber_lit != ps_table.end()) ps_uber_lit = load_ps(uber_lit->second.index);
-    // A state with no compiled shader draws through these until the console has compiled its own (shader_compile.cpp, about 24 ms), in every game. In the Laytons, before
-    // that compiler, Emmy's materials came through the lit one see-through on a console, though every draw through it looks right in Cemu, and why was never found: their lit
-    // states are compiled ahead (tools/fs_variants.py), so few draws come here. "set uberfb 0" draws misses solid instead, losing only their shading.
+    for (bool lit : {false, true}) for (u32 mask = 0; mask < 8; mask++) {
+        const std::string key = uber_family_key(lit, mask);
+        const auto it = ps_table.find(fnv64(key.data(), key.size()));
+        if (it != ps_table.end()) ps_uber_family[lit][mask] = load_ps(it->second.index);
+    }
+    for (auto &lit : ps_uber_family) for (auto *shader : lit) if (shader) generic_pixel_shaders.insert(shader);
+    if (ps_uber) generic_pixel_shaders.insert(ps_uber);
+    if (ps_uber_lit) generic_pixel_shaders.insert(ps_uber_lit);
+    load_bounded_fallbacks();
+    // Missing exact states use a generic fragment shader while the compiler
+    // prepares a specialized one. Older packs without bounded families retain
+    // the full generic shader, including all active lighting and TEV stages.
     uber_fallback = true;
     const auto etc1 = ps_table.find(fnv64(kEtc1Key, strlen(kEtc1Key))), etc1a4 = ps_table.find(fnv64(kEtc1A4Key, strlen(kEtc1A4Key)));
     if (etc1 != ps_table.end() && etc1a4 != ps_table.end()) {
@@ -502,24 +716,33 @@ void load_shader_tables() {
             if (const auto it = ps_table.find(fnv64(k.data(), k.size())); it != ps_table.end()) ps_decode[fmt] = load_ps(it->second.index);
         }
     }
-    LOG("[gx2] %u fragment and %u vertex shaders available\n", h->num_ps, h->num_vs);
+    load_extra_pixel_shaders();
+    LOG("[gx2] %u fragment and %u vertex shader keys available\n", (u32)ps_table.size(), h->num_vs);
 }
 
 // find_ps's memory of states seen, cleared when the console compiles a shader (gfx_pump)
 const DrawState *ps_last_ds;
 u64 ps_last_version;
 GX2PixelShader *ps_last;
-std::unordered_map<u64, GX2PixelShader *> ps_seen;
+struct SeenPixelShader {
+    GX2PixelShader *shader;
+    u64 fallback_epoch;  // zero for specialized programs, which survive fallback changes
+};
+std::unordered_map<u64, SeenPixelShader> ps_seen;
+u64 ps_fallback_epoch = 1;
+bool ps_last_forced;
 
 GX2PixelShader *find_ps(const DrawState &ds) {
     const DrawState *&last_ds = ps_last_ds;
     u64 &last_version = ps_last_version;
     GX2PixelShader *&last = ps_last;
-    if (&ds == last_ds && g.ds_version == last_version) return last;
+    const bool forced = uber_all.load(std::memory_order_relaxed);
+    if (&ds == last_ds && g.ds_version == last_version && forced == ps_last_forced) return last;
+    ps_last_forced = forced;
     last_ds = &ds;
     last_version = g.ds_version;
-    GX2PixelShader *const uber = ds.lighting ? ps_uber_lit : ps_uber;
-    if (uber_all && uber && ds.need_shade) return last = uber;
+    GX2PixelShader *uber = forced && ds.need_shade ? uber_for(ds) : nullptr;
+    if (uber) return last = uber;
     // Nearly every state has been seen before, and a quick hash finds it. The shaders' own keys are hashed a byte at a time, slow on this CPU.
     u32 words[FS_KEY_WORDS];
     const u32 nwords = fs_key_words(ds, words);
@@ -529,19 +752,31 @@ GX2PixelShader *find_ps(const DrawState &ds) {
         hb = (hb + words[i]) * 0xC2B2AE35u;
         ha ^= hb >> 15;
     }
-    std::unordered_map<u64, GX2PixelShader *> &seen = ps_seen;
     const u64 quick = (u64)ha << 32 | hb;
-    if (const auto s = seen.find(quick); s != seen.end()) return last = s->second;
+    if (const auto s = ps_seen.find(quick); s != ps_seen.end()
+        && (!s->second.fallback_epoch || s->second.fallback_epoch == ps_fallback_epoch))
+        return last = s->second.shader;
     const std::string k((const char *)words, nwords * 4);
     const u64 h = fnv64(k.data(), k.size());
     auto it = ps_table.find(h);
+    u64 compile_key = h;
+    DrawState normalized;
     if (it == ps_table.end()) {
-        const std::string n = fs_key(fs_normal(ds));
-        it = ps_table.find(fnv64(n.data(), n.size()));
+        normalized = fs_normal(ds);
+        const std::string n = fs_key(normalized);
+        compile_key = fnv64(n.data(), n.size());
+        it = ps_table.find(compile_key);
     }
-    GX2PixelShader *const fallback = !ds.need_shade ? ps_fallback : uber && uber_fallback ? uber : ds.need_tex[0] && !ds.tex[0].null_tex ? ps_fallback_tex : ps_fallback;
+    GX2PixelShader *fallback = nullptr;
+    if (it == ps_table.end() || it->second.index == MISSED) {
+        if (ds.need_shade && uber_fallback && !uber) uber = uber_for(ds);
+        fallback = !ds.need_shade ? ps_fallback : uber && uber_fallback ? uber : ds.need_tex[0] && !ds.tex[0].null_tex ? ps_fallback_tex : ps_fallback;
+    }
     GX2PixelShader *r = fallback;
     if (it != ps_table.end()) {
+        // A placeholder is a missing state, not a compiled program. Resolve it
+        // again after switching fallback families so its uniforms still match.
+        if (it->second.index == MISSED) it->second.shader = fallback;
         if (!it->second.shader) {
         if (glsl_force && (ds.need_shade || ds.wbuffer || ds.scissor_mode == 1) && shader_compile_on()) shader_compile_request(false, h, gen_fs_glsl(ds), 0);
         it->second.shader = load_ps(it->second.index);
@@ -556,15 +791,18 @@ GX2PixelShader *find_ps(const DrawState &ds) {
         r = it->second.shader;
     } else {
         st_ps_misses++;
-        ps_table[h].shader = fallback;  // log it once
-        ps_table[h].index = MISSED;
+        // Unknown states share the same canonical key as shipped programs.
+        // Otherwise changes to fixed-function state or uniform-only flags
+        // repeatedly compile identical fragment programs during a cold run.
+        ps_table[compile_key].shader = fallback;  // log the first raw state once
+        ps_table[compile_key].index = MISSED;
         const u32 n = le32((u32)k.size());
         miss_put("FS  ", 4);
         miss_put(&n, 4);
         miss_put(k.data(), k.size());
-        if ((ds.need_shade || ds.wbuffer || ds.scissor_mode == 1) && shader_compile_on()) shader_compile_request(false, h, gen_fs_glsl(ds), 0);  // the console compiles it meanwhile: gfx_pump installs it
+        if ((ds.need_shade || ds.wbuffer || ds.scissor_mode == 1) && shader_compile_on()) shader_compile_request(false, compile_key, gen_fs_glsl(normalized), 0);  // gfx_pump installs it under the same canonical key
     }
-    seen[quick] = r;
+    ps_seen[quick] = {r, fallback ? ps_fallback_epoch : 0};
     last = r;
     return r;
 }
@@ -645,7 +883,7 @@ void install_compiled() {
             p.shader = d.ps_shader;
             p.index = COMPILED_HERE;
             GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, p.shader->program, p.shader->size);
-            ps_seen.clear();  // states that found the fallback look again
+            ++ps_fallback_epoch;  // fallback states look again; exact programs stay cached
             ps_last_ds = nullptr;
         }
     }
@@ -699,7 +937,14 @@ GX2AttribStream float4_stream(u32 location, u32 buffer, u32 offset, bool instanc
 }
 
 // ---------------------------------------------------------------- surfaces
+#ifdef RECOMP_RESUMABLE
+static u64 checkpoint_surface_identity;
+#endif
 struct Surface {
+#ifdef RECOMP_RESUMABLE
+    u64 checkpoint_identity = ++checkpoint_surface_identity;
+    u32 checkpoint_pins = 0;
+#endif
     u32 addr = 0, w = 0, h = 0, fmt = 0;
     bool depth = false, mem1 = false;
     float sx = 1, sy = 1;  // surface pixels per PICA pixel
@@ -732,6 +977,12 @@ struct Surface {
     void *image() { return depth ? db.surface.image : cb.surface.image; }
     u32 image_size() { return depth ? db.surface.imageSize : cb.surface.imageSize; }
 };
+#ifdef RECOMP_RESUMABLE
+static std::shared_ptr<Surface> checkpoint_pin(Surface *surface) {
+    ++surface->checkpoint_pins;
+    return {surface, [](Surface *p) { --p->checkpoint_pins; }};
+}
+#endif
 std::vector<std::unique_ptr<Surface>> surfaces;
 u64 use_counter;  // presents so far: when a texture or a target was last used
 inline void used(Surface &s) { s.last_use = use_counter; }
@@ -836,6 +1087,9 @@ int start_resolution = 720;  // settings.ini's resolution as this start took it:
 // vw, vh: the viewport of the draw a target is made for, when there is one
 void rt_scale(u32 w, u32 h, float &sx, float &sy, u32 vw = 0, u32 vh = 0) {
     sx = sy = 1;
+    // Cave Story 3D's pixel-aligned UI and transition strips develop seams
+    // when rasterized into enlarged targets.
+    if (g_game.program_id == 0x000400000004a100ULL) return;
     // 256 and 512 wide, and 416 tall: some games draw a little more than the screen and crop it in the display transfer
     const u32 shown = w == 256 ? 240 : w == 512 ? 480 : w;
     if ((h == 400 || h == 416) && (shown == 240 || shown == 480)) {
@@ -921,9 +1175,16 @@ Surface *get_surface(u32 addr, u32 w, u32 h, u32 fmt, bool depth, const Surface 
         f.mipLevels = 1;
         // 24 bits of fixed point, as the PICA's depth buffer, not the usual 24-bit float: that has a 20-bit mantissa, so from the middle of the range out two depths a few
         // PICA steps apart are the same to it, and a floor mat drawn after the characters standing on it covered them on the console. Cemu's host GPU had kept them apart.
-        f.format = GX2_SURFACE_FORMAT_UNORM_R24_X8;
+        // Ever Oasis samples depth for its focus mask and uses stencil to
+        // clip effects in dialogue. Plain R32 fixed the sampled depth but
+        // lost stencil, exposing an opaque rectangular effect. GX2's legacy
+        // FLOAT_X8_X24 name is the 64-bit D32_FLOAT_S8_X24 format (0x81c):
+        // retain R32's 24-bit mantissa and the stencil channel together.
+        const bool sampleable_depth = fmt == 3 && g_game.program_id == 0x00040000001a4800ULL;
+        f.format = sampleable_depth ? GX2_SURFACE_FORMAT_FLOAT_X8_X24 : GX2_SURFACE_FORMAT_UNORM_R24_X8;
         f.aa = GX2_AA_MODE1X;
-        f.use = GX2_SURFACE_USE_DEPTH_BUFFER;
+        f.use = sampleable_depth ? (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE)
+                                 : GX2_SURFACE_USE_DEPTH_BUFFER;
         f.tileMode = GX2_TILE_MODE_DEFAULT;
         s->db.viewNumSlices = 1;
         // A depth buffer starts as its guest memory, as on a 3DS: a game that never fills its depth (Pokédex 3D clears only by drawing)
@@ -1119,13 +1380,13 @@ const void *vtx_cached(u32 addr, const u8 *src, u32 src_stride, u32 count, u32 k
         if (e.addr == addr && e.size == size && e.buf && (e.checked == vtx_list || hash_bytes(src, bytes) == e.hash)) {
             e.checked = vtx_list;
             e.used = now;
-            if (kMeasure) st_vtx_hits++;
+            if (cpu_timing_enabled()) st_vtx_hits++;
             return e.buf;
         }
         vtx_retire(e);
         vtx_cache.erase(it);
     }
-    if (kMeasure) st_vtx_misses++;
+    if (cpu_timing_enabled()) st_vtx_misses++;
     void *buf = memalign(64, size + 64);
     if (!buf) {  // no room: this draw's own copy, as before
         void *w = ring_alloc(size + 64, 64);
@@ -1664,7 +1925,7 @@ void upload_texture(Tex &e, const u32 *rows = nullptr) {
         st_upload_bytes += e.bytes;
     }
     st_uploads++;
-    if (kMeasure) {
+    if (t0) {
         const u32 dt = (u32)(OSGetSystemTime() - t0);
         prof[P_TEXUP] += dt;
         st_upload_ms += OSTicksToMicroseconds((u64)dt) / 1000.0;
@@ -1684,9 +1945,14 @@ GX2Texture *get_texture(u32 addr, u32 w, u32 h, u32 fmt, u32 levels, Surface **f
     const u64 tkey = tex_key(addr, w, h, fmt, levels);
     if (auto hit = tex_index.find(tkey); hit != tex_index.end()) {
         Tex &e = *hit->second;
-        if (stale_check && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
+        // Brain Age's A4 handwriting canvas changes without a flush. The generic
+        // periodic check can delay the first stroke; check this canvas every flip.
+        const bool handwriting_canvas = g_game.program_id == 0x00040000000b3c00ULL
+            && w == 512 && h == 256 && fmt == 11 && levels == 1;
+        if ((stale_check || handwriting_canvas) && e.last_use != use_counter && !e.dirty && !e.maybe_dirty && !e.hash_stale
+            && hash_guest(pptr(addr), e.bytes, std::array<u32, SLICES>().data()) != e.hash) {
             static u32 logged;
-            if (logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
+            if (stale_check && logged++ < 400) LOG("STALE tex %08x %ux%u fmt %u levels %u bytes %u, flip %llu\n", addr, w, h, fmt, levels, e.bytes, (unsigned long long)st_flips);
             e.maybe_dirty = true;
         }
         // A later scene can reuse the same guest allocation without flushing it.
@@ -2097,7 +2363,9 @@ void send_state(const DrawState &ds, Surface &c, bool has_depth, bool stencil) {
     const float Sx = c.sx, Sy = c.sy;
     // At 4.5 times the 3DS's size every other 3DS pixel edge lands on the centre of a TV pixel, where two quads meeting at that edge can both leave the pixel to the other: the
     // console drew Dream Team's text boxes with a thin line where their pieces meet, and Cemu's GPU never did. A quarter of a pixel moves every edge off the centres.
-    const float nudge = Sx != floorf(Sx) || Sy != floorf(Sy) ? 0.25f : 0.0f;
+    const int requested_nudge = viewport_nudge_override.load(std::memory_order_relaxed);
+    const float nudge = requested_nudge >= 0 ? requested_nudge / 100.0f :
+        (Sx != floorf(Sx) || Sy != floorf(Sy) ? 0.25f : 0.0f);
     GX2ViewportReg viewport;
     GX2InitViewportReg(&viewport, ds.vp_x * Sx + nudge, ds.vp_y * Sy + c.row0 + nudge, 2 * ds.vp_hw * Sx, 2 * ds.vp_hh * Sy, 0.0f, 1.0f);
     depth_viewport::pica_range(viewport);
@@ -2105,7 +2373,18 @@ void send_state(const DrawState &ds, Surface &c, bool has_depth, bool stencil) {
     if (ds.scissor_mode == 3) {
         const s32 x1 = std::clamp<s32>(ds.sc_x1, 0, c.w), x2 = std::clamp<s32>(ds.sc_x2, 0, c.w);
         const s32 y1 = std::clamp<s32>(ds.sc_y1, 0, c.h), y2 = std::clamp<s32>(ds.sc_y2, 0, c.h);
-        GX2SetScissor((u32)(x1 * Sx), (u32)(y1 * Sy) + c.row0, (u32)((x2 - x1) * Sx), (u32)((y2 - y1) * Sy));
+        if (copy_rect_experiment.load(std::memory_order_relaxed)) {
+            // Clip pixel centres, including the viewport's alignment offset.
+            // Copy extents use floor endpoints; that is too small for a
+            // fractional raster clip and can turn a slice's last pixel black.
+            auto x = gx2_copy::raster_span(x1, x2 - x1, Sx, nudge);
+            auto y = gx2_copy::raster_span(y1, y2 - y1, Sy, nudge);
+            x.first=std::min(x.first,c.sw); x.last=std::min(x.last,c.sw);
+            y.first=std::min(y.first,c.sh-c.row0); y.last=std::min(y.last,c.sh-c.row0);
+            GX2SetScissor(x.first, y.first + c.row0, x.size(), y.size());
+        } else {
+            GX2SetScissor((u32)(x1 * Sx), (u32)(y1 * Sy) + c.row0, (u32)((x2 - x1) * Sx), (u32)((y2 - y1) * Sy));
+        }
     } else {
         GX2SetScissor(0, c.row0, c.sw, c.sh - c.row0);
     }
@@ -2224,6 +2503,9 @@ void set_state(const DrawState &ds) {
     if (has_depth && (ds.depth_write || (stencil && ds.st_mask_w))) cur_depth->written_since_flush = cur_depth->gpu_newer = true;
 }
 
+// Opt-in globally; enabled by the measured Dark Moon title policy below.
+std::atomic<bool> light_guard_experiment{false};
+
 struct PsUni {
     u32 depth[4];
     u32 scissor[4];
@@ -2240,7 +2522,7 @@ struct PsUber {
     u32 csrc[6][4], cmod[6][4], asrc[6][4], amod[6][4], stage[6][4];
     u32 tex_coord[3][4], tex_add[3][4], wrap[3][4];
     u32 uber[4];
-    u32 lit[4], lit2[4], lit3[4], lit4[4], sel[7][4], light[4][4], light2[4][4];  // only the lit one reads these
+    u32 lit[4], lit2[4], lit3[4], lit4[4], sel[7][4], light[8][4], light2[8][4];  // only the lit one reads these
 };
 // the procedural texture's settings, after PsUni for the shaders that read it (uPt in shadergen.cpp)
 struct PsProctex {
@@ -2322,7 +2604,7 @@ inline void put3(u32 *d, const float *v, float w = 0) {
 
 // fragment uniforms and textures for this draw
 void set_fragment(const DrawState &ds, bool uber) {
-    const u32 lights = !ds.lighting ? 0 : uber ? std::min<u32>(ds.light.num_lights, 4) : ds.light.num_lights;
+    const u32 lights = !ds.lighting ? 0 : std::min<u32>(ds.light.num_lights, 8);
     const bool proctex = !uber && ds.need_shade && uses_proctex(ds);
     const u32 size = uber ? sizeof(PsUni) + sizeof(PsUber) : proctex ? sizeof(PsUni) + sizeof(PsProctex) : offsetof(PsUni, lights) + lights * sizeof(PsUni::lights[0]);
     auto *u = (PsUni *)ring_alloc((std::max<u32>(size, 256) + 255) & ~255u, 256);
@@ -2347,7 +2629,7 @@ void set_fragment(const DrawState &ds, bool uber) {
         const LutSel *sels[7] = {&l.d0, &l.d1, &l.sp, &l.fr, &l.rb, &l.rg, &l.rr};
         for (u32 k = 0; k < 4; k++) u->lscale0[k] = swap_float(sels[k]->scale);
         for (u32 k = 0; k < 3; k++) u->lscale1[k] = swap_float(sels[k + 4]->scale);
-        u->lscale1[3] = 0;
+        u->lscale1[3] = swap_float(light_guard_experiment.load(std::memory_order_relaxed) ? 1.0f : 0.0f);
         put3(u->ambient, l.global_ambient);
         for (u32 k = 0; k < lights; k++) {
             const LightState &s = l.lights[k];
@@ -2360,7 +2642,9 @@ void set_fragment(const DrawState &ds, bool uber) {
             put3(d.spot, s.spot);
             d.att[0] = swap_float(s.da_scale);
             d.att[1] = swap_float(s.da_bias);
-            d.att[2] = d.att[3] = 0;
+            // Shared specialized shaders branch on this per-draw enable.
+            d.att[2] = swap_float(s.spot_atten ? 1.0f : 0.0f);
+            d.att[3] = 0;
         }
     }
     if (uber) {
@@ -2385,7 +2669,8 @@ void set_fragment(const DrawState &ds, bool uber) {
             const float use[4] = {t.coord == 0 ? 1.0f : 0.0f, t.coord == 1 ? 1.0f : 0.0f, t.coord >= 2 ? 1.0f : 0.0f, on ? 1.0f : 0.0f};
             for (u32 c = 0; c < 4; c++) b->tex_coord[k][c] = swap_float(use[c]);
             put_rgba(b->tex_add[k], ds.need_tex[k] && t.null_tex ? 0xff000000u : 0);
-            put_i(b->wrap[k], on ? t.wrap_s : 0, on ? t.wrap_t : 0, 0, 0);
+            put_i(b->wrap[k], on ? t.wrap_s : 0, on ? t.wrap_t : 0,
+                  k == 0 && on ? t.type : 0, k == 2 ? (u32)fallback_uv_select.load(std::memory_order_relaxed) : (u32)(k == 0 && on && t.shadow_ortho));
         }
         put_i(b->uber, ds.tev_count, ds.alpha_test ? ds.alpha_func : ~0u, ds.fog ? (ds.fog_flip ? 2 : 1) : 0, ds.need_tex[0] && !ds.tex[0].null_tex && ds.tex[0].type == 3);
         if (ds.lighting) {
@@ -2536,7 +2821,94 @@ void decode_textures_first(const DrawState &ds) {
     }
 }
 
-void begin_draw_common(const DrawState &ds, GX2PixelShader *ps) {
+// Sample one frame every 30 presents. Only the card thread emits the trace.
+constexpr u32 DRAW_TRACE_INTERVAL = 30;
+constexpr u32 DRAW_TRACE_CAPACITY = 64;
+bool draw_trace_enabled;
+struct DrawTraceState {
+    u64 vs, fs;
+    u32 color, depth, width, height, depth_scale, depth_offset, flags, blend, color_mask;
+    u32 shader;
+    std::array<u32, 12> textures;
+    std::array<float, 4> viewport;
+    bool operator==(const DrawTraceState &) const = default;
+};
+struct DrawTraceFrame {
+    u64 frame;
+    u32 count, overflow;
+    std::array<DrawTraceState, DRAW_TRACE_CAPACITY> draws;
+};
+DrawTraceFrame draw_trace_current{}, draw_trace_ready{};
+std::mutex draw_trace_mutex;
+
+void trace_draw(const DrawState &ds, GX2PixelShader *ps, u64 vs) {
+    if (!draw_trace_enabled || st_flips % DRAW_TRACE_INTERVAL)
+        return;
+    u32 words[FS_KEY_WORDS];
+    const auto word_count = fs_key_words(ds, words);
+    const u64 key = fnv64(words, word_count * sizeof(u32));
+    u32 shader = MISSED;
+    if (ps && generic_pixel_shaders.contains(ps)) shader = ds.lighting ? MISSED - 2 : MISSED - 1;
+    else if (ps == ps_fallback_tex) shader = MISSED - 3;
+    else if (ps && ps != ps_fallback) {
+        auto entry = ps_table.find(key);
+        if (entry == ps_table.end() || entry->second.shader != ps) {
+            const std::string normal = fs_key(fs_normal(ds));
+            entry = ps_table.find(fnv64(normal.data(), normal.size()));
+        }
+        if (entry != ps_table.end() && entry->second.shader == ps)
+            shader = entry->second.index;
+        else
+            shader = MISSED - 4;  // a specialized shader with no matching table entry
+    }
+
+    u32 scale, offset;
+    memcpy(&scale, &ds.depth_scale, sizeof scale);
+    memcpy(&offset, &ds.depth_offset, sizeof offset);
+    const u32 flags = (u32)ds.wbuffer | (u32)ds.depth_test << 1 | (u32)ds.depth_write << 2 |
+                      (u32)ds.stencil << 3 | (u32)ds.alpha_test << 4 | (u32)ds.blend << 5 |
+                      (u32)ds.early_z << 6 | (u32)ds.depth_func << 8 | ds.depth_bits << 16;
+    const u32 blend = (u32)ds.eq_rgb | (u32)ds.eq_a << 4 | (u32)ds.sf_rgb << 8 |
+                      (u32)ds.df_rgb << 12 | (u32)ds.sf_a << 16 | (u32)ds.df_a << 20;
+    const DrawTraceState state{vs, key, ds.rt.color_addr, ds.rt.depth_addr, ds.rt.w, ds.rt.h,
+                              scale, offset, flags, blend, ds.color_mask, shader,
+                              {ds.tex[0].face_addr[0], ds.tex[0].w, ds.tex[0].h, ds.tex[0].fmt,
+                               ds.tex[1].face_addr[0], ds.tex[1].w, ds.tex[1].h, ds.tex[1].fmt,
+                               ds.tex[2].face_addr[0], ds.tex[2].w, ds.tex[2].h, ds.tex[2].fmt},
+                              {ds.vp_x, ds.vp_y, 2 * ds.vp_hw, 2 * ds.vp_hh}};
+    auto &frame = draw_trace_current;
+    for (u32 i = 0; i < frame.count; ++i)
+        if (frame.draws[i] == state)
+            return;
+    if (frame.count == frame.draws.size()) {
+        ++frame.overflow;
+        return;
+    }
+    frame.draws[frame.count++] = state;
+}
+
+void publish_draw_trace() {
+    auto &frame = draw_trace_current;
+    if (!frame.count)
+        return;
+    frame.frame = st_flips;
+    if (std::unique_lock lock(draw_trace_mutex, std::try_to_lock); lock.owns_lock())
+        draw_trace_ready = frame;
+    frame.count = frame.overflow = 0;
+}
+
+void begin_draw_common(const DrawState &ds, GX2PixelShader *ps, u64 vs = 0) {
+    const bool generic = ps && generic_pixel_shaders.contains(ps);
+    if (generic) {
+        ++st_fragment_fallback[ds.lighting != 0];
+        st_material_draws += material_pixel_shaders.contains(ps);
+        st_lighting_draws += lighting_pixel_shaders.contains(ps);
+        st_extension_draws += extension_pixel_shaders.contains(ps);
+        if (ds.tev_count <= 6) ++st_fallback_shape[ds.lighting != 0][ds.tev_count]
+            [ds.lighting ? uber_light_bucket(std::min<u32>(ds.light.num_lights, 8)) : 0];
+    } else if (ps && ps != ps_fallback && ps != ps_fallback_tex) ++st_fragment_specialized;
+    else ++st_fragment_simple;
+    trace_draw(ds, ps, vs);
     if (state_lost) {
         shader_mode();
         state_lost = false;
@@ -2545,7 +2917,7 @@ void begin_draw_common(const DrawState &ds, GX2PixelShader *ps) {
     set_state(ds);
     GX2SetPixelShader(ps);
     lap(P_STATE);
-    set_fragment(ds, ps && (ps == ps_uber || ps == ps_uber_lit));
+    set_fragment(ds, generic);
 }
 }  // namespace
 
@@ -2646,7 +3018,8 @@ bool gx2_gsx_ready(const Gx2Draw &d) {
 bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
     const DrawState &ds = *d.ds;
     if (ds.skip || ds.shadow_mode || ds.gas || !ds.rt.color_addr || !pptr(ds.rt.color_addr) || (ds.rt.color_fmt & 0x80)) return true;
-    if (gxt_cpu_vs) return false;  // debug aid: tells a wrong vertex shader from anything else
+    gpu_fallback_why=GPUF_MISSING_VS;gpu_fallback_key=0;
+    if (gxt_cpu_vs) {gpu_fallback_why=GPUF_FORCED;return false;}  // debug aid: tells a wrong vertex shader from anything else
     lap_start();
     // usually the same vertex program as the last draw
     static struct {
@@ -2664,8 +3037,9 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
         vk.key = vs_variant_key(d.prog, d.entry, g.vs.b, d.slot_src);
     }
     const u64 key = d.gs ? gsx_key(d) : vk.key;
+    gpu_fallback_key=key;
     auto it = vs_table.find(key);
-    if (d.gs && (it == vs_table.end() || it->second.index == MISSED)) return false;  // (gx2_gsx_ready has logged the miss)
+    if (d.gs && (it == vs_table.end() || it->second.index == MISSED)) {gpu_fallback_why=GPUF_MISSING_GS;return false;}  // (gx2_gsx_ready has logged the miss)
     if (it == vs_table.end()) {
         // No shader for this draw's own set of bools. Where its entry reads more of them than a build makes every set of, the pack has one
         // that reads them as it runs (kVsBoolsMade), and this draw's key gets that shader.
@@ -2728,7 +3102,7 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
         u32 streams = 0;
         for (u32 k = 0; k < run_vertices; k++)
             for (u32 r = 0; r < 16; r++) streams += (vs.inputs >> r & 1) && (k ? vs.vertex_loc[k - 1][r] : vs.location[r]) >= 0;
-        if (vs.corner < 0 || streams > 15 || ((u64)(d.count / run_vertices) * streams + 3 * (vs.inputs >> 16)) * 16 > (4u << 20)) return false;
+        if (vs.corner < 0 || streams > 15 || ((u64)(d.count / run_vertices) * streams + 3 * (vs.inputs >> 16)) * 16 > (4u << 20)) {gpu_fallback_why=GPUF_LIMIT;return false;}
     }
     gx2_flush_cpu_batch();
     const u8 *ip = nullptr;
@@ -2750,7 +3124,7 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
     lap(P_BIND);
     GX2PixelShader *const ps = find_ps(ds);
     lap(P_PS);
-    begin_draw_common(ds, ps);
+    begin_draw_common(ds, ps, key);
     GX2SetVertexShader(vs.shader);
     if (d.outline_color) {
         // Both sides, pushed back by as much as the mesh's slope gives over the outline's width, plus enough to cover two shaders rounding
@@ -2905,7 +3279,7 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
                 // In steps of a multiple of 4 bytes, which is all a real GPU takes (vertex_arrays.h). The copy is kept (vtx_cached) until the game says it
                 // wrote there: Luigi's Mansion: Dark Moon's draws reach 1300 to 4100 vertices, and copying each draw's arrays again took 20 to 50 MB a frame.
                 const u32 count = maxv - minv + 1, bytes = gpu_array_bytes(x, count), step = gpu_stride(x.stride);
-                if (kMeasure) {  // for the [prof] lines
+                if (cpu_timing_enabled()) {  // for the [prof] lines
                     st_attr_verts += count;
                     st_attr_bytes += bytes;
                     st_attr_streams++;
@@ -2943,7 +3317,7 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
             // rather than depending on how each GPU path fetches little-endian integers. Only floats are read in place.
             const u32 stride = at->elems * 4;
             const u32 count = maxv - minv + 1;
-            if (kMeasure) {  // for the [prof] lines
+            if (cpu_timing_enabled()) {  // for the [prof] lines
                 st_attr_verts += count;
                 st_attr_bytes += (u64)count * at->stride;
                 st_attr_streams++;
@@ -2991,7 +3365,7 @@ bool gx2_draw(const Gx2Draw &d, const V4 *immediate) {
         {
             // Copied, not read where it is: the game may rewrite it as soon as its list's interrupt comes, and a real GPU only gets to it later (see gx2_finish_list).
             const u32 elems = at->elems, stride = (elems == 1 ? 2 : elems) * 4, count = maxv - minv + 1, src_stride = at->stride;
-            if (kMeasure) {  // for the [prof] lines
+            if (cpu_timing_enabled()) {  // for the [prof] lines
                 st_attr_verts += count;
                 st_attr_bytes += (u64)count * src_stride;
                 st_attr_streams++;
@@ -3518,9 +3892,12 @@ bool dyn_test;  // a file named "dynres" in the data folder: changes level every
 // fails (back below within 20 seconds) makes the next wait twice as long, up to about 3 minutes.
 void dyn_res_update() {
     if (dyn_force >= 0 || (top_rows <= 720 && !dyn_720)) {  // at 1080p ("top1080"), or when asked: 720p targets fit, and mostly draw at full size
-        if (dyn_force >= 0 && (u32)dyn_force != dyn_level) {
-            if (kMeasure) LOG("[gx2] top screen held at %s size\n", dyn_force ? "the lower" : "full");
-            dyn_level = (u32)dyn_force;
+        // Returning from a forced lower level must also restore full size
+        // when automatic scaling is disabled at the selected resolution.
+        const u32 wanted = dyn_force >= 0 ? (u32)dyn_force : 0;
+        if (wanted != dyn_level) {
+            if (kMeasure) LOG("[gx2] top screen held at %s size\n", wanted ? "the lower" : "full");
+            dyn_level = wanted;
         }
         dyn_waited = 0;
         return;
@@ -3568,6 +3945,39 @@ void to_screen(GX2ColorBuffer *from, GX2ScanTarget target) {
         else GX2InitColorBufferRegs(&to);
     }
     if (to.surface.image) GX2CopySurface(&from->surface, 0, 0, &to.surface, 0, 0);
+#ifdef RECOMP_RESUMABLE
+    const bool saving_overlay = checkpoint::saving_to_disk() || wiiu::state_loading_visible();
+#else
+    const bool saving_overlay = false;
+#endif
+    const bool chat_overlay = target == GX2_SCAN_TARGET_DRC && wiiu::chat_visible();
+    const bool overlay = saving_overlay || chat_overlay;
+    static bool visible[2];
+    const unsigned screen = target == GX2_SCAN_TARGET_DRC;
+    if (overlay != visible[screen]) {
+        LOG("[state-overlay] %s %s: %ux%u, backup %s\n", screen ? "GamePad" : "TV",
+            overlay ? "show" : "clear", from->surface.width, from->surface.height,
+            to.surface.image ? "ready" : "unavailable");
+        visible[screen] = overlay;
+    }
+    if (to.surface.image && overlay) {
+        // Use the actual screen target, just like the working options menu.
+        // The copy above retains its clean picture. Scan out the overlay, then
+        // restore that picture in GPU command order so paused games stay clean.
+        // Native GX2CopySurface uses its own rendering state. Rebind our
+        // context after that copy, before the menu's small blit setup; Cemu's
+        // HLE copy does not reproduce this state change.
+        restore_context();
+        GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, from->surface.image, from->surface.imageSize);
+        if(chat_overlay) wiiu::draw_chat_on(from);
+#ifdef RECOMP_RESUMABLE
+        if(saving_overlay) wiiu::draw_state_saving_on(from);
+#endif
+        GX2CopyColorBufferToScanBuffer(from, target);
+        GX2CopySurface(&to.surface, 0, 0, &from->surface, 0, 0);
+        GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, from->surface.image, from->surface.imageSize);
+        return;
+    }
     GX2CopyColorBufferToScanBuffer(to.surface.image ? &to : from, target);
 }
 
@@ -3581,6 +3991,11 @@ void forget_unused() {
         if (next_surface_retirement >= surfaces.size()) next_surface_retirement = 0;
         auto it = surfaces.begin() + next_surface_retirement++;
         Surface &s = **it;
+#ifdef RECOMP_RESUMABLE
+        // A live session checkpoint owns this target until replaced/discarded.
+        // Idle cache eviction must not invalidate a previously successful save.
+        if (s.checkpoint_pins) continue;
+#endif
         if (s.last_use + kForgetAfter > use_counter || &s == cur_color || &s == cur_depth || s.in_list || &s == depth_owner || transfer_source(s)) continue;
         if (!surface_readback::retire(s, surfaces)) return;
         // Shared depth descriptors borrow depth_block; retiring one must not free it.
@@ -3598,8 +4013,39 @@ void forget_unused() {
 
 void draw_fps();  // the frame rate counter (below, beside the text it draws)
 
+// Two clock reads per present, independent of the expensive draw timers. Average
+// FPS alone hides a movie alternating normal frames and 15 FPS stretches. These
+// disjoint gap buckets remain in the PC runtime log without taking screenshots.
+static void report_frame_pacing(OSTime began) {
+    static OSTime previous, start;
+    static u32 buckets[6], count, longest;
+    const OSTime now = OSGetSystemTime();
+    if (!previous) { previous = start = now; return; }
+    const u32 gap = (u32)OSTicksToMicroseconds(now - previous);
+    if (gap > 50000) {
+        LOG("[pace-gap] gap %u us; before present %u us; present %u us\n", gap,
+            (u32)OSTicksToMicroseconds(began - previous), (u32)OSTicksToMicroseconds(now - began));
+        if (wiiu::av_timing_enabled()) kernel::gsp_report_frame_gap();
+    }
+    previous = now;
+    longest = std::max(longest, gap);
+    const u32 bucket = gap <= 20000 ? 0 : gap <= 35000 ? 1 : gap <= 50000 ? 2 : gap <= 67000 ? 3 : gap <= 100000 ? 4 : 5;
+    buckets[bucket]++;
+    count++;
+    if (now - start < OSSecondsToTicks(2)) return;
+    LOG("[pace] %u frames in %u ms; max gap %u us; gaps <=20/35/50/67/100/>100 ms: %u %u %u %u %u %u\n",
+        count, (u32)OSTicksToMilliseconds(now - start), longest,
+        buckets[0], buckets[1], buckets[2], buckets[3], buckets[4], buckets[5]);
+    start = now;
+    count = longest = 0;
+    memset(buckets, 0, sizeof buckets);
+}
+
+static OSTime renderer_started;
 void present() {
-    const OSTime tp = prof_now();
+    const OSTime pacing_begin = OSGetSystemTime();
+    if (!renderer_started) renderer_started = pacing_begin;
+    const OSTime tp = cpu_timing_enabled() ? pacing_begin : 0;
     gt_mark(GT_PRESENT, 0);
     if (dump_enabled && st_flips % 120 == 0) {
         dump_surface(tv_cb->surface, (wiiu::data_dir() + "/tv.ppm").c_str(), 2);
@@ -3630,7 +4076,7 @@ void present() {
     }
     if (forget_ps) {
         forget_ps = false;
-        ps_seen.clear();
+        ++ps_fallback_epoch;
         ps_last_ds = nullptr;
     }
     if (g_settings.show_fps) draw_fps();
@@ -3641,7 +4087,9 @@ void present() {
     GX2Flush();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(TRUE);
+    publish_draw_trace();
     st_flips++;
+    if (st_flips == 1) OSReport("[3dii-u startup] first GPU present submitted\n");
     use_counter++;
     turn_budget = TURN_BYTES;
     forget_unused();
@@ -3659,6 +4107,7 @@ void present() {
         }
     }
     prof_add(P_PRESENT, tp);
+    report_frame_pacing(pacing_begin);
 }
 
 bool screen_fresh;
@@ -3672,6 +4121,15 @@ PresentRule present_rule;  // when a finished frame is shown (present_rule.h, gf
 // is up, with what it has queued sent to the GPU first; the game waits for the GPU thread as it does for a 3DS's GPU.
 // Which games: by program ID, until there's a way to know a game's own rate. "set capfps N" (0: none) from the PC.
 u32 cap_fps, cap_game;  // what it's held to now, and what this game is held to when it is (the options menu turns it off and on)
+bool has_darkmoon_profile() { return wiiu_render::darkmoon(g_game.program_id); }
+void apply_darkmoon_profile() {
+    if (!has_darkmoon_profile()) return;
+    const auto p = wiiu_render::darkmoon_policy(g_settings.wiiu_render_mode, top_rows);
+    cap_game = 30;
+    cap_fps = p.fps;
+    dyn_low = p.scale;
+    dyn_force = p.force;
+}
 void frame_cap_wait() {
     if (!cap_fps) return;
     static OSTime next;
@@ -3916,6 +4374,14 @@ struct LastTransfer {
     u32 in_paddr = 0, out_paddr = 0, in_dims = 0, out_dims = 0, flags = 0, out_size = 0;
 } last_transfer[3];
 
+// Opt-in hardware comparison. Disable and relaunch to restore existing targets.
+std::atomic<bool> screen_slice_experiment{false};
+float screen_slice_scale(u32 in_w, u32 in_h, u32 out_w, u32 out_h, u32 scaling, u32 rows) {
+    if (rows != 480 || scaling != 1 || in_w != out_w * 2 || in_h != out_h ||
+        (in_w != 240 && in_w != 256) || (in_h != 400 && in_h != 416)) return 0;
+    return rows / 240.0f;
+}
+
 namespace {
 bool transfer_source(const Surface &s) {
     // These three delayed copies still need their source image if the CPU reads the output.
@@ -3933,6 +4399,7 @@ bool transfer_source(const Surface &s) {
 // waits for the GPU, and an upload. The texture's bytes aren't in guest memory then: a lookup there of another size or format than the
 // transfer's reads what was there before, and what the game puts there later counts as newer (Surface::copy).
 static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_dims, u32 flags, Surface **copied = nullptr) {
+    gx2_flush_cpu_batch();
     gt_mark(GT_TRANSFER, out_paddr);
     const u32 in_w = in_dims & 0xffff, in_h = in_dims >> 16, out_w0 = out_dims & 0xffff, out_h0 = out_dims >> 16;
     const u32 scaling = (flags >> 24) & 3;
@@ -3943,17 +4410,43 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     // tiles in, tiles out (0x20 without 0x02): a texture
     const bool own_size = sy <= 1 && (flags & 0x22) == 0x20 && out_paddr >= mem::VRAM_PADDR && out_paddr < mem::VRAM_PADDR + mem::VRAM_SIZE;
     if ((flip && crop) || in_w < out_w0 || in_h < out_h0) return false;
-    Surface *src = find_surface(in_paddr, false, [&](const Surface &s) {
-        return s.w == in_w && s.h == in_h && !s.guest_newer && (s.sy > 1 || s.gpu_chain || (own_size && s.gpu_newer));
-    });
+    Surface *src = nullptr;
+    // Ever Oasis copies D24S8 as RGBA8 for its focus mask. Guest memory
+    // contains the clear value, not the GPU's depth; a CPU transfer therefore
+    // blurs the whole scene. Keep this experimental path limited to the
+    // observed title/format until stencil-preserving transfers are supported.
+    const bool depth_copy = ps_depth_copy && g_game.program_id == 0x00040000001a4800ULL
+        && (flags & 0x7722) == 0x20;
+    for (auto &x : surfaces)
+        if ((!x->depth || (depth_copy && x->fmt == 3)) && x->addr == in_paddr && x->w == in_w && x->h == in_h && !x->guest_newer &&
+            (x->sy > 1 || x->gpu_chain || (own_size && x->gpu_newer)))
+            src = x.get();
     if (!src) return false;
-    const bool own_size_copy = own_size && src->sy <= 1 && !src->gpu_chain;
+    used(*src);
+    // A small destination still accepts a downsample of an enlarged source.
+    // Requiring the source to be 1:1 rejected every such effect pass and
+    // forced a GPU readback followed by a CPU conversion and texture upload.
+    const bool own_size_copy = own_size && !src->gpu_chain;
     if (sy <= 1 && !src->gpu_chain && !own_size_copy) return false;
     // Neither bit 1 (linear in) nor bit 5 (left tiled): the picture lands in memory row by row, for whatever reads its bytes. Paper Mario's goes on to another
     // transfer here on the GPU; Luigi's Mansion 2's top screen halves go to texture copies into its LCD buffer, which read them back, and tiled they came out black.
     const bool linear_out = !(flags & 0x22);
     Surface *dst = get_surface(out_paddr, out_w, out_h, cbuf_to_pixfmt((flags >> 12) & 7), false, src->gpu_chain ? src : nullptr, nullptr, nullptr, linear_out);
     if (dst == src) return false;
+    if (half_ss && screen_slice_experiment.load(std::memory_order_relaxed)) {
+        const float scale = screen_slice_scale(src->w, src->h, out_w, out_h, scaling, top_rows);
+        if (scale && dst->base_sx >= scale && dst->base_sy >= scale &&
+            (dst->base_sx > scale || dst->base_sy > scale)) {
+            // Shrink only: the original allocation remains large enough. The
+            // transfer below rewrites its picture; clear padding before it does.
+            GX2DrawDone();
+            dst->base_sx = dst->base_sy = scale;
+            apply_scale(*dst);
+            dst->first_use = true;
+            state_lost = true;
+            LOG("[gx2] screen-slice experiment: %08x %ux%u at %.1fx selected scale\n", out_paddr, out_w, out_h, scale);
+        }
+    }
     dst->gpu_chain |= src->gpu_chain;
     dst->copy = own_size_copy;
     dst->linear = linear_out;
@@ -3963,11 +4456,37 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     if (notes++ < 2) wiiu::note("copying surface %08x to %08x on the GPU", in_paddr, out_paddr);
     st_gpu_copies++;
     gx2_flush_cpu_batch();
+    // The copied window can be shorter than its power-of-two texture.
+    // Initialize the untouched rows too: real MEM2 allocations are not zeroed,
+    // and Ever Oasis's blur/bloom samples otherwise spread stale padding into
+    // the foreground. The other GPU texture-copy paths do this as well.
+    if (dst->first_use) {
+        dst->first_use = false;
+        GX2ClearColor(&dst->cb, 0, 0, 0, 0);
+        restore_context();
+    }
     flush_surface(*src);
-    GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, src->tex.surface.image, src->tex.surface.imageSize);
+    if (!src->depth) GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, src->tex.surface.image, src->tex.surface.imageSize);
     GX2SetColorBuffer(&dst->cb, GX2_RENDER_TARGET_0);
     cur_color = nullptr;
     begin_blit();
+    GX2Texture depth_tex;
+    if (src->depth) {
+        memset(&depth_tex, 0, sizeof depth_tex);
+        depth_tex.surface = src->db.surface;
+        depth_tex.surface.use = (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE);
+        depth_tex.viewNumMips = depth_tex.viewNumSlices = 1;
+        depth_tex.compMap = 0x00010203;
+        GX2InitTextureRegs(&depth_tex);
+        GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, depth_tex.surface.image, depth_tex.surface.imageSize);
+        GX2SetPixelShader(ps_depth_copy);
+        auto *u = (u32 *)ring_alloc(256, 256);
+        memset(u, 0, 256);
+        u[0] = swap_float(scaling ? 0.5f / in_w : 0.0f);
+        u[1] = swap_float(scaling == 2 ? 0.5f / src->tex_h : 0.0f);
+        GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_UNIFORM_BLOCK), u, 32);
+        GX2SetPixelUniformBlock(0, 32, u);
+    }
     GX2SetViewport(0, (float)dst->row0, (float)dst->sw, (float)(dst->sh - dst->row0), 0, 1);
     GX2SetScissor(0, dst->row0, dst->sw, dst->sh - dst->row0);
     float *q = (float *)ring_alloc(4 * 16 + 64, 64);
@@ -3978,8 +4497,8 @@ static bool gpu_copy_transfer(u32 in_paddr, u32 out_paddr, u32 in_dims, u32 out_
     memcpy(q, data, sizeof data);
     DCFlushRange(q, sizeof data);
     GX2SetAttribBuffer(0, sizeof data, 16, q);
-    GX2SetPixelTexture(&src->tex, 0);
-    GX2SetPixelSampler(&blit_sampler, 0);
+    GX2SetPixelTexture(src->depth ? &depth_tex : &src->tex, 0);
+    GX2SetPixelSampler(src->depth ? &lut_sampler : &blit_sampler, 0);
     GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
     state_lost = true;
     dst->gpu_newer = true;
@@ -4513,6 +5032,248 @@ void gx2_finish_list() {
 
 bool get_display_image_for(u32, u32, u32, const u32 **, int *, int *) { return false; }
 
+
+#ifdef RECOMP_RESUMABLE
+bool gx2_checkpoint(checkpoint::Image &im);
+static void release_state_surface(Surface &s) {
+    if (!s.shared_depth && s.image()) {
+        if (!s.mem1) free(s.image()); else if (GfxHeapFreeMEM1) GfxHeapFreeMEM1(s.image());
+    }
+}
+static void portable_surface_fields(checkpoint::Archive &a, Surface &s) {
+    a.fields(s.addr, s.w, s.h, s.fmt, s.depth, s.sx, s.sy, s.base_sx, s.base_sy,
+             s.dyn_level, s.dyn_f, s.sw, s.sh, s.tex_h, s.row0, s.gpu_newer, s.guest_newer,
+             s.written_since_flush, s.first_use, s.gpu_chain, s.copy, s.written, s.written_after,
+             s.drawn, s.last_use, s.linear, s.lcd_bottom, s.clear_pending, s.in_list, s.sampled, s.was_sampled);
+}
+struct PersistentTargets {
+    std::vector<std::unique_ptr<Surface>> owned;
+    std::vector<Surface *> pointers;
+    bool installed = false;
+    ~PersistentTargets() { for (auto &s : owned) release_state_surface(*s); }
+};
+static bool allocate_state_surface(Surface &s) {
+    // Fresh native resources: the file contains no GX2 object layouts/pointers.
+    GX2Surface &f = s.depth ? s.db.surface : s.cb.surface;
+    f = {}; f.dim = GX2_SURFACE_DIM_TEXTURE_2D; f.width = s.sw; f.height = s.sh;
+    f.depth = 1; f.mipLevels = 1; f.aa = GX2_AA_MODE1X; f.tileMode = GX2_TILE_MODE_DEFAULT;
+    if (s.depth) {
+        const bool sampled = s.fmt == 3 && g_game.program_id == 0x00040000001a4800ULL;
+        f.format = sampled ? GX2_SURFACE_FORMAT_FLOAT_X8_X24 : GX2_SURFACE_FORMAT_UNORM_R24_X8;
+        f.use = sampled ? (GX2SurfaceUse)(GX2_SURFACE_USE_DEPTH_BUFFER | GX2_SURFACE_USE_TEXTURE) : GX2_SURFACE_USE_DEPTH_BUFFER;
+        s.db.viewNumSlices = 1; s.db.depthClear = 1.0f;
+    } else {
+        f.format = GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8;
+        f.use = (GX2SurfaceUse)(GX2_SURFACE_USE_COLOR_BUFFER | GX2_SURFACE_USE_TEXTURE);
+        s.cb.viewNumSlices = 1;
+    }
+    GX2CalcSurfaceSizeAndAlignment(&f);
+    if (!f.imageSize || f.imageSize > 64u << 20) return false;
+    f.image = memalign(f.alignment, f.imageSize);
+    if (!f.image) return false;
+    for_gpu_writes(f.image, f.imageSize);
+    s.mem1 = s.shared_depth = false;
+    if (s.depth) GX2InitDepthBufferRegs(&s.db);
+    else {
+        GX2InitColorBufferRegs(&s.cb);
+        s.tex = {}; s.tex.surface = f; s.tex.viewNumMips = 1; s.tex.viewNumSlices = 1; s.tex.compMap = 0x00010203;
+        GX2InitTextureRegs(&s.tex);
+    }
+    return true;
+}
+static bool gx2_persist(checkpoint::Image &im) {
+    auto &a = *im.archive;
+    gx2_flush_cpu_batch(); GX2DrawDone();
+    u32 count = a.reading ? 0 : (u32)surfaces.size(); a.io(count);
+    if (count > 256) { a.fail("too many saved GPU surfaces"); return false; }
+    auto targets = std::make_shared<PersistentTargets>();
+    for (u32 i=0; a.ok && i<count; ++i) {
+        auto fresh = std::make_unique<Surface>();
+        Surface *p = a.reading ? fresh.get() : surfaces[i].get();
+        portable_surface_fields(a, *p);
+        if (!a.ok) return false;
+        if (!p->w || !p->h || p->w>4096 || p->h>4096 || !p->sw || !p->sh || p->sw>4096 || p->sh>4096 ||
+            p->tex_h < p->h || p->fmt>(p->depth ? 3u : 4u) || !std::isfinite(p->sx) || !std::isfinite(p->sy) || p->sx<=0 || p->sy<=0) {
+            a.fail("invalid saved GPU surface"); return false;
+        }
+        if (a.reading) {
+            if (!allocate_state_surface(*p)) { a.fail("cannot allocate saved GPU surface"); return false; }
+            targets->pointers.push_back(p); targets->owned.push_back(std::move(fresh));
+        }
+        GX2Surface linear = p->depth ? p->db.surface : p->cb.surface;
+        linear.tileMode = in_cemu ? GX2_TILE_MODE_LINEAR_SPECIAL : GX2_TILE_MODE_LINEAR_ALIGNED;
+        linear.image = linear.mipmaps = nullptr;
+        GX2CalcSurfaceSizeAndAlignment(&linear);
+        u32 size = linear.imageSize; a.io(size);
+        if (!a.ok || size != linear.imageSize || size>64u<<20) { a.fail("invalid saved GPU image size"); return false; }
+        if (!a.reading) {
+            linear.image = memalign(linear.alignment,size);
+            if (!linear.image) { a.fail("cannot stage saved GPU image"); return false; }
+            DCInvalidateRange(linear.image,size);
+            GX2CopySurface(p->depth ? &p->db.surface : &p->cb.surface,0,0,&linear,0,0);
+            restore_context(); draw_done(); DCInvalidateRange(linear.image,size);
+            a.raw(linear.image,size); free(linear.image); linear.image=nullptr;
+        } else {
+            auto pixels = im.copy_bytes(nullptr,size);
+            if (!pixels) return false;
+            a.raw(pixels->data,size);
+            if (!a.ok) return false;
+            auto metadata = std::make_shared<Surface>(*p);
+            auto upload = [p, linear, pixels, metadata] {
+                // Ownership fields describe the freshly allocated resource, not the old process.
+                const u32 pins = p->checkpoint_pins;
+                *p = *metadata; p->checkpoint_pins = pins;
+                GX2Surface from = linear;
+                from.image = memalign(from.alignment,from.imageSize);
+                if (!from.image) FATAL("no memory for restored GPU upload\n");
+                memcpy(from.image,pixels->data,from.imageSize); DCFlushRange(from.image,from.imageSize);
+                GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE,from.image,from.imageSize);
+                GX2CopySurface(&from,0,0,p->depth ? &p->db.surface : &p->cb.surface,0,0);
+                restore_context(); draw_done(); free(from.image);
+            };
+            upload(); // Allocate/upload before any guest state is changed.
+            im.restore.push_back(upload);
+            ++p->checkpoint_pins;
+            auto pin = std::shared_ptr<Surface>(p,[targets](Surface *surface) { --surface->checkpoint_pins; });
+            im.validate.push_back([pin, p, targets, metadata] {
+                if (!targets->installed) return true;
+                return std::any_of(surfaces.begin(),surfaces.end(),[p,metadata](const auto &s){
+                    return s.get()==p && s->checkpoint_identity==metadata->checkpoint_identity &&
+                           s->image()==metadata->image() && s->image_size()==metadata->image_size();
+                });
+            });
+        }
+    }
+    auto index = [&](Surface *p) {
+        if (!p) return 0u;
+        for (u32 i=0;i<count;++i) if ((a.reading ? targets->pointers[i] : surfaces[i].get())==p) return i+1;
+        a.fail("saved target reference is not in the surface table"); return 0u;
+    };
+    u32 color = a.reading ? 0 : index(cur_color), depth = a.reading ? 0 : index(cur_depth), owner = a.reading ? 0 : index(depth_owner);
+    a.fields(color,depth,owner);
+    std::vector<u32> reads;
+    if (!a.reading) for (auto *p : read_targets) reads.push_back(index(p));
+    a.io(reads);
+    std::array<LastTransfer,3> transfers{};
+    u32 transfer_indices[3]{};
+    for (u32 i=0;i<3;++i) {
+        if (!a.reading) { transfers[i]=last_transfer[i]; transfer_indices[i]=index(transfers[i].src); }
+        auto &t=transfers[i];
+        a.fields(transfer_indices[i],t.in_paddr,t.out_paddr,t.in_dims,t.out_dims,t.flags,t.out_size);
+    }
+    if (color>count || depth>count || owner>count || reads.size()>256) a.fail("invalid GPU target reference");
+    for (auto i:reads) if (i>count) a.fail("invalid GPU read-target reference");
+    for (auto i:transfer_indices) if (i>count) a.fail("invalid GPU transfer reference");
+    im.fields(gpu_writes,use_counter,memory_write_seq);
+    im.memory(memory_writes,sizeof memory_writes); // numeric physical addresses/lengths only
+    if (a.reading && a.ok) {
+        im.restore.push_back([targets,color,depth,owner,reads,transfers,indices=std::array<u32,3>{transfer_indices[0],transfer_indices[1],transfer_indices[2]}] {
+            std::set<Surface *> keep(targets->pointers.begin(),targets->pointers.end());
+            for (auto it=surfaces.begin();it!=surfaces.end();) {
+                if (keep.count(it->get())) {++it;continue;}
+                release_state_surface(**it); it=surfaces.erase(it);
+            }
+            if (!targets->installed) {
+                for (auto &s:targets->owned) surfaces.push_back(std::move(s));
+                targets->owned.clear(); targets->installed=true;
+            }
+            auto target=[&](u32 i)->Surface* {return i ? targets->pointers[i-1] : nullptr;};
+            cur_color=target(color); cur_depth=target(depth); depth_owner=target(owner);
+            read_targets.clear();for(auto i:reads) read_targets.push_back(target(i));
+            for(u32 i=0;i<3;++i){last_transfer[i]=transfers[i];last_transfer[i].src=target(indices[i]);}
+            memory_fills.standing.clear();memory_fills.notice_due=false; // derived acceleration cache
+            vtx_invalidate(0,~0u);
+            mark_textures(mem::FCRAM_PADDR,mem::LINEAR_SIZE,true);mark_textures(mem::VRAM_PADDR,mem::VRAM_SIZE,true);
+            state_sent_valid=false;state_lost=true;
+        });
+    }
+    if (!a.ok) return false;
+    if (!a.reading) {
+        auto *stream=im.archive;im.archive=nullptr;
+        const bool result=gx2_checkpoint(im);im.archive=stream;
+        return result;
+    }
+    return im.ok;
+}
+
+bool gx2_checkpoint(checkpoint::Image &im) {
+    if (im.archive) return gx2_persist(im);
+    gx2_flush_cpu_batch();
+    GX2DrawDone();
+    std::set<Surface *> saved_targets;
+    for (auto &surface : surfaces) {
+        Surface *p = surface.get();
+        saved_targets.insert(p);
+        const void *image = p->image();
+        const u32 bytes = p->image_size();
+        const u64 identity = p->checkpoint_identity;
+        auto pin = checkpoint_pin(p);
+        im.validate.push_back([pin, p, image, bytes, identity] {
+            for (auto &s : surfaces) if (s.get() == p) {
+                const bool valid = s->checkpoint_identity == identity && s->image() == image && s->image_size() == bytes;
+                if (!valid) LOG("[state] validation failed: GPU surface %08x changed identity/image/size\n", (u32)p);
+                return valid;
+            }
+            LOG("[state] validation failed: saved GPU surface %08x was retired\n", (u32)p);
+            return false;
+        });
+        // Surface has no owning destructor; native image ownership stays with
+        // the renderer. Validate its lifetime before any restore writes.
+        auto metadata = std::make_shared<Surface>(*p);
+        im.restore.push_back([p, metadata] { *p = *metadata; });
+        if (image && bytes) {
+            // Cemu keeps rendered pixels in host GPU textures. Reading its
+            // emulated tiled allocation directly can return stale CPU bytes.
+            // An explicit linear staging copy works on Cemu and hardware.
+            GX2Surface staging = p->depth ? p->db.surface : p->cb.surface;
+            staging.tileMode = in_cemu ? GX2_TILE_MODE_LINEAR_SPECIAL : GX2_TILE_MODE_LINEAR_ALIGNED;
+            staging.image = nullptr;
+            staging.mipmaps = nullptr;
+            GX2CalcSurfaceSizeAndAlignment(&staging);
+            staging.image = memalign(staging.alignment, staging.imageSize);
+            if (!staging.image) return false;
+            DCInvalidateRange(staging.image, staging.imageSize);
+            GX2CopySurface(p->depth ? &p->db.surface : &p->cb.surface, 0, 0, &staging, 0, 0);
+            restore_context(); draw_done();
+            DCInvalidateRange(staging.image, staging.imageSize);
+            auto pixels = im.copy_bytes(staging.image, staging.imageSize);
+            free(staging.image); staging.image = nullptr;
+            if (!pixels) return false;
+            im.restore.push_back([p, staging, pixels] {
+                GX2Surface upload = staging;
+                upload.image = memalign(upload.alignment, upload.imageSize);
+                if (!upload.image) FATAL("no memory for checkpoint GPU upload\n");
+                memcpy(upload.image, pixels->data, upload.imageSize);
+                DCFlushRange(upload.image, upload.imageSize);
+                GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, upload.image, upload.imageSize);
+                GX2CopySurface(&upload, 0, 0, p->depth ? &p->db.surface : &p->cb.surface, 0, 0);
+                restore_context(); draw_done();
+                free(upload.image);
+            });
+        }
+    }
+    im.take(cur_color); im.take(cur_depth); im.take(depth_owner); im.take(read_targets);
+    im.take(gpu_writes); im.take(use_counter); im.take(memory_fills);
+    im.memory(last_transfer, sizeof last_transfer);
+    im.memory(memory_writes, sizeof memory_writes); im.take(memory_write_seq);
+    im.restore.push_back([saved_targets] {
+        for (auto it = surfaces.begin(); it != surfaces.end();) {
+            if (saved_targets.count(it->get())) { ++it; continue; }
+            Surface &s = **it;
+            if (!s.shared_depth && s.image()) {
+                if (!s.mem1) free(s.image()); else if (GfxHeapFreeMEM1) GfxHeapFreeMEM1(s.image());
+            }
+            it = surfaces.erase(it);
+        }
+        vtx_invalidate(0, ~0u);
+        mark_textures(mem::FCRAM_PADDR, mem::LINEAR_SIZE, true);
+        mark_textures(mem::VRAM_PADDR, mem::VRAM_SIZE, true);
+        state_sent_valid = false;
+    });
+    return true;
+}
+#endif
+
 }  // namespace gpu
 
 namespace wiiu {
@@ -4618,6 +5379,7 @@ static void relieve_mem1() {
 }
 
 void gfx_thread_init() {
+    OSReport("[3dii-u startup] initializing GX2\n");
     int_floats.fill();
     WHBGfxInit();
     free_whb_depth();
@@ -4637,7 +5399,9 @@ void gfx_thread_init() {
     drc_cb = WHBGfxGetDRCColourBuffer();
     tv_720 = tv_to_720();
     tv_buffer_to_mem2();
+    OSReport("[3dii-u startup] loading shader tables\n");
     load_shader_tables();
+    OSReport("[3dii-u startup] shader tables loaded\n");
     load_pad_bezel();
     shader_compile_init();  // what the set lacks, the console compiles as it goes
     vs_ubo_loc = vs_passthrough->uniformBlockCount ? vs_passthrough->uniformBlocks[0].offset : 0;
@@ -4674,6 +5438,10 @@ void gfx_thread_init() {
     GX2ClearColor(drc_cb, 0, 0, 0, 1);
     restore_context();
     wiiu::fs_begin(0xC006);
+    draw_trace_enabled = wiiu::debug_flag("drawtrace");
+    if (draw_trace_enabled)
+        OSReport("[3dii-u draw] enabled: one frame per %u presents, up to %u distinct states\n",
+                 DRAW_TRACE_INTERVAL, DRAW_TRACE_CAPACITY);
     if (wiiu::debug_flag("dump")) dump_enabled = true;
     if (wiiu::debug_flag("cpuvs")) gxt_cpu_vs = true;
     if (wiiu::debug_flag("cputex")) gxt_cpu_tex = true;
@@ -4688,8 +5456,6 @@ void gfx_thread_init() {
     pad_layout = std::clamp(g_settings.pad_layout, 0, screens::kPadLayouts - 1);
     top_rows = start_resolution = g_settings.resolution == 240 || g_settings.resolution == 440 || g_settings.resolution == 480 ? g_settings.resolution : 720;  // "top1080" below can still change top_rows
     if (wiiu::debug_flag("dynres")) dyn_test = true;
-    if (wiiu::debug_flag("nocap")) cap_fps = 0;
-    if (cap_fps) LOG("[gx2] this game is held to %u frames a second\n", cap_fps);
     if (wiiu::debug_flag("uberall")) uber_all = true;
     if (wiiu::debug_flag("glslforce")) glsl_force = true;
     if (wiiu::debug_flag("noglslvs")) glsl_vs = false;
@@ -4705,6 +5471,15 @@ void gfx_thread_init() {
         top_rows = 1080;
         LOG("[gx2] top screen drawn at 1800x1080\n");
     }
+    if (has_darkmoon_profile()) {
+        light_guard_experiment.store(true, std::memory_order_relaxed);
+        copy_rect_experiment.store(true, std::memory_order_relaxed);
+        apply_darkmoon_profile();
+        LOG("[gx2] Dark Moon render mode %d: limit %u, selected scale %.2f\n",
+            std::clamp(g_settings.wiiu_render_mode, 0, 2), cap_fps, dyn_low);
+    }
+    if (wiiu::debug_flag("nocap")) cap_fps = 0;
+    if (cap_fps) LOG("[gx2] this game is held to %u frames a second\n", cap_fps);
     if (wiiu::debug_flag("stalecheck")) stale_check = true;
     if (FILE *f = fopen((wiiu::data_dir() + "/gxtrace").c_str(), "rb")) {
         if (fscanf(f, "%u %u", &gxt_from, &gxt_left) != 2) gxt_left = 0;
@@ -4716,6 +5491,31 @@ void gfx_thread_init() {
 }
 
 bool gfx_ready() { return gfx_is_ready; }
+
+void gfx_report_draw_trace() {
+    DrawTraceFrame frame;
+    {
+        std::lock_guard lock(draw_trace_mutex);
+        if (!draw_trace_ready.count)
+            return;
+        frame = draw_trace_ready;
+        draw_trace_ready.count = 0;
+    }
+    OSReport("[3dii-u draw] frame=%llu states=%u omitted_draws=%u\n",
+             (unsigned long long)frame.frame, frame.count, frame.overflow);
+    for (u32 i = 0; i < frame.count; ++i) {
+        const auto &d = frame.draws[i];
+        OSReport("[3dii-u draw] %u vs=%016llx fs=%016llx ps=%08x rt=%08x/%08x %ux%u depth=%08x/%08x flags=%06x blend=%06x mask=%08x\n",
+                 i, (unsigned long long)d.vs, (unsigned long long)d.fs, d.shader,
+                 d.color, d.depth, d.width, d.height, d.depth_scale, d.depth_offset,
+                 d.flags, d.blend, d.color_mask);
+        OSReport("[3dii-u draw] %u viewport=%.1f,%.1f,%.1f,%.1f tex0=%08x/%ux%u/%u tex1=%08x/%ux%u/%u tex2=%08x/%ux%u/%u\n",
+                 i, d.viewport[0], d.viewport[1], d.viewport[2], d.viewport[3],
+                 d.textures[0], d.textures[1], d.textures[2], d.textures[3],
+                 d.textures[4], d.textures[5], d.textures[6], d.textures[7],
+                 d.textures[8], d.textures[9], d.textures[10], d.textures[11]);
+    }
+}
 
 void gfx_take_misses(std::vector<u8> &out) {
     std::lock_guard<std::mutex> lk(miss_m);
@@ -4736,11 +5536,20 @@ void gfx_vblank() { vblank_pending = true; }
 // ---- options menu state; the input thread changes it, the GPU thread draws it
 // A game that's held to a frame rate (cap_game) has a line to let it run free, between the volume and quitting: its cutscenes are timed for
 // that rate, the rest of it may look better without (the user, 2026-11-14)
-static int menu_items() { return cap_game ? 12 : 11; }
+static int menu_items() {
+    return (cap_game ? 11 : 10)
+#ifdef RECOMP_RESUMABLE
+        + 2
+#endif
+#ifndef RECOMP_CLASSIC_MENU
+        + 2
+#endif
+        ;
+}
 static volatile bool menu_is_open;
 static volatile int menu_item, menu_speed = 100, menu_volume = 100;
+static std::atomic<int> debug_menu_request{-1}, debug_speed_request{0};
 static volatile bool menu_quit;
-static std::atomic<bool> menu_restore_confirm;
 
 // The game's language from its next start, as cfg.cpp will pick it (services/languages.h). settings.ini keeps a choice; the card thread
 // writes it (frontend_wiiu.cpp), as this one, the input thread, would wait out any save being written.
@@ -4782,24 +5591,38 @@ int game_speed() { return menu_speed; }
 bool menu_wants_quit() { return menu_quit; }
 void menu_quit_now() { menu_quit = true; }
 
+#ifndef RECOMP_CLASSIC_MENU
+static bool menu_restore_confirm;
+#endif
 void menu_input(u32 pressed, bool toggle) {
-    if (save_backup::requests.view().busy) return;  // keep the menu up until storage releases the snapshot
+#ifndef RECOMP_CLASSIC_MENU
+    if (save_backup::requests.view().busy) return;
+    if (toggle || (pressed & (VPAD_BUTTON_UP | VPAD_BUTTON_DOWN | VPAD_BUTTON_LEFT | VPAD_BUTTON_RIGHT)))
+        menu_restore_confirm = false;
+    if (menu_is_open && (pressed & VPAD_BUTTON_B) && menu_restore_confirm) {
+        menu_restore_confirm = false;
+        return;
+    }
+#endif
     if (!menu_is_open) {
         if (menu_allowed && toggle) {
             menu_item = 0;
-            menu_restore_confirm = false;
             menu_is_open = true;
         }
         return;
     }
-    if (toggle) { menu_restore_confirm = false; menu_is_open = false; return; }
-    if (pressed & VPAD_BUTTON_B) {
-        if (menu_restore_confirm) { menu_restore_confirm = false; return; }
-        menu_is_open = false;
-        return;
+    if (network_menu::active()) {
+        if(toggle && !network_keyboard::active()) {network_menu::close();return;}
+        network_menu::buttons(pressed);return;
     }
+    if (toggle || (pressed & VPAD_BUTTON_B)) { menu_is_open = false; return; }
     const int count = menu_items();
-    if (pressed & (VPAD_BUTTON_UP | VPAD_BUTTON_DOWN | VPAD_BUTTON_LEFT | VPAD_BUTTON_RIGHT)) menu_restore_confirm = false;
+#ifdef RECOMP_CLASSIC_MENU
+    const int network_item=count-2;
+#else
+    const int network_item=count-4;
+#endif
+    if(menu_item==network_item && (pressed&VPAD_BUTTON_A)) {network_menu::open();return;}
     if (pressed & VPAD_BUTTON_UP) menu_item = (menu_item + count - 1) % count;
     if (pressed & VPAD_BUTTON_DOWN) menu_item = (menu_item + 1) % count;
     const int dir = (pressed & VPAD_BUTTON_RIGHT) ? 1 : (pressed & VPAD_BUTTON_LEFT) ? -1 : 0;
@@ -4819,9 +5642,25 @@ void menu_input(u32 pressed, bool toggle) {
         g_settings.show_fps = !g_settings.show_fps;
         wiiu::settings_due = true;
     }
-    if (cap_game && menu_item == 8 && (dir || (pressed & VPAD_BUTTON_A))) cap_fps = cap_fps ? 0 : cap_game;
+    if (cap_game && menu_item == 8 && (dir || (pressed & VPAD_BUTTON_A))) {
+        if (has_darkmoon_profile()) {
+            g_settings.wiiu_render_mode = (std::clamp(g_settings.wiiu_render_mode, 0, 2) + (dir < 0 ? 2 : 1)) % 3;
+            apply_darkmoon_profile();
+            wiiu::settings_due = true;
+        } else cap_fps = cap_fps ? 0 : cap_game;
+    }
+#ifdef RECOMP_RESUMABLE
+    if (pressed & VPAD_BUTTON_A) {
+        const int save_item = cap_game ? 9 : 8;
+        if (menu_item == save_item || menu_item == save_item + 1) {
+            checkpoint::request(menu_item == save_item ? 4 : 2);
+            menu_is_open = false;
+        }
+    }
+#endif
     if (pressed & VPAD_BUTTON_A) {
         if (menu_item == 0) menu_is_open = false;
+#ifndef RECOMP_CLASSIC_MENU
         if (menu_item == count - 3) save_backup::requests.request(save_backup::Action::Export);
         if (menu_item == count - 2) {
             if (menu_restore_confirm) {
@@ -4829,13 +5668,85 @@ void menu_input(u32 pressed, bool toggle) {
                 menu_restore_confirm = false;
             } else menu_restore_confirm = true;
         }
+#endif
         if (menu_item == count - 1) menu_quit = true;
     }
 }
 
-// The options menu as the Wii U's Virtual Console draws its own (the user, 2026-11-16: "use the Wii U VC style for the menu"): a blue
-// ground, a heading band, the lines as light tiles in a dark frame with the chosen one ringed in cyan, and the buttons in a dark bar at the
-// foot, in the console's own font. It fills the screen on the TV and the GamePad alike: laid out for 480 rows, drawn in each one's pixels.
+#ifdef RECOMP_CLASSIC_MENU
+// Keep the original left-stick options overlay, including checkpoint controls.
+static void draw_menu_on(GX2ColorBuffer *cb) {
+    const u32 w = 854, h = 480;
+    GX2SetColorBuffer(cb, GX2_RENDER_TARGET_0);
+    cur_color = nullptr;
+    begin_blit();
+    GX2SetViewport(0, 0, (float)cb->surface.width, (float)cb->surface.height, 0, 1);
+    GX2SetScissor(0, 0, cb->surface.width, cb->surface.height);
+    GX2SetPixelTexture(&black_tex, 0);
+    GX2SetPixelSampler(&blit_sampler, 0);
+    set_blit_colors(0, 0, 0, 0.98f, 0.9f, 0.62f);
+    draw_rect(w, h, 127, 60, 727, 470, 0, 0, 1, 1);
+    set_blit_colors(0, 0, 0, 0.42f, 0.27f, 0.08f);
+    draw_rect(w, h, 127, 60, 727, 104, 0, 0, 1, 1);
+    const int count = menu_items();
+    const float rowh = count > 12 ? 24 : count > 10 ? 27 : count == 10 ? 33 : 36, top = 114;  // a tenth line (the frame limit): closer together, in the same box
+    set_blit_colors(0, 0, 0, 1.0f, 0.45f, 0.0f);
+    draw_rect(w, h, 145, top + menu_item * rowh - 4, 709, top + menu_item * rowh + (count > 10 ? 27 : count == 10 ? 32 : 38), 0, 0, 1, 1);
+    GX2SetPixelTexture(&font_tex, 0);
+    GX2SetPixelSampler(&lut_sampler, 0);
+    GX2SetColorControl(GX2_LOGIC_OP_COPY, 1, FALSE, TRUE);
+    GX2SetBlendControl(GX2_RENDER_TARGET_0, GX2_BLEND_MODE_SRC_ALPHA, GX2_BLEND_MODE_INV_SRC_ALPHA, GX2_BLEND_COMBINE_MODE_ADD, FALSE, GX2_BLEND_MODE_ONE, GX2_BLEND_MODE_ZERO, GX2_BLEND_COMBINE_MODE_ADD);
+    set_blit_colors(1, 1, 1, 0, 0, 0);
+    draw_text(w, h, "OPTIONS", 165, 68, 4);
+    set_blit_colors(0.2f, 0.1f, 0.0f, 0, 0, 0);
+    static const char *const k_languages[12] = {"JAPANESE", "ENGLISH", "FRENCH",  "GERMAN",     "ITALIAN", "SPANISH",
+                                                "CHINESE",  "KOREAN",  "DUTCH",   "PORTUGUESE", "RUSSIAN", "CHINESE (TW)"};
+    static const char *const k_tv_layouts[screens::kTvLayouts] = {"TOP SCREEN",      "SIDE BY SIDE",  "STACKED",
+                                                                  "BIG TOP + SMALL", "BOTTOM SCREEN", "BIG BOTTOM + SMALL", "TOP SCREEN (16:9)"};
+    static const char *const k_pad_layouts[screens::kPadLayouts] = {"BOTTOM SCREEN", "TOP SCREEN", "STACKED", "SIDE BY SIDE", "TOP SCREEN (16:9)"};
+    char line[48], vol[32], lang[40], tv[40], pad[40], res[32], cap[40];
+    snprintf(line, sizeof line, "GAME SPEED: %d%%", menu_speed);
+    snprintf(vol, sizeof vol, "VOLUME: %d%%", menu_volume);
+    snprintf(lang, sizeof lang, "LANGUAGE: %s", k_languages[menu_language()]);
+    snprintf(tv, sizeof tv, "TV: %s", k_tv_layouts[tv_layout % screens::kTvLayouts]);
+    snprintf(pad, sizeof pad, "GAMEPAD: %s", k_pad_layouts[pad_layout % screens::kPadLayouts]);
+    snprintf(res, sizeof res, "RESOLUTION: %dP", g_settings.resolution);
+    if (has_darkmoon_profile()) {
+        const char *modes[] = {"BALANCED", "SHARP", "FAST"};
+        snprintf(cap, sizeof cap, "MODE: %s", modes[std::clamp(g_settings.wiiu_render_mode, 0, 2)]);
+    } else if (cap_fps) snprintf(cap, sizeof cap, "FRAME LIMIT: %u", (unsigned)cap_fps);
+    else snprintf(cap, sizeof cap, "FRAME LIMIT: OFF");
+    const char *items[16] = {"BACK TO THE GAME", line, vol, lang, tv, pad, res, g_settings.show_fps ? "FPS COUNTER: ON" : "FPS COUNTER: OFF"};
+    int item_count = 8;
+    if (cap_game) items[item_count++] = cap;
+#ifdef RECOMP_RESUMABLE
+    items[item_count++] = "SAVE STATE";
+    items[item_count++] = checkpoint::has_state() ? "LOAD STATE" : "LOAD STATE (EMPTY)";
+#endif
+    items[item_count++] = "NETWORK SETTINGS";
+    items[item_count++] = "QUIT TO WII U MENU";
+    for (int i = 0; i < item_count; i++) {
+        draw_text(w, h, items[i], 165, top + i * rowh + 4, count > 10 ? 3 : 4);
+    }
+    set_blit_colors(0.45f, 0.3f, 0.15f, 0, 0, 0);
+    const char *hint = "A: CHOOSE   LEFT/RIGHT: CHANGE   B: BACK";
+    if (menu_item == 3 && menu_language() != kernel::cfg_language()) hint = "THE GAME CHANGES LANGUAGE WHEN IT NEXT STARTS";  // a game takes its language as it starts
+    if (menu_item == 5 && pad_layout == 1) hint = "TOUCH IS OFF WHILE THE GAMEPAD SHOWS THE TOP";
+    if (menu_item == 8 && has_darkmoon_profile()) {
+        const char *hints[] = {top_rows == 720 ? "BALANCED: 85% SCALE, 30 FPS LIMIT" : "BALANCED: 30 FPS LIMIT",
+                               "SHARP: FULL RESOLUTION, 30 FPS LIMIT", "FAST: UNCAPPED; TIMING MAY CHANGE"};
+        hint = hints[std::clamp(g_settings.wiiu_render_mode, 0, 2)];
+    }
+    if (menu_item == 6 && g_settings.resolution != start_resolution) hint = "RESOLUTION CHANGES WHEN THE GAME NEXT STARTS";  // targets keep their size
+#ifdef RECOMP_RESUMABLE
+    const int state_item = cap_game ? 9 : 8;
+    if (menu_item == state_item || menu_item == state_item + 1)
+        if (const char *result = checkpoint::result_message()) hint = result;
+#endif
+    draw_text(w, h, hint, 165, 446, 2);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
+}
+#else
 static void draw_menu_on(GX2ColorBuffer *cb) {
     const float W = (float)cb->surface.width, H = (float)cb->surface.height, k = H / 480;
     const u32 w = (u32)W, h = (u32)H;
@@ -4883,9 +5794,20 @@ static void draw_menu_on(GX2ColorBuffer *cb) {
     snprintf(res, sizeof res, "%dp", g_settings.resolution);
     if (cap_fps) snprintf(cap, sizeof cap, "%u fps", (unsigned)cap_fps);
     else snprintf(cap, sizeof cap, "Off");
-    const char *labels[12] = {"Back to Game", "Game Speed", "Volume", "Language", "TV Display", "GamePad Display", "Resolution", "FPS Counter", "Frame Limit"};
-    const char *values[12] = {"", speed, vol, k_languages[menu_language()], k_tv_layouts[tv_layout % screens::kTvLayouts],
+    const char *labels[16] = {"Back to Game", "Game Speed", "Volume", "Language", "TV Display", "GamePad Display", "Resolution", "FPS Counter", "Frame Limit"};
+    const char *values[16] = {"", speed, vol, k_languages[menu_language()], k_tv_layouts[tv_layout % screens::kTvLayouts],
                               k_pad_layouts[pad_layout % screens::kPadLayouts], res, g_settings.show_fps ? "On" : "Off", cap};
+    if (cap_game && has_darkmoon_profile()) {
+        const char *modes[] = {"Balanced", "Sharp", "Fast"};
+        labels[8] = "Rendering Mode";
+        values[8] = modes[std::clamp(g_settings.wiiu_render_mode, 0, 2)];
+    }
+#ifdef RECOMP_RESUMABLE
+    const int state_item = cap_game ? 9 : 8;
+    labels[state_item] = "Save State";
+    labels[state_item + 1] = checkpoint::has_state() ? "Load State" : "Load State (Empty)";
+#endif
+    labels[count - 4] = "Network settings";
     labels[count - 3] = "Back up Save to SD Card";
     labels[count - 2] = menu_restore_confirm ? "Confirm Restore Next Start (A)" : "Restore Newest Backup Next Start";
     labels[quit] = "Return to Wii U Menu";
@@ -4917,6 +5839,9 @@ static void draw_menu_on(GX2ColorBuffer *cb) {
     text(title, title_x + at(2), at(11) + at(2), 30, 0.04f, 0.07f, 0.16f);
     text(title, title_x, at(11), 30, 1, 1, 1);
     std::string status = save_backup::requests.view().message;
+#ifdef RECOMP_RESUMABLE
+    if (const char *result = checkpoint::result_message(); status.empty() && result) status = result;
+#endif
     if (menu_restore_confirm) status = "The newest SD backup will replace this save next start. A confirms; B cancels.";
     if (!status.empty()) {
         const bool shorten = text_w(status.c_str(), 11) > W - at(80);
@@ -4937,7 +5862,7 @@ static void draw_menu_on(GX2ColorBuffer *cb) {
     const float x0 = at(40), x1 = W - at(40), side = at(16), bar = at(9), bar_gap = at(3), arrow_size = at(11);
     for (int i = 0; i < count; i++) {
         const float y0 = at(first + i * (tile + gap)), y1 = at(first + i * (tile + gap) + tile), mid = (y0 + y1) / 2;
-        const bool chosen = i == menu_item, adjustable = i != 0 && i < count - 3;
+        const bool chosen = i == menu_item, adjustable = i != 0 && i < (cap_game ? 9 : 8);
         if (chosen) {
             paint(0.18f, 0.76f, 1.0f);
             draw_round_rect(w, h, x0 - at(4), y0 - at(4), x1 + at(4), y1 + at(4), at(11));
@@ -5006,7 +5931,121 @@ static void draw_menu_on(GX2ColorBuffer *cb) {
     }
     GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, cb->surface.image, cb->surface.imageSize);
 }
+#endif
+#ifdef RECOMP_RESUMABLE
+static bool loading_state_overlay;
+bool state_loading_visible() { return loading_state_overlay; }
+void show_state_loading(bool visible) {
+    loading_state_overlay=visible;
+    gpu::screen_fresh=true;
+    if(visible && tv_cb && drc_cb) {
+        // Submit before disk I/O blocks this GPU thread. Scanout keeps this
+        // immutable copy visible while state reconstruction is paused.
+        gpu::present();
+        GX2DrawDone();
+    }
+}
+void draw_state_saving_on(GX2ColorBuffer *cb) {
+    const u32 w=854,h=480;
+    GX2SetColorBuffer(cb,GX2_RENDER_TARGET_0);cur_color=nullptr;begin_blit();
+    GX2SetViewport(0,0,(float)cb->surface.width,(float)cb->surface.height,0,1);
+    GX2SetScissor(0,0,cb->surface.width,cb->surface.height);
+    GX2SetPixelTexture(&black_tex,0);GX2SetPixelSampler(&blit_sampler,0);
+    set_blit_colors(0,0,0,0.04f,0.04f,0.04f);draw_rect(w,h,630,444,848,478,0,0,1,1);
+    GX2SetPixelTexture(&font_tex,0);GX2SetPixelSampler(&lut_sampler,0);
+    GX2SetColorControl(GX2_LOGIC_OP_COPY,1,FALSE,TRUE);
+    GX2SetBlendControl(GX2_RENDER_TARGET_0,GX2_BLEND_MODE_SRC_ALPHA,GX2_BLEND_MODE_INV_SRC_ALPHA,GX2_BLEND_COMBINE_MODE_ADD,FALSE,GX2_BLEND_MODE_ONE,GX2_BLEND_MODE_ZERO,GX2_BLEND_COMBINE_MODE_ADD);
+    set_blit_colors(1,1,1,0,0,0);
+    char label[]="SAVING STATE  /";
+    label[14]="/-_>"[(OSTicksToMilliseconds(OSGetSystemTime())/150)%4];
+    draw_text(w,h,loading_state_overlay ? "LOADING STATE..." : label,640,452,2);
+    // Publish render-cache writes before the scan-buffer copy, as the menu
+    // and FPS overlays do. Cemu can appear coherent without this on hardware.
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER,cb->surface.image,cb->surface.imageSize);
+}
+#endif
+// Render on the temporary scanout copy, then restore the clean picture. A
+// paused game therefore cannot retain an expired chat card in its borders.
+static std::vector<std::string> border_chat;
+static screens::Rect border_chat_box;
+bool chat_visible() {
+    static u32 last_poll;
+    static int last_layout=-1,last_side;
+    static std::vector<network::ChatLine> lines;
+    if(!network::connected()){last_poll=0;return false;}
+    if(!network::chat_side() || menu_is_open || keyboard_open() || mii_selector_open())return false;
+    if(!network::chat_border(pad_layout,network::chat_side()==1,854,480,border_chat_box))return false;
+    const u32 now=azl::platform::NowMs();
+    const bool poll=!last_poll || now-last_poll>=250;
+    if(poll){lines=network::chat();last_poll=now;}
+    if(!poll && last_layout==pad_layout && last_side==network::chat_side())return !border_chat.empty();
+    last_layout=pad_layout;last_side=network::chat_side();
+    border_chat.clear();
+    const unsigned scale=border_chat_box.w<180?1:2;
+    const unsigned columns=std::max(1u,(border_chat_box.w-12)/(6*scale));
+    const unsigned rows=(border_chat_box.h-12)/(9*scale);
+    for(const auto &line:lines) if(now-line.when<15000) {
+        for(size_t at=0;at<line.text.size();at+=columns)
+            border_chat.push_back(line.text.substr(at,columns));
+    }
+    if(border_chat.size()>rows)border_chat.erase(border_chat.begin(),border_chat.end()-rows);
+    return !border_chat.empty();
+}
+void draw_chat_on(GX2ColorBuffer *cb) {
+    const auto &r=border_chat_box;
+    const unsigned scale=r.w<180?1:2;
+    const u32 height=12+border_chat.size()*9*scale,y=r.y+r.h-height;
+    GX2SetColorBuffer(cb,GX2_RENDER_TARGET_0);cur_color=nullptr;begin_blit();
+    GX2SetViewport(0,0,cb->surface.width,cb->surface.height,0,1);
+    GX2SetScissor(0,0,cb->surface.width,cb->surface.height);
+    GX2SetPixelTexture(&black_tex,0);GX2SetPixelSampler(&blit_sampler,0);
+    set_blit_colors(0,0,0,1,1,1);draw_rect(854,480,r.x,y,r.x+r.w,y+height,0,0,1,1);
+    GX2SetPixelTexture(&font_tex,0);GX2SetPixelSampler(&lut_sampler,0);
+    GX2SetColorControl(GX2_LOGIC_OP_COPY,1,FALSE,TRUE);
+    GX2SetBlendControl(GX2_RENDER_TARGET_0,GX2_BLEND_MODE_SRC_ALPHA,GX2_BLEND_MODE_INV_SRC_ALPHA,GX2_BLEND_COMBINE_MODE_ADD,FALSE,GX2_BLEND_MODE_ONE,GX2_BLEND_MODE_ZERO,GX2_BLEND_COMBINE_MODE_ADD);
+    set_blit_colors(0,0,0,0,0,0);
+    for(size_t i=0;i<border_chat.size();i++)draw_text(854,480,border_chat[i].c_str(),r.x+6,y+6+i*9*scale,scale);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER,cb->surface.image,cb->surface.imageSize);
+}
+static void draw_network_on(GX2ColorBuffer *cb) {
+    const auto view=network_menu::view();
+    const float w=854,h=480;
+    GX2SetColorBuffer(cb,GX2_RENDER_TARGET_0);cur_color=nullptr;begin_blit();
+    GX2SetViewport(0,0,cb->surface.width,cb->surface.height,0,1);
+    GX2SetScissor(0,0,cb->surface.width,cb->surface.height);
+    GX2SetColorControl(GX2_LOGIC_OP_COPY,1,FALSE,TRUE);
+    GX2SetBlendControl(GX2_RENDER_TARGET_0,GX2_BLEND_MODE_SRC_ALPHA,GX2_BLEND_MODE_INV_SRC_ALPHA,GX2_BLEND_COMBINE_MODE_ADD,FALSE,GX2_BLEND_MODE_ONE,GX2_BLEND_MODE_ZERO,GX2_BLEND_COMBINE_MODE_ADD);
+    auto rect=[&](float x,float y,float width,float height,float r,float g,float b){
+        GX2SetPixelTexture(&black_tex,0);GX2SetPixelSampler(&blit_sampler,0);set_blit_colors(0,0,0,r,g,b);draw_rect(w,h,x,y,x+width,y+height,0,0,1,1);
+    };
+    auto text=[&](std::string value,float x,float y,int scale,float r,float g,float b,unsigned max){
+        if(value.size()>max)value=value.substr(0,max-3)+"...";
+        for(char &c:value)if(static_cast<unsigned char>(c)<32)c=' ';
+        GX2SetPixelTexture(&font_tex,0);GX2SetPixelSampler(&lut_sampler,0);set_blit_colors(r,g,b,0,0,0);draw_text(w,h,value.c_str(),x,y,scale);
+    };
+    rect(0,0,w,h,.08f,.13f,.23f);rect(0,0,w,58,.12f,.24f,.41f);
+    text(view.title,24,16,3,1,1,1,43);
+    text(view.status,24,70,2,.68f,.84f,1,65);
+    using G=network::ListGesture;
+    GX2SetScissor(0,unsigned(G::top*cb->surface.height/h),cb->surface.width,unsigned((G::bottom-G::top)*cb->surface.height/h));
+    for(unsigned i=0;i<view.rows.size();i++) {
+        const float y=G::top+i*G::row-view.scroll;if(y+G::row<G::top||y>G::bottom)continue;
+        const auto &row=view.rows[i];bool selected=int(i)==view.selected;
+        rect(24,y,788,45,selected?.14f:.12f,selected?.43f:.20f,selected?.64f:.31f);
+        text(row.label,34,y+5,2,row.enabled?1:.5f,row.enabled?1:.5f,row.enabled?1:.5f,63);
+        text(row.value,34,y+25,2,.64f,.82f,.98f,63);
+    }
+    GX2SetScissor(0,0,cb->surface.width,cb->surface.height);
+    const float area=G::bottom-G::top,total=std::max(area,view.rows.size()*G::row);
+    const float thumb=std::clamp(area*area/total,24.f,area);
+    const float y=G::top+(area-thumb)*(view.scroll/std::max(1.f,total-area));
+    rect(818,G::top,30,area,.16f,.23f,.34f);rect(820,y,26,thumb,.35f,.77f,1.f);
+    text(view.hint,24,432,2,.8f,.88f,1,65);
+    text("B: BACK     A: CHOOSE     RIGHT STICK / TOUCH: SCROLL",24,460,2,.65f,.75f,.9f,65);
+    GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER,cb->surface.image,cb->surface.imageSize);
+}
 static void draw_menu() {
+    if(network_menu::active()) {draw_network_on(drc_cb);draw_network_on(tv_cb);tv_layout_shown=-1;state_lost=true;return;}
     draw_menu_on(drc_cb);
     draw_menu_on(tv_cb);
     tv_layout_shown = -1;  // once it closes, the TV is cleared before the game's next picture: the panel stood over the gaps between screens
@@ -5023,6 +6062,7 @@ static constexpr float KB_X = 107, KB_Y = 150, KB_W = 64, KB_H = 62;
 static constexpr float KB_NUMPAD_OFFSET = 90;
 static std::mutex kb_m;
 static std::atomic<bool> kb_active;
+static bool kb_network;
 static int kb_row = 1, kb_col = 0;
 static bool kb_shift;
 static std::string kb_text;
@@ -5051,7 +6091,7 @@ static bool kb_confirmable(const swkbd::Request &request, const std::string &tex
 }
 
 static bool kb_accepts(const swkbd::Request &request, const std::string &text, char c) {
-    if (text.size() >= 63 || (request.max_len > 0 && kb_units(text) >= request.max_len)) return false;
+    if (text.size() >= (kb_network ? network_keyboard::limit() : 63) || (request.max_len > 0 && kb_units(text) >= request.max_len)) return false;
     if (c >= '0' && c <= '9') {
         const auto digits = std::count_if(text.begin(), text.end(), [](char d) { return d >= '0' && d <= '9'; });
         return !request.digits_limited || digits < request.max_digits;
@@ -5092,7 +6132,12 @@ void keyboard_input(u32 pressed, bool touch_began, u16 x, u16 y) {
     {
         std::lock_guard<std::mutex> lock(kb_m);
         if (!kb_active) {
-            if (swkbd::pending(&kb_req)) {
+            if (network_keyboard::fallback_pending()) {
+                kb_req={};kb_req.hint=network_keyboard::label();kb_req.initial=network_keyboard::initial();
+                kb_req.max_len=network_keyboard::limit();kb_req.password=network_keyboard::secret();kb_req.numpad=network_keyboard::numeric();kb_req.can_cancel=true;
+                kb_text=kb_req.initial;kb_network=true;kb_active=true;kb_row=kb_req.numpad?0:1;kb_col=0;kb_shift=false;
+            } else if (swkbd::pending(&kb_req)) {
+                kb_network=false;
                 size_t n = std::min<size_t>(kb_req.initial.size(), 63);
                 while (n && ((unsigned char)kb_req.initial[n] & 0xc0) == 0x80) --n;
                 kb_text.assign(kb_req.initial, 0, n);
@@ -5130,7 +6175,7 @@ void keyboard_input(u32 pressed, bool touch_began, u16 x, u16 y) {
                 else kb_col = kb_columns[(kb_special(kb_col) + 5 + dx) % 5];
             }
             if (pressed & VPAD_BUTTON_A) choice = kb_press(kb_row, kb_col);
-            else if (pressed & VPAD_BUTTON_B) choice = kb_press(4, 6);    // delete
+            else if (pressed & VPAD_BUTTON_B) choice = kb_network ? -1 : kb_press(4, 6);    // delete
             else if (pressed & VPAD_BUTTON_Y) choice = kb_press(4, 0);    // shift
             else if (pressed & VPAD_BUTTON_X) choice = kb_press(4, 2);    // space
             else if (pressed & VPAD_BUTTON_PLUS) choice = kb_press(4, 8); // OK
@@ -5141,7 +6186,7 @@ void keyboard_input(u32 pressed, bool touch_began, u16 x, u16 y) {
             kb_active = false;
         }
     }
-    if (choice) swkbd::finish(result, choice > 0);
+    if (choice) {if(kb_network){kb_network=false;network_keyboard::fallback_finish(result,choice>0);}else swkbd::finish(result,choice>0);}
 }
 
 static bool draw_keyboard() {
@@ -5692,6 +6737,32 @@ static void show_bottom_lcd() {
 
 // (the GPU thread, after each look at its queue) quiet: it had nothing to do for its whole wait. present_rule.h says when a frame is shown.
 void gfx_pump(bool quiet) {
+    const int pause = debug_menu_request.exchange(-1, std::memory_order_relaxed);
+    if (pause >= 0) { menu_is_open = pause != 0; LOG("[debug] menu pause %s\n", pause ? "on" : "off"); }
+    const int speed = debug_speed_request.exchange(0, std::memory_order_relaxed);
+    if (speed) { menu_speed = speed; kernel::set_clock_speed(speed); LOG("[debug] game speed %d%%\n", speed); }
+
+    if (av_timing_enabled()) {
+        static OSTime since;
+        static u32 polls, blanks, idle, held;
+        static u32 pictures[2];
+        const OSTime now = OSGetSystemTime();
+        ++polls;
+        blanks += vblank_pending ? 1 : 0;
+        idle += quiet ? 1 : 0;
+        held += present_rule.fresh && present_rule.on_swaps() && !present_rule.swapped_drawn() ? 1 : 0;
+        if (!since) since = now;
+        if (now - since >= OSSecondsToTicks(2)) {
+            LOG("[present-time] polls %u vblanks %u quiet %u held %u pictures %u/%u fresh %x frame %x swap_due %x since_swap %u\n",
+                polls, blanks, idle, held,
+                st_pictures[0] >= pictures[0] ? st_pictures[0] - pictures[0] : st_pictures[0],
+                st_pictures[1] >= pictures[1] ? st_pictures[1] - pictures[1] : st_pictures[1],
+                present_rule.fresh, present_rule.frame, present_rule.swap_due, present_rule.since_swap);
+            pictures[0] = st_pictures[0]; pictures[1] = st_pictures[1];
+            polls = blanks = idle = held = 0;
+            since = now;
+        }
+    }
     if (!vblank_pending) {
         // the menu, the keyboard and the Mii list are drawn at a VBlank's look only, so while one is up nothing is shown in between
         if (!menu_is_open && !kb_active && !mii_selector_open() && present_rule.between(quiet)) {
@@ -5703,16 +6774,36 @@ void gfx_pump(bool quiet) {
     vblank_pending = false;
     show_lcd_from_memory();
     show_bottom_lcd();
+    const OSTime install_start = wiiu::av_timing_enabled() ? OSGetSystemTime() : 0;
     install_compiled();
+    if (install_start) {
+        const auto elapsed = OSTicksToMicroseconds(OSGetSystemTime() - install_start);
+        if (elapsed >= 5000)
+            LOG("[pace-shader-install] %llu us\n", (unsigned long long)elapsed);
+    }
     if (report_due.exchange(false)) write_report();
     shader_compile_watch();
+    static bool chat_was_visible;
+    const bool chat_now=chat_visible();
+    if(chat_now || chat_was_visible)screen_fresh=true;
+    chat_was_visible=chat_now;
     u32 mii_layout = 0;
     if (menu_is_open) {
         draw_menu();
+        if(network_menu::active() && network_keyboard::active()) {
+            if(!network_keyboard::draw()) draw_keyboard();
+            GX2SetContextState(ctx);cur_color=nullptr;
+        }
         screen_fresh = true;
     } else if (draw_keyboard() || draw_mii_selector(mii_layout)) {
         screen_fresh = true;
     }
+#ifdef RECOMP_RESUMABLE
+    static bool saving_was_visible;
+    const bool saving_now=checkpoint::saving_to_disk();
+    if (saving_now || saving_was_visible) screen_fresh=true;
+    saving_was_visible=saving_now;
+#endif
     static u32 swaps_seen[2];  // each screen's swaps (services/gsp.cpp) up to the last VBlank's look
     unsigned swapped = 0;
     for (int s = 0; s < 2; s++) {
@@ -5790,11 +6881,29 @@ u64 gfx_flips() { return st_flips; }
 
 // (net thread) a switch from the PC, from now on
 bool gfx_set(const char *name, u32 v) {
-    if (!strcmp(name, "uberall")) uber_all = v;
+    if (!strcmp(name, "slicescale") && v <= 1) {
+        screen_slice_experiment.store(v != 0, std::memory_order_relaxed);
+        LOG("[gx2] screen-slice experiment %s; relaunch to restore already resized targets\n", v ? "enabled" : "disabled");
+    }
+    else if (!strcmp(name, "fbuv") && v <= 1) fallback_uv_select.store(v != 0, std::memory_order_relaxed);
+    else if (!strcmp(name, "fbextra") && v <= 1) { material_extension.store(v != 0, std::memory_order_relaxed); forget_ps = true; }
+    else if (!strcmp(name, "fbfast") && v <= 3) {
+        bounded_fallback.store(v, std::memory_order_relaxed);
+        forget_ps = true;
+    }
+    else if (!strcmp(name, "uberall") && v <= 1) {
+        uber_all.store(v != 0, std::memory_order_relaxed);
+    }
     else if (!strcmp(name, "uberfb")) {
         uber_fallback = v;
         forget_ps = true;
-    } else if (!strcmp(name, "cpuvs")) gxt_cpu_vs = v;
+    } else if (!strcmp(name, "pause") && v <= 1) debug_menu_request.store((int)v, std::memory_order_relaxed);
+    else if (!strcmp(name, "speed") && (v == 100 || v == 200 || v == 400)) debug_speed_request.store((int)v, std::memory_order_relaxed);
+    else if (!strcmp(name, "cpuvs")) gxt_cpu_vs = v;
+    else if (!strcmp(name, "poolspin") && v<=1) g_pool_idle_spin.store(v!=0,std::memory_order_relaxed);
+    else if (!strcmp(name, "vssimd") && v<=1) g_cpu_vs_simd.store(v!=0,std::memory_order_relaxed);
+    else if (!strcmp(name, "cpuattr") && v <= 15) gxt_cpu_attr = v;
+    else if (!strcmp(name, "drawtrace") && v <= 1) draw_trace_enabled = v;
     else if (!strcmp(name, "vtxcache")) {  // the vertex data cache (vtx_cached); off drops what it holds
         use_vtx_cache = v;
         if (!v) vtx_drop_all = true;  // by the GPU thread, at its next flip
@@ -5803,7 +6912,15 @@ bool gfx_set(const char *name, u32 v) {
     else if (!strcmp(name, "halfss")) half_ss = v;  // a target its transfer scales down is drawn at the smaller size (note_downscaled); from the next one made
     else if (!strcmp(name, "capfps")) cap_fps = v;  // the game's frames a second (frame_cap_wait); 0 for as fast as it goes
     else if (!strcmp(name, "gsshared")) g_gs_shared = v;  // geometry shader runs on two threads (vertex.cpp: gs_run_shared)
-    else if (!strcmp(name, "gputime")) gt_on = v;  // the GPU's own time per pass (gt_mark), in the [prof] lines
+    else if (!strcmp(name, "indexcache") && v <= 3) index_range_experiment.store(v, std::memory_order_relaxed);
+    else if (!strcmp(name, "nudge") && (v <= 50 || v == 100)) viewport_nudge_override.store(v == 100 ? -1 : (int)v, std::memory_order_relaxed);
+    else if (!strcmp(name, "copyrect") && v <= 1) copy_rect_experiment.store(v != 0, std::memory_order_relaxed);
+    else if (!strcmp(name, "lightguard") && v <= 1) light_guard_experiment.store(v != 0, std::memory_order_relaxed);
+    else if (!strcmp(name, "cputime") && v <= 1) g_cpu_timing.store(v != 0, std::memory_order_relaxed);
+    else if (!strcmp(name, "gputime")) {  // the GPU's own time per pass (gt_mark), in the [prof] lines
+        gt_on = v;
+        live_gpu_timing.store(v != 0, std::memory_order_relaxed);
+    }
     else if (!strcmp(name, "dynres")) dyn_720 = v;           // the top screen's size follows the GPU at 720p too (dyn_res_update)
     else if (!strcmp(name, "toplevel")) dyn_force = v > 1 ? -1 : (int)v;  // 0 full size, 1 the lower, 2 as the GPU keeps up
     else if (!strcmp(name, "lowscale") && v >= 30 && v <= 100) dyn_low = v / 100.0f;  // the lower level's percent of full size each way
@@ -5837,7 +6954,7 @@ static void write_report() {
     static u32 last_busy;
     static u32 last_lcd_swaps[2];
     const OSTime now = OSGetSystemTime();
-    const float secs = last_t ? OSTicksToMicroseconds(now - last_t) / 1e6f : 1;
+    const float secs = std::max(0.001f, OSTicksToMicroseconds(now - (last_t ? last_t : renderer_started)) / 1e6f);
     const float fps = (st_flips - last_flips) / secs;
     const float busy = last_t ? (gpu_busy_us - last_busy) / (secs * 1e6f) * 100 : 0;
     LOG("[gx2] %.1f fps, gpu thread %.0f%% busy, %.0f draws/s, %llu on CPU, %llu fragment misses, %llu textures uploaded (%llu KB, %.1f ms, %llu decoded on the GPU), %u KB textures, %u surfaces\n",
@@ -5857,6 +6974,18 @@ static void write_report() {
         us(P_KEY), us(P_BIND), us(P_PS), us(P_STATE), us(P_UNI), us(P_TEX), us(P_HASH), us(P_TEXUP), us(P_TEXFL), us(P_VSUNI), us(P_RANGE), us(P_ATTR), us(P_DRAW),
         (list_ns - last_list_ns) / 1e6 / flips, ms(P_PRESENT), ms(P_WAIT), ms(P_SYNC), st_syncs / flips, st_luts / flips, draws / flips, ds_built / flips, st_flushes / flips, st_rehashes / flips, (u32)textures.size());
     last_list_ns = list_ns;
+    LOG("[prof] the game's pictures a second: top screen %.1f, bottom screen %.1f\n", st_pictures[0] / secs, st_pictures[1] / secs);
+    // Swap requests (Azahar's application-FPS counter), changed LCD buffers,
+    // and copied pictures are different events. Log them together before
+    // treating a 30-picture rate as 30 frames of guest execution.
+    static kernel::GspFrameStats previous_flow{};
+    const auto flow = kernel::gsp_frame_stats();
+    LOG("[frame-flow] per second: vblank %.1f; swap requests top %.1f bottom %.1f; buffer changes top %.1f bottom %.1f; copies top %.1f bottom %.1f; presents %.1f\n",
+        (u32)(flow.vblanks - previous_flow.vblanks) / secs,
+        (u32)(flow.requests[0] - previous_flow.requests[0]) / secs, (u32)(flow.requests[1] - previous_flow.requests[1]) / secs,
+        (u32)(flow.changes[0] - previous_flow.changes[0]) / secs, (u32)(flow.changes[1] - previous_flow.changes[1]) / secs,
+        st_pictures[0] / secs, st_pictures[1] / secs, fps);
+    previous_flow = flow;
     const u32 top_swaps = kernel::gsp_swaps(0), bottom_swaps = kernel::gsp_swaps(1);
     LOG("[prof] compositions/s: top %.1f, bottom %.1f | guest LCD swaps/s: top %.1f, bottom %.1f\n",
         st_pictures[0] / secs, st_pictures[1] / secs, (top_swaps - last_lcd_swaps[0]) / secs, (bottom_swaps - last_lcd_swaps[1]) / secs);
@@ -5882,10 +7011,29 @@ static void write_report() {
             n += snprintf(line + n, sizeof line - n, " (of which the vertex shader %.2f ms, the geometry shader's runs %.2f ms, of those about %.2f ms its EMITs: %.0f primitives)",
                           vtx_cpu.geometry_vs_ms / flips, vtx_cpu.geometry_gs_ms / flips, vtx_cpu.geometry_emit_ms / flips, vtx_cpu.geometry_prims / flips);
         if (n) LOG("[vtx] shaded on the CPU, per flip%s\n", line);
+        if (gpu_fallback_draws[0] || gpu_fallback_draws[1] || gpu_fallback_draws[2] || gpu_fallback_draws[3])
+            LOG("[fallback-route] missing vertex %llu; forced CPU %llu; missing geometry %llu; GPU resource limit %llu; CPU shader SIMD %u\n",
+                (unsigned long long)gpu_fallback_draws[0],(unsigned long long)gpu_fallback_draws[1],(unsigned long long)gpu_fallback_draws[2],(unsigned long long)gpu_fallback_draws[3],(unsigned)g_cpu_vs_simd.load());
+        for(auto &count:gpu_fallback_draws)count=0;
+        vtx_report_hotspots();
         vtx_cpu = {};
     }
+    LOG("[fragment-route] specialized %llu; generic unlit %llu lit %llu; simple %llu; material %llu; lighting %llu; extension %llu; bounded %u; forced %u\n",
+        (unsigned long long)st_fragment_specialized, (unsigned long long)st_fragment_fallback[0],
+        (unsigned long long)st_fragment_fallback[1], (unsigned long long)st_fragment_simple, (unsigned long long)st_material_draws, (unsigned long long)st_lighting_draws, (unsigned long long)st_extension_draws,
+        (unsigned)bounded_fallback.load(std::memory_order_relaxed), (unsigned)uber_all.load(std::memory_order_relaxed));
+    for (u32 lit = 0; lit < 2; ++lit) for (u32 stages = 0; stages <= 6; ++stages) for (u32 bucket = 0; bucket < 5; ++bucket) {
+        auto &count = st_fallback_shape[lit][stages][bucket];
+        if (count) LOG("[fragment-family] lit %u stages %u light_cap %u draws %llu\n", lit, stages, kUberLightCaps[bucket], (unsigned long long)count);
+        count = 0;
+    }
+    st_extension_draws = st_lighting_draws = st_material_draws = st_fragment_specialized = st_fragment_simple = st_fragment_fallback[0] = st_fragment_fallback[1] = 0;
     LOG("[prof] vertex data per draw: %.1f streams, %.0f vertices, %.1f KB; %.0f%% of streams from the cache (%u entries, %u KB)\n", st_attr_streams / draws,
         st_attr_verts / draws, st_attr_bytes / 1024.0 / draws, 100.0 * st_vtx_hits / std::max<u64>(st_vtx_hits + st_vtx_misses, 1), (u32)vtx_cache.size(), (u32)(vtx_cache_size >> 10));
+    LOG("[index-range] hits %llu misses %llu; CPU storage %u KB; enabled %u\n",
+        (unsigned long long)index_range_hits,(unsigned long long)index_range_misses,
+        (unsigned)(index_ranges.bytes()>>10),(unsigned)index_range_experiment.load(std::memory_order_relaxed));
+    index_range_hits=index_range_misses=0;
     st_attr_verts = st_attr_bytes = st_attr_streams = st_vtx_hits = st_vtx_misses = 0;
     if (ds_built > 10 * flips) {  // states built by the hundred per flip: which registers keep changing between the builds
         char line[200] = "";

@@ -12,7 +12,13 @@ import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools', 'win'))
-import build3ds  # noqa: E402
+if sys.platform == 'win32':
+    import build3ds
+else:
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'linux'))
+    from native_build import load_builder
+    import tempfile
+    build3ds = load_builder(os.path.join(tempfile.gettempdir(), '3dii-gs-selftest'))
 
 
 def main():
@@ -27,7 +33,7 @@ def main():
     subprocess.run([sys.executable, os.path.join(ROOT, 'tools', 'pica_to_c.py'), made] + gsl, check=True)
     objs = [f'{build3ds.WORK}/shadergen/{n}.o' for n in ('shader.cpp', 'shadergen_stubs.cpp')]
     cc = [c.replace('g++', 'gcc') if os.path.basename(c).startswith('g++') else c for c in build3ds.HOST_CXX]
-    subprocess.run(cc + ['-O1', '-c', made, '-o', out + '/gs_native.o'], check=True)
+    subprocess.run(cc + ['-O2', '-ffp-contract=off', '-fno-strict-aliasing', '-c', made, '-o', out + '/gs_native.o'], check=True)
     exe = out + '/test_gs_native.exe'
     subprocess.run(build3ds.HOST_CXX + ['-std=c++20', '-O1', '-w', f'-I{build3ds.PORT}/wiiu', f'-I{build3ds.PORT}/pc/win', f'-I{build3ds.PORT}/pc',
                                        f'-I{build3ds.RT}', f'-I{build3ds.RT}/gpu', '-include', f'{build3ds.PORT}/pc/shim.h', '-static',

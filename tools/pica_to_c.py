@@ -4,10 +4,11 @@
 A geometry shader has no GPU path on the Wii U: the runtime runs it in its PICA interpreter on the GPU thread, a couple of hundred cycles an
 instruction. Luigi's Mansion: Dark Moon's rain (90 instructions for each of 1600 vertices a frame) took 28 ms of every frame that way on a
 console (2026-11-13). A program logged in a .gsl file ("GS  " records: entry, code and swizzle word counts, the GS unit's whole code and swizzle
-memory, as port/wiiu/gx2_backend.cpp writes them) whose stretch from its entry runs straight through is written here as plain C: the same
+memory, as port/wiiu/gx2_backend.cpp writes them) whose stretch uses supported arithmetic and bounded control flow is written here as plain C: the same
 arithmetic as the interpreter's (pmul1, a dot product summed in the same order), on the same register file. A JMPC or JMPU to an END
 returns; a LOOP (not nested) is a loop, and a uniform addressed by its counter is found as the interpreter finds it. Anything else (calls,
-ifs, jumps elsewhere, addressing by a0) leaves that program to the interpreter.
+nonempty else blocks, conditionals mixed with loops, jumps elsewhere, addressing by a0) leaves that program to the interpreter.
+Bounded IFU/IFC regions without an else use ordinary C conditionals, with the same condition tests as the interpreter.
 
 The output is the game's own code translated, so it goes only into the build made from the user's own logs (build3ds.py), never into this
 repository. The runtime finds a function by its entry and a hash of the words it was made from (vertex.cpp: gs_native_find); check one
@@ -58,6 +59,7 @@ class Unsupported(Exception):
 def translate(entry, code, swz, fname):
     """(C source, end, swizzle entries used) for the program from entry, or Unsupported"""
     out, used, end, loop_end = [], set(), None, None
+    if_ends = []
     early_ends = set()
     pc = entry
     while True:
@@ -130,21 +132,35 @@ def translate(entry, code, swz, fname):
                 fop, refy, refx = (w >> 22) & 3, w >> 24 & 1, w >> 25 & 1
                 x, y = f'cond[0] == {refx}', f'cond[1] == {refy}'
                 o.append(f'if ({[f"({x}) || ({y})", f"({x}) && ({y})", x, y][fop]}) return 1;')
+        elif op in (0x27, 0x28):  # IFU / IFC, a bounded then-region with no else
+            dest, count = (w >> 10) & 0xfff, w & 0xff
+            if count or loop_end is not None:
+                raise Unsupported('an else block or a conditional inside a loop')
+            if dest <= pc or dest >= len(code) or (if_ends and dest > if_ends[-1]) or len(if_ends) >= 8:
+                raise Unsupported('an unstructured conditional region')
+            if op == 0x27:
+                condition = f'b[{(w >> 22) & 0xf}]'
+            else:
+                fop, refy, refx = (w >> 22) & 3, w >> 24 & 1, w >> 25 & 1
+                x, y = f'cond[0] == {refx}', f'cond[1] == {refy}'
+                condition = [f'({x}) || ({y})', f'({x}) && ({y})', x, y][fop]
+            out.append(f'    if ({condition}) {{  /* {pc:03x} */')
+            if_ends.append(dest)
         elif op == 0x2b:  # SETEMIT
             o.append(f'vid = {(w >> 24) & 3}; prim = {w >> 23 & 1}; wind = {w >> 22 & 1};')
         elif op == 0x2a:  # EMIT: the runtime copies the outputs, assembles, and turns the bank over
             o.append('emit(ctx, vid, prim, wind);')
         elif op == 0x29:  # LOOP: the body, to its last word, runs the int uniform's count + 1 times, the counter going up by its step
-            if loop_end is not None:
-                raise Unsupported('a loop in a loop')
+            if loop_end is not None or if_ends:
+                raise Unsupported('a nested loop or a loop inside a conditional')
             loop_end = (w >> 10) & 0xfff
             n = (w >> 22) & 3
             if loop_end <= pc or loop_end >= len(code):
                 raise Unsupported('a loop that ends before it starts')
             out.append(f'    aL = ui[{n}][1];\n    for (unsigned left = ui[{n}][0];; left--, aL += ui[{n}][2]) {{  /* {pc:03x} */')
         elif op == 0x22:  # END
-            if loop_end is not None:
-                raise Unsupported('an END inside a loop')
+            if loop_end is not None or if_ends:
+                raise Unsupported('an END inside a loop or conditional')
             end = pc + 1
         elif op != 0x21:  # NOP
             raise Unsupported(f'opcode {op:02x}')
@@ -153,6 +169,9 @@ def translate(entry, code, swz, fname):
         if pc == loop_end:
             out.append('    if (!left) break;\n    }')
             loop_end = None
+        while if_ends and pc + 1 == if_ends[-1]:
+            out.append('    }')
+            if_ends.pop()
         pc += 1
         if end is not None:
             break
@@ -169,68 +188,118 @@ def translate(entry, code, swz, fname):
 
 
 def independence(entry, end, code, swz):
-    """Whether a run of the stretch reads only what it wrote itself (and uniforms), so runs can be made in any order or at once, and
-    the output registers that hold this run's own values at every EMIT, as a mask: (independent, mask). The runtime runs a program's
-    primitives on two threads only if so, and only if the outputs it gathers are within the mask (vertex.cpp)."""
-    tmp = [0] * 16
-    out = [[0] * 16, [0] * 16]
-    bank, ok, mask = 0, True, 0xffff
+    """Conservative proof that native fixed-primitive invocations are independent.
 
+    Sources must be uniforms or lanes written in this invocation. Structured
+    loops run at least once; two turns cover bank parity. Return-to-END paths
+    need no join because they cannot feed subsequent instructions. IF regions,
+    nested loops, prior condition flags and first-invocation b15 remain rejected.
+    """
+    ok, mask = True, 0xffff
     def comp(d, which, i):
         return (d >> [5, 14, 23][which] >> (6 - 2 * i)) & 3
-
-    def read(reg, lane):
-        nonlocal ok
-        if reg < 0x10 or (reg < 0x20 and not tmp[reg - 0x10] >> lane & 1):
-            ok = False  # an input register, or a temporary's lane from before this run
-
-    for pc in range(entry, end):
-        w = code[pc]
-        op = w >> 26
-        if op >= 0x30:
-            d = swz[w & 0x1f] if (w & 0x1f) < len(swz) else 0
-            srcs = [(w >> 17) & 0x1f, (w >> 12) & 0x1f, (w >> 5) & 0x7f] if op < 0x38 else [(w >> 17) & 0x1f, (w >> 10) & 0x7f, (w >> 5) & 0x1f]
-            lanes = [i for i in range(4) if d >> (3 - i) & 1]
-            for which in range(3):
-                for i in lanes:
+    def clone(state):
+        return dict(tmp=state['tmp'][:],out=[r[:] for r in state['out']],bank=state['bank'],cond=state['cond'][:],seen=state['seen'],vid=state['vid'],prim=state['prim'])
+    def walk(start, stop, state, inside_loop=False):
+        nonlocal ok, mask
+        def read(reg, lane):
+            nonlocal ok
+            if reg < 0x10 or (reg < 0x20 and not state['tmp'][reg-0x10] >> lane & 1): ok = False
+        pc = start
+        while pc < stop:
+            w = code[pc]
+            op = w >> 26
+            pc += 1
+            if op >= 0x30:
+                d = swz[w & 0x1f] if (w & 0x1f) < len(swz) else 0
+                srcs = [(w >> 17) & 0x1f, (w >> 12) & 0x1f, (w >> 5) & 0x7f] if op < 0x38 else [(w >> 17) & 0x1f, (w >> 10) & 0x7f, (w >> 5) & 0x1f]
+                lanes = [i for i in range(4) if d >> (3 - i) & 1]
+                for which in range(3):
+                    for i in lanes:
+                        read(srcs[which], comp(d, which, i))
+                dn = (w >> 24) & 0x1f
+            elif op in ARITH or op in ARITHI:
+                d = swz[w & 0x7f] if (w & 0x7f) < len(swz) else 0
+                name = ARITHI[op] if op in ARITHI else ARITH[op]
+                srcs = [(w >> 14) & 0x1f, (w >> 7) & 0x7f] if op in ARITHI else [(w >> 12) & 0x7f, (w >> 7) & 0x1f]
+                lanes = [i for i in range(4) if d >> (3 - i) & 1]
+                if name in ('dp3', 'dp4'):
+                    uses = [(which, i) for which in (0, 1) for i in range(3 if name == 'dp3' else 4)]
+                elif name in ('rcp', 'rsq'):
+                    uses = [(0, 0)]
+                elif name in ('mov', 'flr'):
+                    uses = [(0, i) for i in lanes]
+                else:
+                    uses = [(which, i) for which in (0, 1) for i in lanes]
+                for which, i in uses:
                     read(srcs[which], comp(d, which, i))
-            dn = (w >> 24) & 0x1f
-        elif op in ARITH or op in ARITHI:
-            d = swz[w & 0x7f] if (w & 0x7f) < len(swz) else 0
-            name = ARITHI[op] if op in ARITHI else ARITH[op]
-            srcs = [(w >> 14) & 0x1f, (w >> 7) & 0x7f] if op in ARITHI else [(w >> 12) & 0x7f, (w >> 7) & 0x1f]
-            lanes = [i for i in range(4) if d >> (3 - i) & 1]
-            if name in ('dp3', 'dp4'):
-                uses = [(which, i) for which in (0, 1) for i in range(3 if name == 'dp3' else 4)]
-            elif name in ('rcp', 'rsq'):
-                uses = [(0, 0)]
-            elif name in ('mov', 'flr'):
-                uses = [(0, i) for i in lanes]
+                dn = (w >> 21) & 0x1f
+            elif op in (0x2e, 0x2f):
+                d = swz[w & 0x7f] if (w & 0x7f) < len(swz) else 0
+                for which, reg in ((0, (w >> 12) & 0x7f), (1, (w >> 7) & 0x1f)):
+                    for i in (0, 1):
+                        read(reg, comp(d, which, i))
+                for lane,shift in ((0,24),(1,21)):
+                    if (w >> shift) & 7 < 6: state['cond'][lane] = True
+                continue
+            elif op == 0x2b:
+                state['vid'], state['prim'] = (w >> 24) & 3, (w >> 23) & 1
+                continue
+            elif op == 0x2a:
+                mask &= sum(1 << r for r in range(16) if state["out"][state["bank"]][r] == 0xf)
+                if state['vid'] < 3:
+                    state['seen'] |= 1 << state['vid']
+                    if state['prim'] and state['seen'] != 7: ok = False # prior invocation's emitter slots
+                state["bank"] ^= 1
+                continue
+            elif op == 0x29:
+                last = (w >> 10) & 0xfff
+                if last < pc or last >= stop or inside_loop:
+                    ok = False
+                    continue
+                first = walk(pc, last + 1, clone(state), True)
+                # A LOOP runs at least once. Two iterations cover both output-bank
+                # parities; all other defined-lane facts only grow. Merge relative
+                # to the current bank, so following instructions cannot rely on a
+                # particular (uniform-dependent) number of EMITs.
+                second = walk(pc, last + 1, clone(first), True)
+                normalized = []
+                for candidate in (first, second):
+                    bank = candidate['bank']
+                    normalized.append([candidate['out'][bank], candidate['out'][bank ^ 1]])
+                state['tmp'] = [x & y for x,y in zip(first['tmp'],second['tmp'])]
+                state['out'] = [[x & y for x,y in zip(normalized[0][bank],normalized[1][bank])] for bank in (0,1)]
+                state['cond'] = [x and y for x,y in zip(first['cond'],second['cond'])]
+                state['seen'] = first['seen'] & second['seen']
+                if (first['vid'],first['prim']) != (second['vid'],second['prim']): ok = False
+                state['vid'],state['prim'] = first['vid'],first['prim']
+                state['bank'] = 0
+                pc = last + 1
+                continue
+            elif op in (0x2c, 0x2d):
+                dest = (w >> 10) & 0xfff
+                if dest >= len(code) or code[dest] >> 26 != 0x22:
+                    ok = False
+                if op == 0x2d:
+                    if (w >> 22) & 15 == 15: ok = False # b15 changes after the first invocation
+                else:
+                    fop = (w >> 22) & 3
+                    needed = (0,1) if fop < 2 else (0,) if fop == 2 else (1,)
+                    if any(not state['cond'][lane] for lane in needed): ok = False
+                continue # a return path cannot feed a later read in this invocation
+            elif op in (0x27, 0x28):
+                ok = False # keep bounded IFs conservative until branch facts are modelled
+                continue
             else:
-                uses = [(which, i) for which in (0, 1) for i in lanes]
-            for which, i in uses:
-                read(srcs[which], comp(d, which, i))
-            dn = (w >> 21) & 0x1f
-        elif op in (0x2e, 0x2f):
-            d = swz[w & 0x7f] if (w & 0x7f) < len(swz) else 0
-            for which, reg in ((0, (w >> 12) & 0x7f), (1, (w >> 7) & 0x1f)):
-                for i in (0, 1):
-                    read(reg, comp(d, which, i))
-            continue
-        elif op == 0x2a:
-            mask &= sum(1 << r for r in range(16) if out[bank][r] == 0xf)
-            bank ^= 1
-            continue
-        elif op in (0x29, 0x2d):  # a loop, or a bool's jump past some of it: what a run wrote isn't the same on every path. Not shared.
-            ok = False
-            continue
-        else:
-            continue
-        bits = sum(1 << i for i in lanes)
-        if dn < 0x10:
-            out[bank][dn] |= bits
-        else:
-            tmp[dn - 0x10] |= bits
+                continue
+            bits = sum(1 << i for i in lanes)
+            if dn < 0x10:
+                state["out"][state["bank"]][dn] |= bits
+            else:
+                state["tmp"][dn - 0x10] |= bits
+        return state
+    state = dict(tmp=[0]*16,out=[[0]*16,[0]*16],bank=0,cond=[False,False],seen=0,vid=0,prim=0)
+    walk(entry,end,state)
     return ok, mask if ok else 0
 
 

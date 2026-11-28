@@ -4,6 +4,7 @@ everything it wrote and comparing it back. Both go through the files a block at 
 
 pack_wup.py <title dir> <output dir>. The common key arrives as hex on stdin, so it's never in argv, a file or a log."""
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -110,6 +111,7 @@ def encrypt_hashed(title_key, content_id, parts, out):
 class Content:
     def __init__(self, cid, hashed, group, parent, flags):
         self.id, self.hashed, self.group, self.parent, self.flags = cid, hashed, group, parent, flags
+        self.content_id = cid  # FST/index and installed content identity are separate.
         self.files, self.size, self.h3, self.digest = [], 0, None, b''  # size: of the encrypted content
 
     @property
@@ -203,7 +205,8 @@ def entries_in(folder):
     return sum(1 + (entries_in(sub) if sub is not None else 0) for sub in folder.values())
 
 
-def build_fst(contents, tree, offsets):
+def build_fst(contents, tree, offsets, base_links=None):
+    base_links = base_links or {}
     strings = bytearray()
 
     def name(s):
@@ -228,7 +231,8 @@ def build_fst(contents, tree, offsets):
             if sub is None:
                 c, off, size = offsets[(d, prefix + n)]
                 assert off % FST_ALIGN_FILE == 0
-                entries.append(struct.pack('>I', name(n)) + struct.pack('>IIHH', off >> 5, size, c.flags, c.id))
+                link_flag = 0x80000000 if d == 'content' and prefix+n in base_links else 0
+                entries.append(struct.pack('>I', link_flag | name(n)) + struct.pack('>IIHH', off >> 5, size, c.flags, c.id))
                 index += 1
             else:
                 at = index
@@ -264,7 +268,7 @@ def build_fst(contents, tree, offsets):
 
 # ---- metadata files
 def build_tmd(contents, title_id, group, app_type, os_version, title_version=0):
-    records = b''.join(struct.pack('>IHHQ', c.id, c.id, c.type, c.size) + c.digest.ljust(0x20, b'\0') for c in contents)
+    records = b''.join(struct.pack('>IHHQ', c.content_id, c.id, c.type, c.size) + c.digest.ljust(0x20, b'\0') for c in contents)
     infos = struct.pack('>HH', 0, len(contents)) + hashlib.sha256(records).digest()
     infos = infos.ljust(0x24 * 0x40, b'\0')
     issuer = b'Root-CA00000003-CP0000000b'.ljust(0x40, b'\0')
@@ -303,13 +307,14 @@ def build_cert():
 
 
 # ---- proof: read the output back the way the console would
-def decrypted(out_dir, cid, ctype, size, digest, title_key):
+def decrypted(out_dir, cid, ctype, size, digest, title_key, content_id=None):
     """a content's plain bytes block by block, each checked against its hash as it comes"""
-    path = os.path.join(out_dir, f'{cid:08X}.app')
+    file_id = cid if content_id is None else content_id
+    path = os.path.join(out_dir, f'{file_id:08X}.app')
     assert os.path.getsize(path) == size, f'content {cid} size'
     with open(path, 'rb') as f:
         if ctype == TYPE_HASHED:
-            with open(os.path.join(out_dir, f'{cid:08X}.h3'), 'rb') as h:
+            with open(os.path.join(out_dir, f'{file_id:08X}.h3'), 'rb') as h:
                 assert sha1(h.read()) == digest, f'content {cid} h3'
             for n in range(size // 0x10000):
                 block = f.read(0x10000)
@@ -346,7 +351,9 @@ def same_files(parts, files, title):
         pass
 
 
-def verify(out_dir, title, tree, common_key, title_id):
+def verify(out_dir, title, tree, common_key, title_id, base_links=None):
+    base_links = base_links or {}
+    linked = set()
     read = lambda n: open(os.path.join(out_dir, n), 'rb').read()
     tik, tmd = read('title.tik'), read('title.tmd')
     assert len(read('title.cert')) == 0xA00 and len(tik) == 0x350
@@ -360,13 +367,14 @@ def verify(out_dir, title, tree, common_key, title_id):
     assert hashlib.sha256(infos).digest() == tmd[0x1E4:0x204], 'content info hash'
     assert hashlib.sha256(records).digest() == infos[4:0x24], 'record hash'
 
-    recs = {}
+    recs, content_ids = {}, {}
     for i in range(count):
         cid, idx, ctype, size = struct.unpack('>IHHQ', records[i * 0x30:i * 0x30 + 16])
-        assert cid == idx == i
-        recs[cid] = (ctype, size, records[i * 0x30 + 16:i * 0x30 + 36])
+        assert idx == i and cid not in content_ids.values()
+        content_ids[idx] = cid
+        recs[idx] = (ctype, size, records[i * 0x30 + 16:i * 0x30 + 36])
 
-    fst = b''.join(decrypted(out_dir, 0, *recs[0], title_key))
+    fst = b''.join(decrypted(out_dir, 0, *recs[0], title_key, content_id=content_ids[0]))
     assert fst[:4] == b'FST\0' and struct.unpack('>I', fst[8:12])[0] == count
     base = 0x20 + 0x20 * count
     total = struct.unpack('>I', fst[base + 8:base + 12])[0]
@@ -384,13 +392,21 @@ def verify(out_dir, title, tree, common_key, title_id):
         else:
             assert inside, f'{nm} is outside any folder'
             top, _, sub = inside[-1][1].partition('/')
-            held.setdefault(cid, []).append((a << 5, b, top, f'{sub}/{nm}' if sub else nm))
-    found = {(d, n) for files in held.values() for _, _, d, n in files}
+            relative = f'{sub}/{nm}' if sub else nm
+            if w & 0x80000000:
+                assert top=='content' and relative in base_links and b==base_links[relative] and a==0
+                assert cid in recs and flags==FLAGS_CONTENT
+                owner=struct.unpack_from('>Q',fst,0x20+cid*0x20+8)[0]
+                assert owner==title_id & ~(0xe<<32), 'base link owner mismatch'
+                linked.add((top,relative))
+            else:
+                held.setdefault(cid, []).append((a << 5, b, top, relative))
+    found = {(d, n) for files in held.values() for _, _, d, n in files} | linked
     want = {(d, n) for d, names in tree.items() for n in names}
-    assert found == want and sum(map(len, held.values())) == len(want), found ^ want
+    assert found == want and sum(map(len, held.values())) + len(linked) == len(want), found ^ want
     assert set(held) == set(recs) - {0}, 'a content holds no file'
     for cid, files in held.items():
-        same_files(decrypted(out_dir, cid, *recs[cid], title_key), files, title)
+        same_files(decrypted(out_dir, cid, *recs[cid], title_key, content_id=content_ids[cid]), files, title)
     return len(found), count
 
 
@@ -421,22 +437,65 @@ def pack(title, out_dir):
     if app_type != (0x80000000 if title_id >> 32 == 0x00050000 else 0x0800001B):
         raise ValueError('The title type must match a 3Dii U game or game update.')
     with open(os.path.join(title, 'meta', 'meta.xml'), encoding='utf8') as f:
-        if field(f.read(), 'title_id') != title_id:
-            raise ValueError('app.xml and meta.xml must name the same 3Dii U title.')
+        expected_meta_id = title_id if title_id >> 32 == 0x00050000 else title_id & ~(0xe << 32)
+        if field(f.read(), 'title_id') != expected_meta_id:
+            raise ValueError('meta.xml must identify the matching base game title.')
     check_title_replacement(out_dir, title_id)
-    # The file table names the title that holds each content: this one. For an update that is the 0005000E title itself; naming the base
-    # instead (versions 1-3, 2026-11-06) made the console look for the update's files in the base's data: "cannot open fs:/vol/content/exheader.bin".
-    parent_id = title_id
+    # Native update FSTs retain the BASE title as content owner, including
+    # changed files. Unchanged files require explicit 0x80 FST link entries.
+    # Verified against the user's original Nintendo update (658 link entries).
+    parent_id = expected_meta_id
+    base_links = {}
+    link_manifest = os.path.join(title,'.3dii-base-links.json')
+    if os.path.isfile(link_manifest):
+        manifest=json.load(open(link_manifest,encoding='utf-8'))
+        if title_id>>32 != 0x0005000e or int(manifest['base_title_id'],16)!=expected_meta_id:
+            raise ValueError("Base-content links must identify this update base title.")
+        base_links=manifest['files']
+        if not isinstance(base_links,dict) or len(base_links)>1000000: raise ValueError('Invalid base links')
+        for name,size in base_links.items():
+            if (not isinstance(name,str) or not name or name.startswith('/') or '\\' in name or
+                ':' in name or any(v in ('','.','..') for v in name.split('/')) or
+                any(ord(c)<32 or ord(c)==127 for c in name) or
+                not isinstance(size,int) or isinstance(size,bool) or not 0<=size<=0xffffffff or
+                os.path.lexists(os.path.join(title,'content',name))):
+                raise ValueError('Invalid or overlapping base-content link')
     title_key = hashlib.sha256(b'3ds-wiiu-recomp title key' + struct.pack('>Q', title_id)).digest()[:16]
 
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir)
     contents, tree = assign_contents(title, group, parent_id)
     offsets = build_contents(title, contents, title_key, out_dir)
+    if base_links:
+        owner=contents[-1]
+        assert owner.flags==FLAGS_CONTENT
+        tree['content']=sorted(tree['content']+list(base_links))
+        for name,size in base_links.items(): offsets[('content',name)]=(owner,0,size)
 
-    fst = build_fst(contents, tree, offsets)
+
+    used_ids = set()
+    def update_content_id(content):
+        # Use the digest already computed by packing, without another file pass.
+        # Changed bytes (including the FST's base-link records) must not reuse an
+        # installed content ID, even when a local test keeps the same version.
+        candidate=int.from_bytes(content.digest[:4],'big') | 0x80000000
+        while candidate in used_ids: candidate=((candidate+1)&0x7fffffff)|0x80000000
+        used_ids.add(candidate)
+        content.content_id=candidate
+    # Native base reinstalls need fresh content identities too: a new base
+    # manifest must not be hidden by the installer's same-version content cache.
+    changing_ids = title_id>>32 == 0x0005000e or ((title_id & 0xff000000)==0x1d000000)
+    if changing_ids:
+        for content in contents[1:]:
+            update_content_id(content)
+            for suffix in ('.app','.h3'):
+                old=os.path.join(out_dir,f'{content.id:08X}'+suffix)
+                if os.path.exists(old): os.replace(old,os.path.join(out_dir,f'{content.content_id:08X}'+suffix))
+
+    fst = build_fst(contents, tree, offsets, base_links)
     contents[0].size, contents[0].digest = len(fst), sha1(fst)
-    with open(os.path.join(out_dir, '00000000.app'), 'wb') as f:
+    if changing_ids: update_content_id(contents[0])
+    with open(os.path.join(out_dir, f'{contents[0].content_id:08X}.app'), 'wb') as f:
         f.write(cbc(title_key, content_iv(0), fst))
 
     with open(os.path.join(out_dir, 'title.tmd'), 'wb') as f:
@@ -446,7 +505,7 @@ def pack(title, out_dir):
     with open(os.path.join(out_dir, 'title.cert'), 'wb') as f:
         f.write(build_cert())
 
-    files, count = verify(out_dir, title, tree, common_key, title_id)
+    files, count = verify(out_dir, title, tree, common_key, title_id, base_links)
     print(f'title {title_id:016X}: {count} contents, {files} files, round trip verified')
     for n in sorted(os.listdir(out_dir)):
         print(f'{os.path.getsize(os.path.join(out_dir, n)):>9} {n}')

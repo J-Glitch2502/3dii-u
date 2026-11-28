@@ -59,10 +59,22 @@ with tempfile.TemporaryDirectory() as tmp:
     # the SD card a build goes onto, checked before it starts: a locked card (Windows' error 19) is said in plain words
     import pipeline  # noqa: E402
     locked = OSError(None, 'The media is write protected', 'D:\\3dii-u', 19)
+    locked.winerror = 19  # Exercise the Windows shape on POSIX hosts too.
     assert 'locked' in pipeline.card_error(locked), pipeline.card_error(locked)
     assert "couldn't be written to: Access is denied" in pipeline.card_error(OSError(13, 'Access is denied'))
     card = os.path.join(tmp, 'card')
     os.makedirs(card)
     pipeline.check_card(card)
     assert os.listdir(os.path.join(card, 'install')) == [], 'the check left its file on the card'
+with tempfile.TemporaryDirectory() as tmp:
+    from pathlib import Path
+    public = Path(__file__).resolve().parents[1]/'third_party/system_archives/0004009b00010402.romfs'
+    relative = next(iter(uf.PUBLIC_ARCHIVES))
+    exact = put(tmp, relative, public.read_bytes())
+    assert uf.bundled(tmp) == []
+    put(tmp,relative,b'other archive with the approved filename')
+    assert uf.bundled(tmp) == [exact]
+    os.remove(exact)
+    elsewhere = put(tmp,'engine/private/0004009b00010402.romfs',public.read_bytes())
+    assert uf.bundled(tmp) == [elsewhere]
 print('user files: ok')

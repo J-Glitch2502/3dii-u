@@ -28,6 +28,9 @@ void register_gsp();
 void register_hid();
 void register_dsp();
 void register_misc();
+#ifdef __WIIU__
+void shutdown_room_uds();
+#endif
 void register_ro();
 bool ro_has_modules();  // whether ldr:ro maps a static or dynamic module where the game says
 
@@ -52,6 +55,11 @@ struct FramebufferInfo {
 FramebufferInfo gsp_framebuffer(int screen);  // what the LCD shows (any thread)
 void gsp_vblank();                             // (host thread, lock not held) VBlank interrupts
 u32 gsp_swaps(int screen);                     // (any thread) the VBlanks at which that screen changed buffer, so far
+struct GspFrameStats {
+    u32 vblanks, requests[2], changes[2];
+};
+GspFrameStats gsp_frame_stats();  // one coherent snapshot, protected by the framebuffer mutex
+
 void gsp_process_gx();                         // (GPU/host thread) run queued GX commands
 extern volatile bool gx_hold;                  // while set, gsp_process_gx leaves the rest of the queue for later
 void gsp_cpu_wrote(u32 vaddr, u32 size);       // a service wrote guest memory the GPU may read
@@ -61,12 +69,15 @@ void register_cam();
 bool gsp_gx_pending();
 struct GxStats { u64 cmdlists, gpu_ns, transfers; };
 extern GxStats gx_stats;
+#ifdef __WIIU__
+void gsp_report_frame_gap();
+#endif
 // hid
 void hid_update(u32 buttons, s16 cx, s16 cy, bool touch, u16 tx, u16 ty);  // (host thread, lock not held)
 void hid_motion(const s16 *accel, const s16 *gyro);                        // (the thread that calls hid_update) x, y, z in the 3DS's units
 // ir (misc.cpp): the Circle Pad Pro a New 3DS answers with, from the host's second stick (-1..1, up positive) and ZL, ZR, R
 void hid_extra_pad(float x, float y, bool zl, bool zr, bool r);  // (host thread)
-void hid_extra_pad_live(u32 buttons);  // existing live R/ZL/ZR commands; axes remain physical
+void hid_extra_pad_live(u32 buttons);  // keep scripted extra-pad holds separate from physical refreshes
 bool extra_pad_connected();  // a game is reading it: ZL and ZR are its own then, not L and R as well
 // dsp
 void dsp_tick();  // (host thread, lock not held) one audio frame, played whether or not the game has come for the last one shortly
